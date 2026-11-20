@@ -50,20 +50,22 @@ Coverage is bounded by recorded questions and assessments, not a claim that an a
 
 ## Tests
 
-Backend tests use disposable synthetic directories, not real bounty data:
+The default safe selection uses disposable synthetic directories and excludes the test that launches the real BBH runtime:
 
 ```sh
-python3 -W error::ResourceWarning -m unittest discover -s tests -v
+python3 -W error::ResourceWarning tests/safe_suite.py
 ```
 
-Browser tests additionally require Node.js, npm, and a Chrome/Chromium executable:
+Browser tests require Node.js, npm, and a Chrome/Chromium executable. This selection excludes the separate synthetic-writer browser integration test:
 
 ```sh
 npm ci --ignore-scripts
-CHROME_BIN=/path/to/chrome npm test
+CHROME_BIN=/path/to/chrome node --test \
+  --test-skip-pattern='^browser metadata update reaches backend with a disposable synthetic writer$' \
+  static/tests/app.test.cjs
 ```
 
-The browser suite uses synthetic data. Its report-write tests use mocked capabilities, not a write-enabled report backend. The backend suite has an optional BBH integration test that runs only against a disposable fixture when the local launcher is present.
+These are **bounded selections**, not a full integration suite. The report-write tests use mocked capabilities, not a write-enabled report backend. The excluded BBH test invokes the actual local BBH launcher against a disposable fixture; run it only after explicitly evaluating and authorizing that workflow.
 
 ## Data and security
 
