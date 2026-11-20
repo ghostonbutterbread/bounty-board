@@ -228,9 +228,36 @@ def writer_available(writer):
         return False
 
 
-def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False):
+def valid_tailnet_host(host):
+    import re
+    label = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+    return (isinstance(host, str) and len(host) <= 253 and
+            re.fullmatch(fr'{label}\.{label}\.ts\.net', host) is not None)
+
+
+def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None):
+    if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
+        raise ValueError('invalid canonical tailnet hostname')
     root = Path(root).absolute()
     class Handler(BaseHTTPRequestHandler):
+        def trusted_request(self, require_origin=False):
+            port = self.server.server_port
+            hosts = self.headers.get_all('Host', [])
+            origins = self.headers.get_all('Origin', [])
+            sites = self.headers.get_all('Sec-Fetch-Site', [])
+            if len(hosts) != 1 or len(origins) > 1 or len(sites) > 1:
+                return False
+            host = hosts[0]
+            if host in {f'127.0.0.1:{port}', f'localhost:{port}'}:
+                expected = f'http://{host}'
+            elif tailnet_host and host in {tailnet_host, f'{tailnet_host}:443'}:
+                expected = f'https://{tailnet_host}'
+            else:
+                return False
+            if (require_origin and not origins) or (origins and origins[0] != expected):
+                return False
+            return not sites or sites[0] in (('same-origin',) if require_origin else ('same-origin', 'none'))
+
         def reply(self, status, payload, extra=None):
             data = json.dumps(payload, ensure_ascii=False).encode()
             self.send_response(status)
@@ -244,12 +271,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False)
 
         def do_GET(self):
             import hashlib
-            port = self.server.server_port
-            host = self.headers.get('Host', '')
-            origin = self.headers.get('Origin')
-            if (host not in {f'127.0.0.1:{port}', f'localhost:{port}'} or
-                    (origin is not None and origin != f'http://{host}') or
-                    self.headers.get('Sec-Fetch-Site', '') == 'cross-site'):
+            if not self.trusted_request():
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
             url = urlsplit(self.path)
@@ -317,12 +339,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False)
             import tempfile
             if urlsplit(self.path).path != '/api/finding':
                 return self.do_PUT()
-            port = self.server.server_port
-            host = self.headers.get('Host', '')
-            if (host not in {f'127.0.0.1:{port}', f'localhost:{port}'} or
-                self.headers.get_all('Host', []) != [host] or
-                self.headers.get_all('Origin', []) != [f'http://{host}'] or
-                self.headers.get('Sec-Fetch-Site', '') not in ('', 'same-origin') or
+            if (not self.trusted_request(require_origin=True) or
                 self.headers.get('X-Requested-With') != 'Bounty-Board' or
                 self.headers.get('Content-Type', '').lower() != 'application/json' or
                 self.headers.get('Transfer-Encoding')):
@@ -422,6 +439,7 @@ def parse_config(argv=None):
     parser.add_argument('--config', type=Path, help='JSON or TOML configuration file')
     parser.add_argument('--root', type=Path, help='data root (overrides config)')
     parser.add_argument('--port', type=int, help='listen port (overrides config)')
+    parser.add_argument('--tailnet-host', help='exact canonical Tailscale Serve DNS hostname (overrides config)')
     parser.add_argument('--bbh', type=Path, help='opt in to metadata writes with this BBH executable')
     parser.add_argument('--accept-uncoordinated-writes', action='store_true',
                         help='accept metadata write risk: concurrent edits can be overwritten; no shared compare-and-swap')
@@ -436,12 +454,14 @@ def parse_config(argv=None):
                 settings = tomllib.loads(raw.decode('utf-8'))
             else:
                 raise ValueError('expected .json or .toml')
-            if not isinstance(settings, dict) or set(settings) - {'root', 'port'}:
-                raise ValueError('expected only root and port keys')
+            if not isinstance(settings, dict) or set(settings) - {'root', 'port', 'tailnet_host'}:
+                raise ValueError('expected only root, port and tailnet_host keys')
             if 'root' in settings and (not isinstance(settings['root'], str) or not settings['root']):
                 raise ValueError('root must be a non-empty string')
             if 'port' in settings and (type(settings['port']) is not int or not 1 <= settings['port'] <= 65535):
                 raise ValueError('port must be an integer from 1 to 65535')
+            if 'tailnet_host' in settings and not valid_tailnet_host(settings['tailnet_host']):
+                raise ValueError('tailnet_host must be a canonical lowercase node.tailnet.ts.net hostname')
         except (OSError, ValueError, UnicodeError) as exc:
             parser.error(f'invalid config: {exc}')
     if args.root is None:
@@ -449,6 +469,9 @@ def parse_config(argv=None):
         if args.config and 'root' in settings and not args.root.is_absolute():
             args.root = args.config.absolute().parent / args.root
     args.port = args.port if args.port is not None else settings.get('port', 9001)
+    args.tailnet_host = args.tailnet_host if args.tailnet_host is not None else settings.get('tailnet_host')
+    if args.tailnet_host is not None and not valid_tailnet_host(args.tailnet_host):
+        parser.error('tailnet host must be a canonical lowercase node.tailnet.ts.net hostname')
     if not 1 <= args.port <= 65535:
         parser.error('port must be from 1 to 65535')
     return args
@@ -457,7 +480,8 @@ def parse_config(argv=None):
 def main():
     args = parse_config()
     make_server(args.root, args.port, writer=args.bbh,
-                accept_uncoordinated_writes=args.accept_uncoordinated_writes).serve_forever()
+                accept_uncoordinated_writes=args.accept_uncoordinated_writes,
+                tailnet_host=args.tailnet_host).serve_forever()
 
 
 if __name__ == '__main__':
