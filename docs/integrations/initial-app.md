@@ -7,8 +7,8 @@
 - **Intended integration target:** beta
 - **Last updated:** 2026-11-20
 - **Owning feature branch/ref:** feat/initial-app
-- **Latest immutable recovery checkpoint:** 5eff7052e5eef56d9c0e06a869f94bf99ab7468f
-- **Feature implementation commit(s):** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8, b57fe7f362125474c315fcbd6e880ef70620886f, b9d113019cd4ee2009bf672d3ccefe993b8cf851, 7701f9fef2dcf4ed34926b4980806a0a30d71aab, fb511b45cac681eaee94763c6f70fb98c340db09, 8ca163e1c7b55d88d6941d11f5dc091946c0e5c5, 135b48a2f5bdd1dfd4af18cd181e7904eea8a847, 5eff7052e5eef56d9c0e06a869f94bf99ab7468f.
+- **Latest immutable recovery checkpoint:** 441dfa2f85b934a6f429dd2c662d070d1bc5bfe8
+- **Feature implementation commit(s):** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8, b57fe7f362125474c315fcbd6e880ef70620886f, b9d113019cd4ee2009bf672d3ccefe993b8cf851, 7701f9fef2dcf4ed34926b4980806a0a30d71aab, fb511b45cac681eaee94763c6f70fb98c340db09, 8ca163e1c7b55d88d6941d11f5dc091946c0e5c5, 135b48a2f5bdd1dfd4af18cd181e7904eea8a847, 5eff7052e5eef56d9c0e06a869f94bf99ab7468f, 441dfa2f85b934a6f429dd2c662d070d1bc5bfe8.
 - **Inspiration / canonical references:** `docs/product.md`; user-approved mockup; BBH ledger, coverage, MapStore and storage ownership skills.
 
 ## Intent
@@ -41,10 +41,10 @@ The application discovers program and lane data and renders dashboard, coverage,
 ## Interruption / resume handoff
 
 - Owning feature branch/ref: feat/initial-app.
-- Latest immutable recovery checkpoint: 5eff7052e5eef56d9c0e06a869f94bf99ab7468f.
-- Feature implementation commit(s): 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8, b57fe7f362125474c315fcbd6e880ef70620886f, b9d113019cd4ee2009bf672d3ccefe993b8cf851, 7701f9fef2dcf4ed34926b4980806a0a30d71aab, fb511b45cac681eaee94763c6f70fb98c340db09, 8ca163e1c7b55d88d6941d11f5dc091946c0e5c5, 135b48a2f5bdd1dfd4af18cd181e7904eea8a847, 5eff7052e5eef56d9c0e06a869f94bf99ab7468f.
-- Exact resume point: reconcile targeted independent re-review of draft recovery fixes, checkpoint and push; source report writes remain disabled until a preservation strategy for uncoordinated writers is demonstrated. GitHub access is restored; origin/feat/initial-app was verified at abefac28e63a9a9cadefe7f54e091e8562a02b08. Do not repeat the terminal-blocked BBH fixture workflow without user consent.
-- Working-tree state: EasyMDE integration and docs are uncommitted while re-review compares the worktree to HEAD; preserve them intact.
+- Latest immutable recovery checkpoint: 441dfa2f85b934a6f429dd2c662d070d1bc5bfe8.
+- Feature implementation commits include 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8, b9d113019cd4ee2009bf672d3ccefe993b8cf851, 135b48a2f5bdd1dfd4af18cd181e7904eea8a847, 5eff7052e5eef56d9c0e06a869f94bf99ab7468f, and 441dfa2f85b934a6f429dd2c662d070d1bc5bfe8.
+- Exact resume point: decide how to deliver explicitly requested save-to-original with preservation against actual uncoordinated writers; retain browser draft editor and source-write disabled until demonstrated. Real-BBH browser fixture workflow remains explicitly blocked by the terminal safety gate and must not be retried without user consent. Typo.js 1.2.2 license notice source remains unverified.
+- Working-tree state: implementation committed; a later dossier-only checkpoint records this handoff.
 
 ## Decision gates
 
