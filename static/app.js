@@ -2,7 +2,7 @@
   'use strict';
   const app = document.querySelector('#app');
   const theme = document.querySelector('#theme');
-  const state = {data:null, view:'dashboard', section:'findings', program:'', lane:'', filters:{severity:'',class:'',status:'',query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, rationaleEdit:null};
+  const state = {data:null, view:'dashboard', section:'findings', program:'', lane:'', filters:{severity:'',class:'',status:'',query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], rationaleDrafts:new Map()};
   const sections = [['findings','Findings'],['coverage','Coverage'],['reports','Reports'],['map','MapStore'],['gadgets','Gadgets']];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const display = value => value == null || value === '' ? 'Unknown' : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -27,7 +27,7 @@
     }
     return draft;
   };
-  const hasUnsaved = () => [...state.drafts.values()].some(d => d.text !== d.original || d.inflight);
+  const hasUnsaved = () => state.metadataPending || [...state.drafts.values()].some(d => d.text !== d.original || d.inflight) || state.rationaleDrafts.size>0;
   window.addEventListener('beforeunload', event => { if (hasUnsaved()) { event.preventDefault(); event.returnValue = ''; } });
   function applyTheme(value) { if (!['light','dark','dusk'].includes(value)) value = 'light'; document.documentElement.dataset.theme=value; theme.value=value; try { localStorage.setItem('bounty-board-theme',value); } catch {} }
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
@@ -41,8 +41,9 @@
     if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
   }
   async function load() {
+    if(state.metadataPending || (state.loading && state.data)) return;
     state.loading=true; state.error=''; render();
-    try { const data=await BoardAPI.load(); if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response'); state.data=data; normalizeSelection(); }
+    try { const data=await BoardAPI.load(); if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response'); state.data=data; state.metadataErrors=[]; normalizeSelection(); }
     catch { state.error='Could not load workspace data. Check the local backend and try Refresh.'; state.data=null; }
     state.loading=false; render();
   }
@@ -95,10 +96,9 @@
     return `<select data-metadata="${key}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${cap?'aria-describedby="metadata-warning"':''} ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,v,v===value)).join('')}</select>`;
   }
   function rationale(row) {
-    const label=String(row.title||row.id||'finding'), edit=state.rationaleEdit;
+    const label=String(row.title||row.id||'finding'), edit=state.rationaleDrafts.get(reportKey(state.program,state.lane,row.id));
     const writable=BoardAPI.capability(state.data,'findingMetadata')?.textFields?.includes('severity_rationale') && row.id != null;
-    const active=edit && edit.program===state.program && edit.lane===state.lane && edit.id===String(row.id);
-    if(active && writable) return `<div class="rationale"><label>Severity rationale for ${esc(label)}<textarea data-rationale-input aria-label="Severity rationale for ${esc(label)}" aria-describedby="metadata-warning" rows="3" ${state.metadataPending?'disabled':''}>${esc(edit.text)}</textarea></label><button class="button" data-rationale-save aria-label="Save severity rationale for ${esc(label)}" aria-describedby="metadata-warning" ${state.metadataPending?'disabled':''}>Save rationale</button> <button class="button subtle" data-rationale-cancel ${state.metadataPending?'disabled':''}>Cancel</button></div>`;
+    if(edit) return `<div class="rationale"><p>Saved rationale: <span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span></p><label>Unsaved draft — Severity rationale for ${esc(label)}<textarea data-rationale-input="${esc(row.id)}" aria-label="Severity rationale for ${esc(label)}" aria-describedby="metadata-warning" rows="3" ${state.metadataPending?'disabled':''}>${esc(edit.text)}</textarea></label>${writable?`<button class="button" data-rationale-save="${esc(row.id)}" aria-label="Save severity rationale for ${esc(label)}" aria-describedby="metadata-warning" ${state.metadataPending?'disabled':''}>Save rationale</button>`:'<p class="hint">Saving unavailable; copy this draft before leaving.</p>'} <button class="button subtle" data-rationale-cancel="${esc(row.id)}" ${state.metadataPending?'disabled':''}>Cancel</button></div>`;
     return `<div class="rationale"><span>Severity rationale: </span><span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span>${writable?` <button class="link-button" data-rationale-edit="${esc(row.id)}" aria-label="Edit severity rationale for ${esc(label)}" ${state.metadataPending?'disabled':''}>Edit rationale</button>`:''}</div>`;
   }
   function findings() {
@@ -177,11 +177,14 @@
   }
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return records('map','MapStore','Mapped records from the selected lane.');case 'gadgets':return records('gadgets','Gadgets','Gadget records from the selected lane.');default:return '';}}
   function render() {
+    document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':'Programs';
     if(state.loading) app.innerHTML='<div class="panel state">Loading workspace…</div>';
     else if(state.error) app.innerHTML=`<div class="panel panel-pad"><h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
     else app.innerHTML=state.view==='dashboard'?dashboard():workspace();
+    if(state.metadataPending && !app.querySelector('#metadata-message')) app.insertAdjacentHTML('afterbegin','<div class="message warning" role="status">Updating metadata; waiting for confirmation. Displayed values are the last loaded or confirmed values.</div>');
+    if(state.metadataErrors.length) app.insertAdjacentHTML('afterbegin',state.metadataErrors.map(error=>`<div class="message warning" role="alert">${esc(error)}</div>`).join(''));
   }
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
@@ -190,18 +193,18 @@
     else if(target.dataset.section){state.section=target.dataset.section;render();}
     else if(target.hasAttribute('data-rationale-edit')){
       const row=(rows('findings')||[]).find(r=>String(r.id)===target.dataset.rationaleEdit);
-      if(row && !state.metadataPending){state.rationaleEdit={program:state.program,lane:state.lane,id:String(row.id),text:String(row.severity_rationale??'')};render();app.querySelector('[data-rationale-input]')?.focus();}
+      if(row && !state.metadataPending){const key=reportKey(state.program,state.lane,row.id), text=String(row.severity_rationale??'');if(!state.rationaleDrafts.has(key))state.rationaleDrafts.set(key,{program:state.program,lane:state.lane,id:String(row.id),text});render();app.querySelector(`[data-rationale-input="${CSS.escape(String(row.id))}"]`)?.focus();}
     }
-    else if(target.hasAttribute('data-rationale-cancel')){state.rationaleEdit=null;render();}
+    else if(target.hasAttribute('data-rationale-cancel')){state.rationaleDrafts.delete(reportKey(state.program,state.lane,target.dataset.rationaleCancel));render();}
     else if(target.hasAttribute('data-rationale-save')){
-      const edit=state.rationaleEdit, row=(rows('findings')||[]).find(r=>String(r.id)===edit?.id);
+      const draftKey=reportKey(state.program,state.lane,target.dataset.rationaleSave), edit=state.rationaleDrafts.get(draftKey), row=(rows('findings')||[]).find(r=>String(r.id)===edit?.id);
       if(!edit || !row || state.metadataPending || edit.program!==state.program || edit.lane!==state.lane || !BoardAPI.capability(state.data,'findingMetadata')?.textFields?.includes('severity_rationale'))return;
       const family=currentProgram()?.family, name=currentProgram()?.name; state.metadataPending=true;render();
       try {
         const response=await BoardAPI.write(state.data,'findingMetadata',{programId:edit.program,program:name,family,lane:edit.lane,findingId:edit.id,field:'severity_rationale',value:edit.text});
         if(response?.value!==edit.text)throw new Error('Unverified value');
-        row.severity_rationale=response.value;state.rationaleEdit=null;state.metadataPending=false;render();
-      } catch {state.metadataPending=false;render();const msg=document.querySelector('#metadata-message');if(msg)msg.textContent='Update failed or was not verified. The source may have changed; refresh before retrying. Your rationale draft remains in this tab.';}
+        row.severity_rationale=response.value;state.rationaleDrafts.delete(draftKey);state.metadataPending=false;render();
+      } catch {state.metadataPending=false;state.metadataErrors.push(`Update failed or was not verified for ${edit.program} / ${edit.lane} / ${edit.id} (severity rationale). The source may have changed; refresh before retrying. Your rationale draft remains in this tab.`);render();}
     }
   });
   app.addEventListener('change',async event=>{
@@ -214,12 +217,12 @@
       const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
       const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name;state.metadataPending=true;render();
       try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value; state.metadataPending=false;render();}
-      catch {state.metadataPending=false;render();const msg=document.querySelector('#metadata-message');if(msg)msg.textContent='Update failed or was not verified. The source may have changed; refresh before retrying.';}
+      catch {state.metadataPending=false;state.metadataErrors.push(`Update failed or was not verified for ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);render();}
     }
   });
   app.addEventListener('input',event=>{
     const el=event.target;
-    if(el.hasAttribute('data-rationale-input') && state.rationaleEdit)state.rationaleEdit.text=el.value;
+    if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(reportKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
     if(el.id==='finding-search'){const pos=el.selectionStart;state.filters.query=el.value;render();const input=document.querySelector('#finding-search');input?.focus();input?.setSelectionRange(pos,pos);}
     if(el.id==='report-source'){
       const report=reportById(state.report);if(!report)return;const draft=draftFor(report);draft.text=el.value;

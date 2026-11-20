@@ -349,6 +349,79 @@ test('explicitly read-only report never writes even when a capability exists', a
   await page.close();
 });
 
+test('multiple metadata failures remain visible until a successful refresh', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low'],status:['Draft','Open']}}};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/meta',route=>route.fulfill({status:500,body:'failed'}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('Low');
+    await page.getByText(/f1 \(severity\)/).waitFor();
+    await page.getByLabel('status for Example finding').selectOption('Open');
+    await page.getByText(/f1 \(status\)/).waitFor();
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    assert.ok(await page.getByText(/f1 \(severity\)/).isVisible());
+    assert.ok(await page.getByText(/f1 \(status\)/).isVisible());
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.getByRole('region',{name:'Severity breakdown'}).waitFor();
+    assert.equal(await page.getByText(/Update failed or was not verified/).count(),0);
+  } finally {await page.close();}
+});
+
+test('failed metadata stays visible after navigation away and back', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let release, started;
+  const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});
+  data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low']}}};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({status:500,body:'failed'});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();release();
+    await page.getByText(/Update failed or was not verified/).waitFor({timeout:3000});
+    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    assert.ok(await page.getByText(/Update failed or was not verified/).isVisible());
+    assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'High');
+  } finally {release();await page.close();}
+});
+
+test('pending metadata is visible when navigating to the dashboard', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let release, started;
+  const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});
+  data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low']}}};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    assert.ok(await page.getByText(/Updating metadata; waiting for confirmation/).isVisible());
+    release();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    assert.equal(await page.getByText(/Updating metadata; waiting for confirmation/).count(),0);
+  } finally {release();await page.close();}
+});
+
+test('pending metadata blocks refresh and updates the dashboard after navigation', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let release, started, loads=0;
+  const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});
+  data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low']}}};
+  await page.route('**/api/data',route=>{loads++;return route.fulfill({json:data});});
+  await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    assert.equal(await page.getByRole('button',{name:'Refresh'}).isDisabled(),true);
+    await page.locator('#refresh').dispatchEvent('click');assert.equal(loads,1);
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    release();
+    await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    assert.match(await page.getByRole('region',{name:'Severity breakdown'}).innerText(),/Low\s+1/);
+    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'Low');
+  } finally {release();await page.close();}
+});
+
 test('metadata updates show pending and serialize controls until verified', async () => {
   const page=await browser.newPage();const data=structuredClone(fixture);let release, started;
   const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});let writes=0;
@@ -440,6 +513,75 @@ test('coverage and report ownership remain readable across themes on mobile', as
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,themeName);
   }
   await page.close();
+});
+
+test('rationale drafts survive finding switches, navigation and refresh with unload warning', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'First finding',severity_rationale:'First saved'}, {fid:'F02',title:'Second finding',severity_rationale:'Second saved'}];
+  data.programs[0].lanes.push({name:'API',findings:[],coverage:[],reports:[],map:[],gadgets:[]});
+  data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('button',{name:'Edit severity rationale for First finding'}).click();
+    await page.getByRole('textbox',{name:'Severity rationale for First finding'}).fill('First draft');
+    await page.getByRole('button',{name:'Edit severity rationale for Second finding'}).click();
+    await page.getByRole('textbox',{name:'Severity rationale for Second finding'}).fill('Second draft');
+    await page.getByLabel('Lane').selectOption('API');
+    assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),true);
+    await page.getByLabel('Lane').selectOption('Web');
+    data.programs[0].lanes[0].findings[0].severity_rationale='Changed at source';
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.getByRole('textbox',{name:'Severity rationale for First finding'}).waitFor();
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for First finding'}).inputValue(),'First draft');
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Second finding'}).inputValue(),'Second draft');
+    const first=page.locator('tr').filter({hasText:'First finding'});
+    assert.match(await first.innerText(),/Saved rationale.*Changed at source/s);
+    assert.match(await first.innerText(),/Unsaved draft/i);
+  } finally {await page.close();}
+});
+
+test('a source change makes an untouched open rationale draft unsaved', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].findings[0].severity_rationale='Old source';
+  data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).click();
+    data.programs[0].lanes[0].findings[0].severity_rationale='New source';
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.getByText('New source',{exact:true}).waitFor();
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).inputValue(),'Old source');
+    assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),true);
+  } finally {await page.close();}
+});
+
+test('rationale save while navigated away updates only its own draft and confirmed value', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let release, started;
+  const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'First finding',severity_rationale:'First saved'}, {fid:'F02',title:'Second finding',severity_rationale:'Second saved'}];
+  data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',async route=>{started();await gate;const body=route.request().postDataJSON();await route.fulfill({json:{finding:{fid:body.fid,...body.patch}}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),false);
+    await page.getByRole('button',{name:'Edit severity rationale for First finding'}).click();
+    await page.getByRole('textbox',{name:'Severity rationale for First finding'}).fill('First draft');
+    await page.getByRole('button',{name:'Edit severity rationale for Second finding'}).click();
+    await page.getByRole('textbox',{name:'Severity rationale for Second finding'}).fill('Second draft');
+    await page.getByRole('button',{name:'Save severity rationale for First finding'}).click();await received;
+    assert.equal(await page.getByRole('button',{name:'Refresh'}).isDisabled(),true);
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();release();
+    await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    assert.ok(await page.getByText('First draft',{exact:true}).isVisible());
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Second finding'}).inputValue(),'Second draft');
+    assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),true);
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),false);
+  } finally {release();await page.close();}
 });
 
 test('severity rationale is visible and explicitly saved for its own finding', async () => {
