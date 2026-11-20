@@ -16,18 +16,18 @@
   };
   const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
+  function reconcileReport(draft,report) {
+    if(draft.source===report)return;
+    if(draft.status!=='conflict' && !draft.inflight && draft.text===draft.original && report.content!=null){draft.text=String(report.content);draft.original=draft.text;draft.revision=report.revision;draft.status='saved';}
+    else if(report.revision != null && draft.revision != null && report.revision!==draft.revision){clearTimeout(draft.timer);draft.status='conflict';}
+    draft.source=report;
+  }
   const draftFor = report => {
     const key = reportKey(state.program,state.lane,report.id);
     if (!state.drafts.has(key)) state.drafts.set(key,{key,program:state.program,lane:state.lane,id:String(report.id),text:String(report.content ?? ''),revision:report.revision,original:String(report.content ?? ''),status:'saved',timer:null,inflight:false,source:report});
-    const draft=state.drafts.get(key);
-    if(draft.source!==report){
-      if(!draft.inflight && draft.text===draft.original){draft.text=String(report.content??'');draft.original=draft.text;draft.revision=report.revision;draft.status='saved';}
-      else if(report.revision != null && draft.revision != null && report.revision!==draft.revision){clearTimeout(draft.timer);draft.status='conflict';}
-      draft.source=report;
-    }
-    return draft;
+    const draft=state.drafts.get(key);reconcileReport(draft,report);return draft;
   };
-  const hasUnsaved = () => state.metadataPending || [...state.drafts.values()].some(d => d.text !== d.original || d.inflight) || state.rationaleDrafts.size>0;
+  const hasUnsaved = () => state.metadataPending || [...state.drafts.values()].some(d => d.text !== d.original || d.inflight || d.status==='conflict') || state.rationaleDrafts.size>0;
   window.addEventListener('beforeunload', event => { if (hasUnsaved()) { event.preventDefault(); event.returnValue = ''; } });
   function applyTheme(value) { if (!['light','dark','dusk'].includes(value)) value = 'light'; document.documentElement.dataset.theme=value; theme.value=value; try { localStorage.setItem('bounty-board-theme',value); } catch {} }
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
@@ -40,12 +40,19 @@
     const lanes=list(currentProgram()?.lanes)||[];
     if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
   }
+  let pendingReportRefresh=null;
   async function load() {
-    if(state.metadataPending || (state.loading && state.data)) return;
+    if(state.metadataPending || pendingReportRefresh) return;
+    let finishRefresh;pendingReportRefresh=new Promise(resolve=>{finishRefresh=resolve;});
     state.loading=true; state.error=''; render();
-    try { const data=await BoardAPI.load(); if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response'); state.data=data; state.metadataErrors=[]; normalizeSelection(); }
+    try { const data=await BoardAPI.load(); if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response'); state.data=data; state.metadataErrors=[]; normalizeSelection();
+      for(const program of programs())for(const lane of list(program.lanes)||[])for(const report of list(lane.reports)||[]){
+        const draft=state.drafts.get(reportKey(String(program.id),String(lane.name),report.id));
+        if(draft && (report.content!=null || (report.revision!=null && (draft.inflight || draft.text!==draft.original || draft.status==='conflict'))))reconcileReport(draft,report);
+      }
+    }
     catch { state.error='Could not load workspace data. Check the local backend and try Refresh.'; state.data=null; }
-    state.loading=false; render();
+    state.loading=false;try{render();}finally{pendingReportRefresh=null;finishRefresh();}
   }
   const opt = (value,label,selected) => `<option value="${esc(value)}"${selected?' selected':''}>${esc(label)}</option>`;
   function warnings() {
@@ -237,10 +244,14 @@
     if(!reportWritable(draft)||draft.inflight||draft.status==='conflict'||draft.text===draft.original)return;
     const text=draft.text, revision=draft.revision; draft.inflight=true;draft.status='saving';refreshStatus(draft);
     try {
-      const result=await BoardAPI.write(state.data,'reportWrite',{programId:draft.program,lane:draft.lane,reportId:draft.id,content:text,revision});
+      let result, failure;
+      try {result=await BoardAPI.write(state.data,'reportWrite',{programId:draft.program,lane:draft.lane,reportId:draft.id,content:text,revision});} catch(error){failure=error;}
+      // A refresh started during this save must be reconciled before its reply can acknowledge anything.
+      while(pendingReportRefresh)await pendingReportRefresh;
+      if(failure)throw failure;
       if(result?.revision==null || result.content!==text)throw new Error('Unverified save');
-      draft.revision=result.revision;draft.original=text;draft.status=draft.text===text?'saved':'unsaved';
-    } catch(error){draft.status=error.status===409?'conflict':'error';}
+      if(draft.status!=='conflict'){draft.revision=result.revision;draft.original=text;draft.status=draft.text===text?'saved':'unsaved';}
+    } catch(error){if(draft.status!=='conflict')draft.status=error.status===409?'conflict':'error';}
     finally {draft.inflight=false;refreshStatus(draft);if(draft.status==='unsaved'){clearTimeout(draft.timer);draft.timer=setTimeout(()=>saveDraft(draft),600);}}
   }
   function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && state.program===draft.program && state.lane===draft.lane && state.report===draft.id)status.textContent=reportStatus(draft,reportWritable(draft));}
