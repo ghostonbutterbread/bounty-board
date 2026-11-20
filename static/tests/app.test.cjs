@@ -235,12 +235,211 @@ test('frontend boots against the real read-only backend with an empty synthetic 
     const url=`http://127.0.0.1:${Number(chunk.toString().trim())}`;
     page=await browser.newPage();const failures=[];
     page.on('response',response=>{if(response.status()>=400)failures.push(`${response.status()} ${response.url()}`);});
-    await page.goto(url);await page.getByText('No programs returned by the backend.').waitFor();
+    await page.goto(url);await page.getByText('Program discovery is unavailable or incomplete.').waitFor();
     assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.sidebar')).display),'flex');
     assert.deepEqual(failures,[]);
     await page.getByRole('button',{name:'Programs',exact:true}).click();
     assert.ok(await page.getByText('Configure the program root in the backend and refresh.').count());
   } finally {if(page)await page.close();if(proc.exitCode===null && proc.signalCode===null){const exited=once(proc,'exit');proc.kill('SIGTERM');await exited;}}
+});
+
+test('coverage separates mapped inventory from assessment questions and escapes evidence', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  const coverage={items:[],counts:{},total:0,mapped_kinds:{route:3,host:1},unclassified_surfaces:4};
+  data.programs[0].lanes[0].coverage=coverage;
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.goto(base);
+  assert.deepEqual(await page.evaluate(async()=> (await BoardAPI.load()).programs[0].lanes[0].coverage),coverage);
+  await page.getByRole('button',{name:'Programs',exact:true}).click();
+  assert.match(await page.locator('.summary-line').innerText(),/Assessment questions/);
+  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  assert.match(await page.locator('#app').innerText(),/Mapped inventory/);
+  assert.match(await page.locator('#app').innerText(),/route\s*:?\s*3/);
+  assert.match(await page.locator('#app').innerText(),/4.*(?:without|unclassified)/i);
+  assert.match(await page.locator('#app').innerText(),/No assessment questions/i);
+  await page.close();
+});
+
+test('coverage displays question counts and evidence as inert text', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].coverage={items:[{surface_key:'Synthetic route',status:'open',evidence_refs:['<img src=x onerror="window.pwned=1">','ref://synthetic']}],counts:{open:1},total:1,mapped_kinds:{route:1},unclassified_surfaces:0};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  assert.match(await page.locator('#app').innerText(),/Assessment counts/);
+  assert.match(await page.locator('#app').innerText(),/ref:\/\/synthetic/);
+  assert.equal(await page.locator('#app img').count(),0);
+  assert.equal(await page.evaluate(()=>window.pwned),undefined);
+  await page.close();
+});
+
+test('dashboard does not present incomplete discovery or partial reports as totals', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.warnings=['discovery_incomplete'];data.programs[0].lanes[0].warnings=['reports_unavailable_or_invalid'];
+  await page.route('**/api/data',route=>route.fulfill({json:data}));await page.goto(base);
+  for(const label of ['Programs loaded','Lanes loaded','Finding records','Report records']) {
+    assert.match(await page.locator('.stat').filter({hasText:label}).innerText(),/Unknown|partial/i,label);
+  }
+  await page.unroute('**/api/data');
+  data.warnings=[];
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.getByRole('button',{name:'Refresh'}).click();
+  await page.getByText('reports_unavailable_or_invalid').waitFor();
+  assert.match(await page.locator('.stat').filter({hasText:'Report records'}).innerText(),/Unknown/i);
+  assert.match(await page.locator('.stat').filter({hasText:'Finding records'}).innerText(),/1/);
+  await page.unroute('**/api/data');
+  await page.route('**/api/data',route=>route.fulfill({json:{programs:[],warnings:['root_unavailable']}}));
+  await page.getByRole('button',{name:'Refresh'}).click();
+  await page.getByText('root_unavailable').waitFor();
+  assert.match(await page.locator('.stat').filter({hasText:'Programs loaded'}).innerText(),/Unknown/i);
+  assert.doesNotMatch(await page.locator('#app').innerText(),/No programs returned/);
+  await page.close();
+});
+
+test('report picker identifies paths and backend-supplied ownership without guessing', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].reports=[
+    {path:'findings/one/final.md',name:'final.md',kind:'registered_report',owner_fids:['SYN-1'],content:'one'},
+    {path:'findings/two/final.md',name:'final.md',kind:'unregistered',owner_fids:[],content:'two'},
+    {path:'raw/index.md',name:'index.md',kind:'generated_navigation',content:'index'},
+    {path:'raw/generated.md',name:'generated.md',kind:'generated_report',content:'generated'},
+    {path:'raw/uncertain.md',name:'uncertain.md',kind:'unknown',content:'uncertain'},
+    {path:'legacy/final.md',name:'final.md',content:'legacy'}];
+  await page.route('**/api/data',route=>route.fulfill({json:data}));await openReport(page);
+  const options=await page.locator('#report-select option').allTextContents();
+  assert.match(options[0],/findings\/one\/final\.md/);assert.match(options[1],/findings\/two\/final\.md/);
+  assert.match(await page.locator('#app').innerText(),/Registered report/i);
+  assert.match(await page.locator('#app').innerText(),/SYN-1/);
+  await page.locator('#report-select').selectOption('findings/two/final.md');
+  assert.match(await page.locator('#app').innerText(),/Unregistered/i);
+  await page.locator('#report-select').selectOption('raw/index.md');
+  assert.match(await page.locator('#app').innerText(),/Generated navigation/i);
+  await page.locator('#report-select').selectOption('raw/generated.md');
+  assert.match(await page.locator('#app').innerText(),/Generated report/i);
+  await page.locator('#report-select').selectOption('raw/uncertain.md');
+  assert.match(await page.locator('#app').innerText(),/Ownership unknown/i);
+  await page.locator('#report-select').selectOption('legacy/final.md');
+  assert.match(await page.locator('#app').innerText(),/Ownership not provided/i);
+  await page.close();
+});
+
+test('metadata with no recorded value stays unknown until a confirmed update', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let writes=0;
+  data.programs[0].lanes[0].findings[0].severity=null;
+  data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low']}}};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/meta',route=>{writes++;return route.fulfill({status:500,body:'failed'});});
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  const severity=page.getByLabel('severity for Example finding');
+  assert.equal(await severity.inputValue(),'');
+  assert.equal(await severity.locator('option:checked').innerText(),'Unknown');
+  await severity.selectOption('Low');await page.getByText(/Update failed or was not verified/).waitFor();
+  assert.equal(await severity.inputValue(),'');assert.equal(writes,1);
+  await page.close();
+});
+
+test('explicitly read-only report never writes even when a capability exists', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let writes=0;
+  data.programs[0].lanes[0].reports[0].editable=false;
+  data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/report',route=>{writes++;return route.fulfill({status:500});});
+  await openReport(page);await page.locator('#report-source').fill('temporary');
+  await page.waitForTimeout(800);
+  assert.equal(writes,0);assert.match(await page.locator('#report-status').innerText(),/Saving unavailable/);
+  await page.close();
+});
+
+test('metadata updates show pending and serialize controls until verified', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let release, started;
+  const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});let writes=0;
+  data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low'],status:['Draft','Open']}}};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/meta',async route=>{writes++;started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    assert.ok(await page.getByText(/Updating metadata/).count());
+    assert.equal(await page.getByLabel('status for Example finding').isDisabled(),true);
+    release();await page.waitForFunction(()=>!document.querySelector('[data-metadata="severity"]')?.disabled);
+    assert.equal(writes,1);assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'Low');
+  } finally {release();await page.close();}
+});
+
+test('advertised BBH metadata capability sends the actual backend contract', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let payload,headers;
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',severity:'HIGH',class_name:'xss',status:'raw'}];
+  data.capabilities={finding_metadata:true,finding_fields:['severity','class_name','status','severity_rationale'],report_edit:false};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();headers=route.request().headers();return route.fulfill({json:{finding:{fid:'F01',severity:'LOW',class_name:'xss',status:'raw'}}});});
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  assert.match(await page.locator('.footnote').innerText(),/supported fields/i);
+  await page.getByLabel('severity for Synthetic BBH finding').selectOption('LOW',{timeout:2000});
+  await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='LOW' && !document.querySelector('[data-metadata="severity"]')?.disabled);
+  assert.deepEqual(payload,{family:'Test',program:'Example program',lane:'Web',fid:'F01',patch:{severity:'LOW'}});
+  assert.equal(headers['x-requested-with'],'Bounty-Board');
+  await page.close();
+});
+
+test('BBH class metadata uses the recorded class_name and verified owner ID', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let payload;
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',class_name:'xss'}];
+  data.capabilities={finding_metadata:true,finding_fields:['class_name']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();return route.fulfill({json:{finding:{fid:'F01',class_name:'sqli'}}});});
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  const input=page.getByLabel('class for Synthetic BBH finding');
+  assert.equal(await input.inputValue(),'xss');await input.fill('sqli',{timeout:2000});await input.press('Tab');
+  await page.waitForFunction(()=>document.querySelector('[data-metadata="class"]')?.value==='sqli' && !document.querySelector('[data-metadata="class"]')?.disabled);
+  assert.deepEqual(payload.patch,{class_name:'sqli'});
+  await page.close();
+});
+
+test('browser metadata update reaches backend with a disposable synthetic writer', async () => {
+  const {spawn}=require('node:child_process');const {once}=require('node:events');
+  const tmp=fs.mkdtempSync(path.join(process.env.TMPDIR||'/home/ryushe/.hermes/cache/scratch','board-ui-test-'));
+  const lane=path.join(tmp,'web_bounty','fictional','web');fs.mkdirSync(path.join(lane,'ledgers'),{recursive:true});fs.mkdirSync(path.join(lane,'reports'));
+  const ledger=path.join(lane,'ledgers','ledger.json');fs.writeFileSync(ledger,JSON.stringify({findings:[{fid:'F01',title:'Synthetic fixture',severity:'LOW'}]}));
+  const writer=path.join(tmp,'fixture-writer.py');
+  fs.writeFileSync(writer,`#!/usr/bin/python3\nimport sys,json\nfrom pathlib import Path\nif '--help' in sys.argv:\n print('--edit-finding --patch-file --root --family --lane');sys.exit(0)\np=Path(${JSON.stringify(ledger)})\nd=json.loads(p.read_text());d['findings'][0].update(json.loads(Path(sys.argv[sys.argv.index('--patch-file')+1]).read_text()));p.write_text(json.dumps(d))\n`);fs.chmodSync(writer,0o700);
+  const source='import sys, app; s=app.make_server(sys.argv[1],0,writer=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()';
+  const proc=spawn('python3',['-B','-u','-c',source,tmp,writer],{cwd:path.resolve(root,'..'),stdio:['ignore','pipe','pipe'],env:{...process.env,TMPDIR:tmp}});let page;
+  try {
+    const [chunk]=await Promise.race([once(proc.stdout,'data'),new Promise((_,reject)=>setTimeout(()=>reject(new Error('backend startup timeout')),5000))]);
+    page=await browser.newPage();await page.goto(`http://127.0.0.1:${Number(chunk.toString().trim())}`);
+    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Synthetic fixture').selectOption('HIGH');
+    await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='HIGH' && !document.querySelector('[data-metadata="severity"]')?.disabled);
+    assert.equal(JSON.parse(fs.readFileSync(ledger,'utf8')).findings[0].severity,'HIGH');
+  } finally {if(page)await page.close();if(proc.exitCode===null && proc.signalCode===null){const exited=once(proc,'exit');proc.kill('SIGTERM');await exited;}fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
+test('BBH metadata rejects a response for a different finding', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',severity:'HIGH'}];
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F02',severity:'LOW'}}}));
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.getByLabel('severity for Synthetic BBH finding').selectOption('LOW');
+  await page.getByText(/source may have changed; refresh/).waitFor();
+  assert.equal(await page.getByLabel('severity for Synthetic BBH finding').inputValue(),'HIGH');
+  await page.close();
+});
+
+test('coverage and report ownership remain readable across themes on mobile', async () => {
+  const page=await browser.newPage({viewport:{width:375,height:800}});const data=structuredClone(fixture);
+  data.programs[0].lanes[0].coverage={items:[],counts:{},total:0,mapped_kinds:{route:3},unclassified_surfaces:3};
+  data.programs[0].lanes[0].reports=[{path:'findings/long-synthetic-directory-name/final-report.md',kind:'registered_report',owner_fids:['F01'],content:'# Fixture'}];
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  for(const themeName of ['light','dark','dusk']) {
+    await page.getByLabel('Theme').selectOption(themeName);
+    assert.equal(await page.locator('html').getAttribute('data-theme'),themeName);
+    await page.getByRole('button',{name:'Coverage',exact:true}).click();assert.ok(await page.getByText('Mapped inventory').isVisible());
+    await page.getByRole('button',{name:'Reports',exact:true}).click();assert.ok(await page.getByText(/Registered report/).isVisible());
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,themeName);
+  }
+  await page.close();
 });
 
 after(async()=>{if(browser) await browser.close(); await new Promise(resolve=>server.close(resolve));});

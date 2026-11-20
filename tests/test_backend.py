@@ -32,6 +32,195 @@ class BackendTests(unittest.TestCase):
         conn.close()
         return result
 
+    def test_missing_writer_disables_writes_but_read_endpoint_works(self):
+        server = app.make_server(self.root, port=0, writer=self.root / 'missing-bbh')
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        old_server, old_port = self.server, self.port
+        self.server, self.port = server, server.server_port
+        try:
+            status, _, body = self.request('GET', '/api/data')
+            self.assertEqual(status, 200)
+            self.assertFalse(json.loads(body)['capabilities']['finding_metadata'])
+            headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            self.assertEqual(self.request('PATCH', '/api/finding', '{}', headers)[0], 503)
+        finally:
+            self.server, self.port = old_server, old_port
+            server.shutdown(); thread.join(); server.server_close()
+
+    def test_capability_reports_explicit_metadata_options(self):
+        writer = self.root / 'fake-bbh'
+        writer.write_text('#!/bin/sh\nprintf "%s\\n" "--edit-finding --patch-file --root --family --lane"\n')
+        writer.chmod(0o700)
+        server = app.make_server(self.root, port=0, writer=writer)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        old_server, old_port = self.server, self.port
+        self.server, self.port = server, server.server_port
+        try:
+            cap = json.loads(self.request('GET', '/api/data')[2])['capabilities']
+            self.assertTrue(cap['finding_metadata'])
+            self.assertIn('HIGH', cap['finding_options']['severity'])
+            self.assertIn('dormant', cap['finding_options']['status'])
+        finally:
+            self.server, self.port = old_server, old_port
+            server.shutdown(); thread.join(); server.server_close()
+
+    def test_writer_runtime_failure_disables_capability_without_affecting_reads(self):
+        writer = self.root / 'fake-bbh'
+        writer.write_text('#!/bin/sh\nif [ "$2" = "--help" ]; then printf "%s\\n" "--edit-finding --patch-file --root --family --lane"; exit 0; fi\nexit 1\n')
+        writer.chmod(0o700)
+        lane = self.root / 'web_bounty/fictional/web'
+        (lane / 'ledgers').mkdir(parents=True)
+        (lane / 'reports').mkdir()
+        (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]}))
+        server = app.make_server(self.root, port=0, writer=writer)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        old_server, old_port = self.server, self.port
+        self.server, self.port = server, server.server_port
+        try:
+            payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
+            headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            self.assertEqual(self.request('PATCH', '/api/finding', json.dumps(payload), headers)[0], 502)
+            status, _, body = self.request('GET', '/api/data')
+            data = json.loads(body)
+            self.assertEqual(status, 200)
+            self.assertFalse(data['capabilities']['finding_metadata'])
+            self.assertEqual(data['programs'][0]['lanes'][0]['findings'][0]['severity'], 'LOW')
+        finally:
+            self.server, self.port = old_server, old_port
+            server.shutdown(); thread.join(); server.server_close()
+
+    def test_write_refuses_context_symlink_before_launching_writer(self):
+        writer = self.root / 'fake-bbh'
+        marker = self.root / 'launched'
+        writer.write_text('#!/bin/sh\nif [ "$2" = "--help" ]; then printf "%s\\n" "--edit-finding --patch-file --root --family --lane"; else touch "' + str(marker) + '"; fi\n')
+        writer.chmod(0o700)
+        lane = self.root / 'web_bounty/fictional/web'
+        (lane / 'ledgers').mkdir(parents=True)
+        (lane / 'reports').mkdir()
+        (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01'}]}))
+        (lane / 'context').symlink_to(self.root, target_is_directory=True)
+        server = app.make_server(self.root, port=0, writer=writer)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        old_server, old_port = self.server, self.port
+        self.server, self.port = server, server.server_port
+        try:
+            payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
+            headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
+            self.assertEqual(status, 409, body)
+            self.assertFalse(marker.exists())
+            (lane / 'context').unlink()
+            inaccessible = lane / 'reports/private'
+            inaccessible.mkdir()
+            inaccessible.chmod(0)
+            try:
+                status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
+                self.assertEqual(status, 409, body)
+                self.assertFalse(marker.exists())
+            finally:
+                inaccessible.chmod(0o700)
+        finally:
+            self.server, self.port = old_server, old_port
+            server.shutdown(); thread.join(); server.server_close()
+
+    def test_write_verification_checks_v2_current_status_too(self):
+        writer = self.root / 'fake-bbh'
+        writer.write_text('#!/bin/sh\nif [ "$2" = "--help" ]; then printf "%s\\n" "--edit-finding --patch-file --root --family --lane"; fi\nexit 0\n')
+        writer.chmod(0o700)
+        lane = self.root / 'web_bounty/fictional/web'
+        (lane / 'ledgers').mkdir(parents=True)
+        (lane / 'reports').mkdir()
+        (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01', 'status': 'dormant', 'current': {'status': 'raw'}}]}))
+        server = app.make_server(self.root, port=0, writer=writer)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        old_server, old_port = self.server, self.port
+        self.server, self.port = server, server.server_port
+        try:
+            payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'status': 'dormant'}}
+            headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
+            self.assertEqual(status, 502, body)
+            self.assertEqual(json.loads(body)['error'], 'verification_failed')
+            self.assertFalse(json.loads(self.request('GET', '/api/data')[2])['capabilities']['finding_metadata'])
+        finally:
+            self.server, self.port = old_server, old_port
+            server.shutdown(); thread.join(); server.server_close()
+
+    def test_real_bbh_metadata_write_on_disposable_fixture(self):
+        import os
+        import subprocess
+        from unittest.mock import patch
+        bbh = Path('/home/ryushe/.local/bin/bbh')
+        if not bbh.exists():
+            self.skipTest('real BBH runtime unavailable')
+        home = self.root / 'isolated-home'
+        home.mkdir()
+        data_root = self.root / 'synthetic-root'
+        data_root.mkdir()
+        env = {'HOME': str(home), 'TMPDIR': str(self.root), 'PATH': os.environ.get('PATH', ''),
+               'XDG_CONFIG_HOME': str(home / 'config'), 'XDG_DATA_HOME': str(home / 'data'), 'XDG_CACHE_HOME': str(home / 'cache')}
+        note = self.root / 'note.md'
+        note.write_text('Title: Synthetic fixture\nClass: xss\nSeverity: LOW\nFile: src/example.js\nDescription: Fixture only.\n')
+        command = [str(bbh), 'agents/manual_hunter.py', 'fictional.example', '--family', 'web_bounty', '--lane', 'web', '--root', str(data_root), '--from-file', str(note)]
+        created = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        ledger = data_root / 'web_bounty/fictional.example/web/ledgers/ledger.json'
+        before = json.loads(ledger.read_text())['findings'][0]
+        report = Path(before['report_dir']) / ('synthetic-' + before['fid'] + '.md')
+        report.write_text('# Human-authored report\nKeep this exact content.\n')
+        registered = subprocess.run([str(bbh), 'agents/finding_report.py', 'fictional.example', before['fid'], '--family', 'web_bounty', '--lane', 'web', '--storage-root', str(data_root), '--report', str(report)], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(registered.returncode, 0, registered.stderr)
+        before = json.loads(ledger.read_text())['findings'][0]
+        report_before = report.read_bytes()
+        with patch.dict(os.environ, env, clear=True):
+            server = app.make_server(data_root, port=0, writer=bbh)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            old_server, old_port = self.server, self.port
+            self.server, self.port = server, server.server_port
+            try:
+                payload = {'family': 'web_bounty', 'program': 'fictional.example', 'lane': 'web', 'fid': before['fid'], 'patch': {'severity': 'HIGH', 'class_name': 'ssrf', 'status': 'dormant', 'severity_rationale': 'fixture'}}
+                headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+                for invalid_headers in ({}, {**headers, 'Host': f'evil.test:{self.port}'}, {**headers, 'Origin': 'https://evil.test'}, {**headers, 'Sec-Fetch-Site': 'cross-site'}, {**headers, 'Content-Type': 'text/plain'}):
+                    self.assertEqual(self.request('PATCH', '/api/finding', json.dumps(payload), invalid_headers)[0], 403)
+                for key, bad in (('program', '../fictional'), ('fid', before['fid'].lower()), ('fid', '--help')):
+                    invalid = {**payload, key: bad}
+                    self.assertIn(self.request('PATCH', '/api/finding', json.dumps(invalid), headers)[0], (400, 404))
+                invalid = {**payload, 'patch': {'submission': 'submitted'}}
+                self.assertEqual(self.request('PATCH', '/api/finding', json.dumps(invalid), headers)[0], 400)
+                self.assertEqual(json.loads(ledger.read_text())['findings'][0], before)
+                status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
+                self.assertEqual(status, 200, body)
+                after = json.loads(ledger.read_text())['findings'][0]
+                self.assertEqual(after['fid'], before['fid'])
+                self.assertEqual(after['severity'], 'HIGH')
+                self.assertEqual(after['class_name'], 'ssrf')
+                self.assertEqual(after['current']['status'], 'dormant')
+                self.assertEqual(after['severity_rationale'], 'fixture')
+                self.assertEqual(after['submission'], before['submission'])
+                self.assertEqual(report.read_bytes(), report_before)
+                self.assertEqual(after['report_path'], str(report))
+                self.assertEqual(json.loads(body)['finding']['status'], 'dormant')
+            finally:
+                self.server, self.port = old_server, old_port
+                server.shutdown(); thread.join(); server.server_close()
+
+    def test_v2_status_rationale_and_source_paths(self):
+        lane = self.root / 'web_bounty' / 'fictional' / 'web'
+        (lane / 'ledgers').mkdir(parents=True)
+        findings = [
+            {'fid': 'F01', 'current': {'status': 'confirmed'}, 'severity_rationale': 'verified', 'report_path': '/exact/report.md', 'evidence_path': '/exact/EVIDENCE.md', 'report_dir': '/exact'},
+            {'fid': 'F02', 'status': 'candidate', 'current': {'status': 'confirmed'}},
+        ]
+        (lane / 'ledgers' / 'ledger.json').write_text(json.dumps({'version': 2, 'findings': findings}))
+        items = json.loads(self.request('GET', '/api/data')[2])['programs'][0]['lanes'][0]['findings']
+        self.assertEqual(items[0]['status'], 'confirmed')
+        self.assertEqual(items[0]['current']['status'], 'confirmed')
+        self.assertEqual(items[0]['severity_rationale'], 'verified')
+        self.assertEqual(items[0]['report_path'], '/exact/report.md')
+        self.assertEqual(items[0]['evidence_path'], '/exact/EVIDENCE.md')
+        self.assertEqual(items[1]['status'], 'candidate')
+
     def test_reads_ledger_fields_without_assuming_missing_status(self):
         lane = self.root / 'web_bounty' / 'fictional' / 'web'
         (lane / 'ledgers').mkdir(parents=True)
@@ -76,6 +265,25 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(coverage['items'][0]['boundary'], 'one input')
         self.assertEqual(coverage['unclassified_surfaces'], 0)
         self.assertEqual(coverage['mapped_kinds'], {'route': 1})
+
+    def test_reports_identify_exact_registered_owner_without_basename_matching(self):
+        lane = self.root / 'web_bounty' / 'fictional' / 'web'
+        (lane / 'ledgers').mkdir(parents=True)
+        for rel in ('findings/one/final.md', 'findings/two/final.md', 'findings/one/EVIDENCE.md', 'raw/index.md'):
+            path = lane / 'reports' / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('<!-- generated: bounty-core-report-navigation -->' if rel == 'raw/index.md' else '# Fixture')
+        entries = [{'fid': 'F01', 'report_path': str(lane / 'reports/findings/one/final.md'), 'evidence_path': str(lane / 'reports/findings/one/EVIDENCE.md')}]
+        (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': entries}))
+        items = json.loads(self.request('GET', '/api/data')[2])['programs'][0]['lanes'][0]['reports']
+        by_path = {x['path']: x for x in items}
+        self.assertEqual(by_path['findings/one/final.md']['kind'], 'registered_report')
+        self.assertEqual(by_path['findings/one/final.md']['owner_fids'], ['F01'])
+        self.assertEqual(by_path['findings/two/final.md']['kind'], 'unregistered')
+        self.assertEqual(by_path['findings/one/EVIDENCE.md']['kind'], 'generated_evidence')
+        self.assertEqual(by_path['findings/one/EVIDENCE.md']['owner_fids'], ['F01'])
+        self.assertEqual(by_path['raw/index.md']['kind'], 'generated_navigation')
+        self.assertTrue(all(x['editable'] is False for x in items))
 
     def test_report_open_revision_and_refuses_even_stale_autosaves(self):
         from urllib.parse import urlencode

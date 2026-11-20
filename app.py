@@ -6,6 +6,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
 FAMILIES = {'web_bounty': {'web', 'api'}, 'binaries': {'apk', 'exe', 'mac'}}
+SEVERITIES = ('EXCEPTIONAL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', 'UNKNOWN')
+STATUSES = ('raw', 'confirmed', 'dormant', 'novel', 'complete', 'archive')
 
 
 def read_file(root, relative):
@@ -46,8 +48,10 @@ def ledger(lane, warnings):
         if any(not isinstance(entry, dict) for entry in raw['findings']):
             raise ValueError('unsupported finding shape')
         fields = ('fid', 'type', 'title', 'class_name', 'severity', 'status',
-                  'review_tier', 'submission', 'submission_status', 'platform_outcome', 'file')
+                  'review_tier', 'submission', 'submission_status', 'platform_outcome', 'file',
+                  'severity_rationale', 'report_path', 'evidence_path', 'report_dir', 'current')
         return [{**{field: entry.get(field) for field in fields},
+                 'status': entry.get('status') or (entry['current'].get('status') if isinstance(entry.get('current'), dict) else None),
                  'title': entry.get('title') or entry.get('type')} for entry in raw['findings']]
     except FileNotFoundError:
         warnings.append('ledger_missing')
@@ -117,7 +121,7 @@ def coverage(lane, warnings):
     return None
 
 
-def reports(lane, warnings):
+def reports(lane, warnings, findings=None):
     import os
     base = lane / 'reports'
     if not base.exists():
@@ -134,7 +138,35 @@ def reports(lane, warnings):
         for name in sorted(files):
             file = Path(directory) / name
             if file.suffix.lower() == '.md' and not file.is_symlink():
-                items.append({'path': file.relative_to(base).as_posix(), 'name': name})
+                rel = file.relative_to(base).as_posix()
+                owners = {'report_path': [], 'evidence_path': []}
+                for finding in findings or []:
+                    for field in owners:
+                        recorded = finding.get(field)
+                        if not isinstance(recorded, str) or not recorded:
+                            continue
+                        candidate = Path(recorded)
+                        if not candidate.is_absolute():
+                            candidate = lane / candidate
+                        if candidate == file.absolute() and finding.get('fid'):
+                            owners[field].append(finding['fid'])
+                try:
+                    text = read_file(lane, 'reports/' + rel).decode('utf-8')
+                except (OSError, ValueError, UnicodeError):
+                    text = ''
+                if owners['report_path']:
+                    kind = 'registered_report'
+                    fids = owners['report_path']
+                elif owners['evidence_path']:
+                    kind = 'generated_evidence'
+                    fids = owners['evidence_path']
+                elif any(marker in text for marker in ('<!-- generated: bounty-core-report-navigation -->', '<!-- generated: bounty-core-category-link-stub -->')):
+                    kind, fids = 'generated_navigation', []
+                elif '<!-- generated: bounty-core-finding-report -->' in text:
+                    kind, fids = 'generated_report', []
+                else:
+                    kind, fids = ('unregistered' if findings is not None else 'unknown'), []
+                items.append({'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids, 'editable': False})
     return items
 
 
@@ -167,7 +199,7 @@ def discover(root):
                     findings = ledger(lane, warnings)
                     entries = map_entries(lane, warnings)
                     found.append({'name': lane.name, 'findings': findings, 'map': entries,
-                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings),
+                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings),
                                   'gadgets': [e for e in entries if 'gadget' in (e['tags'] or [])] if entries is not None else None,
                                   'warnings': warnings})
             if found:
@@ -176,7 +208,21 @@ def discover(root):
     return {'programs': programs, 'warnings': global_warnings}
 
 
-def make_server(root, port=9001):
+def writer_available(writer):
+    import subprocess
+    if not writer:
+        return False
+    try:
+        result = subprocess.run([str(writer), 'agents/manual_hunter.py', '--help'],
+                                capture_output=True, text=True, timeout=15)
+        return result.returncode == 0 and all(option in result.stdout for option in
+            ('--edit-finding', '--patch-file', '--root', '--family', '--lane'))
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def make_server(root, port=9001, writer=None):
+    root = Path(root).absolute()
     class Handler(BaseHTTPRequestHandler):
         def reply(self, status, payload, extra=None):
             data = json.dumps(payload, ensure_ascii=False).encode()
@@ -201,7 +247,12 @@ def make_server(root, port=9001):
                 return
             url = urlsplit(self.path)
             if url.path == '/api/data':
-                self.reply(200, discover(Path(root)))
+                result = discover(root)
+                result['capabilities'] = {'finding_metadata': self.server.writer_enabled,
+                                          'finding_fields': ['severity', 'class_name', 'status', 'severity_rationale'] if self.server.writer_enabled else [],
+                                          'finding_options': {'severity': SEVERITIES, 'status': STATUSES} if self.server.writer_enabled else {},
+                                          'report_edit': False}
+                self.reply(200, result)
                 return
             if url.path == '/api/report':
                 params = parse_qs(url.query, keep_blank_values=True)
@@ -244,7 +295,98 @@ def make_server(root, port=9001):
             self.do_PUT()
 
         def do_PATCH(self):
-            self.do_PUT()
+            import os
+            import re
+            import subprocess
+            import tempfile
+            if urlsplit(self.path).path != '/api/finding':
+                return self.do_PUT()
+            port = self.server.server_port
+            host = self.headers.get('Host', '')
+            if (host not in {f'127.0.0.1:{port}', f'localhost:{port}'} or
+                self.headers.get_all('Host', []) != [host] or
+                self.headers.get_all('Origin', []) != [f'http://{host}'] or
+                self.headers.get('Sec-Fetch-Site', '') not in ('', 'same-origin') or
+                self.headers.get('X-Requested-With') != 'Bounty-Board' or
+                self.headers.get('Content-Type', '').lower() != 'application/json' or
+                self.headers.get('Transfer-Encoding')):
+                return self.reply(403, {'error': 'untrusted_origin'})
+            if not self.server.writer_enabled:
+                return self.reply(503, {'error': 'writer_unavailable'})
+            try:
+                lengths = self.headers.get_all('Content-Length', [])
+                if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 16384:
+                    raise ValueError('invalid length')
+                payload = json.loads(self.rfile.read(int(lengths[0])))
+                if not isinstance(payload, dict) or set(payload) != {'family', 'program', 'lane', 'fid', 'patch'}:
+                    raise ValueError('invalid payload')
+                family, program, lane, fid, patch = (payload[k] for k in ('family', 'program', 'lane', 'fid', 'patch'))
+                if (not isinstance(family, str) or family not in FAMILIES or not isinstance(lane, str) or lane not in FAMILIES[family] or
+                    not isinstance(program, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', program) or
+                    not isinstance(fid, str) or not re.fullmatch(r'[A-Za-z][0-9]{2,}', fid) or
+                    not isinstance(patch, dict) or not patch or set(patch) - {'severity', 'class_name', 'status', 'severity_rationale'} or
+                    any(not isinstance(v, str) or len(v) > 4000 for v in patch.values())):
+                    raise ValueError('invalid fields')
+                if ('severity' in patch and patch['severity'] not in SEVERITIES or
+                    'status' in patch and patch['status'] not in STATUSES or
+                    'class_name' in patch and not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,99}', patch['class_name'])):
+                    raise ValueError('invalid value')
+            except (ValueError, UnicodeError, json.JSONDecodeError):
+                return self.reply(400, {'error': 'invalid_finding_patch'})
+            lane_path = root / family / program / lane
+            if any(path.is_symlink() or not path.is_dir() for path in (root, root / family, root / family / program, lane_path)):
+                return self.reply(404, {'error': 'finding_not_found'})
+            layout_paths = [lane_path / p for p in (
+                'context', 'context/target_profile.json', 'context/me_context.md', 'context/session_handoff.md',
+                'notes', 'notes/index.md', 'notes/faq', 'notes/hypotheses', 'notes/handoffs', 'notes/timeline',
+                'working', 'working/scratch', 'recon', 'recon/urls', 'recon/params', 'recon/js',
+                'recon/maps', 'recon/artifacts', 'input', 'input/original', 'input/extracted', 'input/metadata')]
+            layout_paths.append(root / family / program / 'shared')
+            if any(path.is_symlink() for path in layout_paths):
+                return self.reply(409, {'error': 'unsafe_writer_tree'})
+            # BBH refresh touches generated paths; reject escaping symlinks.
+            for directory in (lane_path / 'ledgers', lane_path / 'reports'):
+                if directory.is_symlink() or not directory.is_dir():
+                    return self.reply(409, {'error': 'unsafe_writer_tree'})
+                walk_errors = []
+                for current, dirs, files in os.walk(directory, followlinks=False, onerror=walk_errors.append):
+                    if any((Path(current) / name).is_symlink() for name in dirs):
+                        return self.reply(409, {'error': 'unsafe_writer_tree'})
+                    for name in files:
+                        path = Path(current) / name
+                        if path.is_symlink():
+                            try:
+                                target = path.resolve(strict=True)
+                                if directory.name != 'reports' or not target.is_relative_to(directory.resolve()):
+                                    raise ValueError('escaping link')
+                            except (OSError, ValueError, RuntimeError):
+                                return self.reply(409, {'error': 'unsafe_writer_tree'})
+                if walk_errors:
+                    return self.reply(409, {'error': 'unsafe_writer_tree'})
+            findings = ledger(lane_path, [])
+            matches = [f for f in findings or [] if isinstance(f.get('fid'), str) and f['fid'].upper() == fid.upper()]
+            if len(matches) != 1 or matches[0]['fid'] != fid:
+                return self.reply(404, {'error': 'finding_not_found'})
+            try:
+                with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
+                    patchfile = Path(temp) / 'patch.json'
+                    patchfile.write_text(json.dumps(patch), encoding='utf-8')
+                    result = subprocess.run([str(self.server.writer), 'agents/manual_hunter.py', program,
+                        '--family', family, '--lane', lane, '--root', str(root), '--edit-finding', fid,
+                        '--patch-file', str(patchfile)], capture_output=True, timeout=60)
+                if result.returncode != 0:
+                    self.server.writer_enabled = False
+                    return self.reply(502, {'error': 'writer_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
+                updated = [f for f in ledger(lane_path, []) or [] if f.get('fid') == fid]
+                if (len(updated) != 1 or any(updated[0].get(k) != v for k, v in patch.items()) or
+                    ('status' in patch and isinstance(updated[0].get('current'), dict) and
+                     updated[0]['current'].get('status') != patch['status'])):
+                    self.server.writer_enabled = False
+                    return self.reply(502, {'error': 'verification_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
+                return self.reply(200, {'finding': updated[0]})
+            except (OSError, subprocess.SubprocessError):
+                self.server.writer_enabled = False
+                return self.reply(503, {'error': 'writer_unavailable', 'message': 'Update may be incomplete; refresh before retrying.'})
 
         def do_DELETE(self):
             self.do_PUT()
@@ -253,15 +395,50 @@ def make_server(root, port=9001):
             pass
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.static_root = Path(__file__).parent / 'static'
+    server.writer = Path(writer).absolute() if writer else None
+    server.writer_enabled = writer_available(server.writer)
     return server
 
 
-def main():
+def parse_config(argv=None):
+    import tomllib
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=Path, default=Path.home() / 'Shared')
-    parser.add_argument('--port', type=int, default=9001)
-    args = parser.parse_args()
-    make_server(args.root, args.port).serve_forever()
+    parser.add_argument('--config', type=Path, help='JSON or TOML configuration file')
+    parser.add_argument('--root', type=Path, help='data root (overrides config)')
+    parser.add_argument('--port', type=int, help='listen port (overrides config)')
+    parser.add_argument('--bbh', type=Path, help='opt in to metadata writes with this BBH executable')
+    args = parser.parse_args(argv)
+    settings = {}
+    if args.config:
+        try:
+            raw = args.config.read_bytes()
+            if args.config.suffix.lower() == '.json':
+                settings = json.loads(raw)
+            elif args.config.suffix.lower() == '.toml':
+                settings = tomllib.loads(raw.decode('utf-8'))
+            else:
+                raise ValueError('expected .json or .toml')
+            if not isinstance(settings, dict) or set(settings) - {'root', 'port'}:
+                raise ValueError('expected only root and port keys')
+            if 'root' in settings and (not isinstance(settings['root'], str) or not settings['root']):
+                raise ValueError('root must be a non-empty string')
+            if 'port' in settings and (type(settings['port']) is not int or not 1 <= settings['port'] <= 65535):
+                raise ValueError('port must be an integer from 1 to 65535')
+        except (OSError, ValueError, UnicodeError) as exc:
+            parser.error(f'invalid config: {exc}')
+    if args.root is None:
+        args.root = Path(settings.get('root', str(Path.home() / 'Shared'))).expanduser()
+        if args.config and 'root' in settings and not args.root.is_absolute():
+            args.root = args.config.absolute().parent / args.root
+    args.port = args.port if args.port is not None else settings.get('port', 9001)
+    if not 1 <= args.port <= 65535:
+        parser.error('port must be from 1 to 65535')
+    return args
+
+
+def main():
+    args = parse_config()
+    make_server(args.root, args.port, writer=args.bbh).serve_forever()
 
 
 if __name__ == '__main__':

@@ -10,7 +10,10 @@
   const programs = () => list(state.data?.programs) || [];
   const currentProgram = () => programs().find(p => String(p.id) === state.program);
   const currentLane = () => (list(currentProgram()?.lanes) || []).find(l => String(l.name) === state.lane);
-  const rows = key => list(currentLane()?.[key]);
+  const rows = key => {
+    const value=currentLane()?.[key];
+    return list(key==='coverage' && value && !Array.isArray(value) ? value.items : value);
+  };
   const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
   const draftFor = report => {
@@ -53,11 +56,13 @@
     return `<div class="toolbar"><label>Program<select id="program-select" ${ps.length?'':'disabled'}>${ps.length?ps.map(p=>opt(p.id,p.name || p.id,String(p.id)===state.program)).join(''):opt('','No programs',true)}</select></label><label>Lane<select id="lane-select" ${lanes.length?'':'disabled'}>${lanes.length?lanes.map(l=>opt(l.name,l.name,String(l.name)===state.lane)).join(''):opt('','No lanes',true)}</select></label></div>`;
   }
   function title(title, subtitle, controls='') {return `<div class="titlebar"><div><h1>${esc(title)}</h1><p class="subtitle">${esc(subtitle)}</p></div>${controls}</div>`;}
+  const discoveryIncomplete = () => state.data?.root_unavailable === true || state.data?.discovery_incomplete === true || (list(state.data?.warnings)||[]).some(w=>w==='root_unavailable'||w==='discovery_incomplete');
   function dashboard() {
     const ps=programs(), lanes=ps.flatMap(p=>list(p.lanes)||[]), all=lanes.flatMap(l=>list(l.findings)||[]);
-    const complete=ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.findings));
+    const discovered=!discoveryIncomplete();
+    const complete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.findings));
     const stat=(v,label)=>`<div class="stat"><strong>${esc(v)}</strong><span>${esc(label)}</span></div>`;
-    const reportsComplete=ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports));
+    const reportsComplete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports) && !(list(l.warnings)||[]).some(w=>typeof w==='string' && w.startsWith('reports_')));
     const submissionValues=field=>{
       const counts=new Map();for(const finding of all){const value=finding.submission?.[field];if(value!=null && value!=='')counts.set(String(value),(counts.get(String(value))||0)+1);}
       return [...counts].map(([value,count])=>`<div class="record"><span>${esc(value)}</span> <strong>${count}</strong></div>`).join('') || '<p class="hint">No recorded values available.</p>';
@@ -66,14 +71,14 @@
     const max=Math.max(1,...classes.values());
     const bars=[...classes].sort((a,b)=>b[1]-a[1]).map(([name,n])=>`<div class="chart-row"><span>${esc(name)}</span><span class="bar"><i style="width:${n/max*100}%"></i></span><strong>${n}</strong></div>`).join('');
     return `${title('Dashboard','A portfolio view of the records currently loaded.')}
-      <div class="stack">${warnings()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(ps.length,'Programs loaded')}${stat(ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
-      <div class="dashboard-grid"><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded finding records; not coverage.</p>${bars||'<div class="state">No classified findings available.</div>'}</section><section class="panel panel-pad"><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p>${ps.length?ps.map(p=>`<div class="record"><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><p class="hint">${esc(p.family||'Family not provided')} · ${Array.isArray(p.lanes)?`${p.lanes.length} lanes`:'Lanes unavailable'}</p></div>`).join(''):'<div class="state">No programs returned by the backend.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for loaded findings only.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
+      <div class="stack">${warnings()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
+      <div class="dashboard-grid"><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded finding records; not coverage.</p>${bars||'<div class="state">No classified findings available.</div>'}</section><section class="panel panel-pad"><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p>${ps.length?ps.map(p=>`<div class="record"><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><p class="hint">${esc(p.family||'Family not provided')} · ${Array.isArray(p.lanes)?`${p.lanes.length} lanes`:'Lanes unavailable'}</p></div>`).join(''):discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for loaded findings only.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
   function workspace() {
     const p=currentProgram(), lane=currentLane();
     if (!p || !lane) return `${title(p?.name || 'Programs',p?'No lanes are available for this program.':'No programs are available.',selectors())}<div class="stack">${warnings()}<div class="panel state">${p?'This program has no lane data.':'Configure the program root in the backend and refresh.'}</div></div>`;
     const nav=sections.map(([key,label])=>`<button data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}" ${state.section===key?'aria-current="page"':''}><span>${esc(label)}</span><span class="count">${rows(key)?.length ?? '—'}</span></button>`).join('');
-    return `${title(p.name||p.id,`${p.family||'Program workspace'} / ${lane.name}`,selectors())}<div class="stack">${warnings()}<div class="layout"><div class="stack"><section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Coverage records</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div></div></section>${sectionContent()}</div><aside class="panel workspace-nav"><h2>Workspace</h2><p class="hint">Explore this lane</p><div class="choices">${nav}</div></aside></div></div>`;
+    return `${title(p.name||p.id,`${p.family||'Program workspace'} / ${lane.name}`,selectors())}<div class="stack">${warnings()}<div class="layout"><div class="stack"><section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div></div></section>${sectionContent()}</div><aside class="panel workspace-nav"><h2>Workspace</h2><p class="hint">Explore this lane</p><div class="choices">${nav}</div></aside></div></div>`;
   }
   function filterControl(key,label,findings) {
     const values=[...new Set(findings.map(r=>r[key]).filter(v=>v!=null&&v!=='' ).map(String))].sort();
@@ -81,9 +86,10 @@
   }
   function metadataCell(row,key) {
     const value=String(row[key]??''); const cap=BoardAPI.capability(state.data,'findingMetadata');
+    if(cap?.textFields?.includes(key)) return `<input data-metadata="${esc(key)}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" title="Lowercase class identifier; change applies on leaving the field" value="${esc(value)}" ${row.id != null && !state.metadataPending?'':'disabled'}>`;
     const options=cap?.options?.[key]; const writable=cap && row.id != null && Array.isArray(options) && options.length && !state.metadataPending;
     const values=[...new Set([value,...(Array.isArray(options)?options.map(String):[])].filter(Boolean))];
-    return `<select data-metadata="${key}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${writable?'':'disabled'}>${values.length?values.map(v=>opt(v,v,v===value)).join(''):opt('','Unknown',true)}</select>`;
+    return `<select data-metadata="${key}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,v,v===value)).join('')}</select>`;
   }
   function findings() {
     const all=rows('findings'); if (!all) return unavailable('Findings ledger');
@@ -91,7 +97,7 @@
     const filtered=all.filter(r=>['severity','class','status'].every(k=>!f[k]||String(r[k]??'')===f[k]) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query))));
     const body=filtered.map(r=>`<tr><td><strong>${esc(r.title||'Untitled finding')}</strong><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission?.state ? `<span class="id">Submission state: ${esc(r.submission.state)}</span>` : ''}${r.submission?.result ? `<span class="id">Submission result: ${esc(r.submission.result)}</span>` : ''}${r.submission_status ? `<span class="id">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="id">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}</td><td>${metadataCell(r,'severity')}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
-    return `<section class="panel"><div class="panel-pad"><h2>Findings ledger</h2><p class="hint">Filter the findings in this lane.</p></div><div class="filters">${filterControl('severity','severities',all)}${filterControl('class','classes',all)}${filterControl('status','statuses',all)}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}"><span class="muted">${filtered.length} of ${all.length}</span></div>${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr><th>Finding</th><th>Severity</th><th>Class</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></div>`:'<div class="state">No findings match these filters.</div>'}<p class="footnote">${cap?'Only fields with advertised options and stable IDs can be edited.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status"></div></section>`;
+    return `<section class="panel"><div class="panel-pad"><h2>Findings ledger</h2><p class="hint">Filter the findings in this lane.</p></div><div class="filters">${filterControl('severity','severities',all)}${filterControl('class','classes',all)}${filterControl('status','statuses',all)}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}"><span class="muted">${filtered.length} of ${all.length}</span></div>${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr><th>Finding</th><th>Severity</th><th>Class</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></div>`:'<div class="state">No findings match these filters.</div>'}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
   }
   function unavailable(name){return `<section class="panel panel-pad"><h2>${esc(name)}</h2><div class="state">This collection was not provided by the backend.</div></section>`;}
   function records(key,label,description) {
@@ -103,6 +109,19 @@
       return `<div class="record"><strong>${esc(display(item[titleKey]))}</strong>${entries.filter(([k])=>k!==titleKey).map(([k,v])=>`<p class="hint record-value"><b>${esc(k)}:</b> ${esc(display(v))}</p>`).join('')}</div>`;
     }).join('');
     return `<section class="panel panel-pad"><h2>${esc(label)}</h2><p class="hint">${esc(description)}</p>${content}</section>`;
+  }
+  function coverage() {
+    const value=currentLane()?.coverage;
+    if (!value) return unavailable('Coverage');
+    const inventory=value.mapped_kinds;
+    const mapped=inventory && typeof inventory==='object' && !Array.isArray(inventory)
+      ? Object.entries(inventory).map(([kind,count])=>`<div class="record"><strong>${esc(kind)}</strong>: ${esc(display(count))}</div>`).join('') || '<p class="hint">No mapped surfaces reported.</p>'
+      : '<p class="hint">Mapped inventory not provided by the backend.</p>';
+    const unclassified=value.unclassified_surfaces == null ? 'Unknown number of surfaces without assessment questions.' : `${display(value.unclassified_surfaces)} surfaces without assessment questions.`;
+    const items=rows('coverage');
+    const counts=value.counts && typeof value.counts==='object' && !Array.isArray(value.counts) ? `<section class="panel panel-pad"><h2>Assessment counts</h2><p class="hint">Recorded assessment questions${value.total == null ? '' : `: ${esc(display(value.total))} total`}.</p>${Object.entries(value.counts).map(([status,count])=>`<div class="record"><strong>${esc(status)}</strong>: ${esc(display(count))}</div>`).join('') || '<p class="hint">No assessment counts reported.</p>'}</section>` : '';
+    const assessments=items ? (items.length ? records('coverage','Assessment questions','Recorded questions and boundaries, not proof of complete testing.') : '<section class="panel panel-pad"><h2>Assessment questions</h2><div class="state">No assessment questions recorded in this lane.</div></section>') : unavailable('Assessment questions');
+    return `<div class="stack"><section class="panel panel-pad"><h2>Mapped inventory</h2><p class="hint">Mapped surfaces are inventory, not assessed coverage.</p>${mapped}<p class="hint">${esc(unclassified)}</p></section>${counts}${assessments}</div>`;
   }
   // Deliberately small Markdown subset; all source is escaped before formatting.
   // Links/images remain text. No HTML, navigation, external images or scripts.
@@ -123,26 +142,30 @@
     if(!all.length)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">No reports in this lane.</div></section>';
     if(!all.some(r=>String(r.id)===state.report)) state.report=String(all[0].id??'');
     const report=reportById(state.report); if(!report || report.id==null)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports need stable IDs before they can be opened.</div></section>';
-    const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.title||r.id,String(r.id)===state.report)).join('')}</select>`;
+    const kindNames={registered_report:'Registered report',generated_report:'Generated report',generated_evidence:'Generated evidence',generated_navigation:'Generated navigation',unregistered:'Unregistered artifact',unknown:'Ownership unknown'};
+    const kind=report.kind == null ? 'Ownership not provided' : (kindNames[report.kind] || String(report.kind));
+    const owner=Array.isArray(report.owner_fids) && report.owner_fids.length ? `Finding owner IDs: ${report.owner_fids.map(display).join(', ')}` : '';
+    const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>`;
     if(report.content == null && report.path){
       if(!report.loadState) {
         report.loadState='loading';const program=currentProgram(), lane=state.lane;
-        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
+        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(result.editable===false)report.editable=false;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
       }
       return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">${report.loadState==='error'?'Report could not be loaded. Refresh the workspace to retry.':'Loading report…'}</div></section>`;
     }
-    const draft=draftFor(report), cap=BoardAPI.capability(state.data,'reportWrite');
-    const writable=!!(cap && draft.revision != null);
+    const draft=draftFor(report);
+    const writable=reportWritable(draft);
     const status=reportStatus(draft,writable);
-    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div><label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.title||r.id,String(r.id)===state.report)).join('')}</select><div id="report-status" class="message report-status" role="status">${esc(status)}</div><div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
+    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
   }
+  const reportWritable = draft => !!(draft.source?.editable !== false && BoardAPI.capability(state.data,'reportWrite') && draft.revision != null);
   function reportStatus(draft,writable) {
     if(draft.status==='conflict') return 'Conflict: the report changed in its source. Your draft is preserved in this tab; copy it before reloading and reconcile with the source.';
     if(draft.status==='error') return 'Save failed. Your draft is preserved in this tab; edit to retry or copy it before leaving.';
     if(!writable) return 'Saving unavailable: no supported report-write capability and revision. Edits are temporary in this tab only.';
     return ({saved:'Saved to source.',saving:'Saving…',unsaved:'Unsaved changes.'})[draft.status]||'Unsaved changes.';
   }
-  function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return records('coverage','Coverage','Observed states and boundaries as recorded; a residual is not a finding.');case 'reports':return reports();case 'map':return records('map','MapStore','Mapped records from the selected lane.');case 'gadgets':return records('gadgets','Gadgets','Gadget records from the selected lane.');default:return '';}}
+  function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return records('map','MapStore','Mapped records from the selected lane.');case 'gadgets':return records('gadgets','Gadgets','Gadget records from the selected lane.');default:return '';}}
   function render() {
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':'Programs';
@@ -163,10 +186,10 @@
     else if(el.id==='report-select'){state.report=el.value;render();}
     else if(el.dataset.filter){state.filters[el.dataset.filter]=el.value;render();}
     else if(el.dataset.metadata){
-      const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row)return;
-      const program=state.program,lane=state.lane;state.metadataPending=true;el.disabled=true;
-      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,lane, findingId:id,field:key,value}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value; state.metadataPending=false;render();}
-      catch {state.metadataPending=false;render();const msg=document.querySelector('#metadata-message');if(msg)msg.textContent='Update failed or was not verified. The displayed value was not changed.';}
+      const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
+      const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name;state.metadataPending=true;render();
+      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value; state.metadataPending=false;render();}
+      catch {state.metadataPending=false;render();const msg=document.querySelector('#metadata-message');if(msg)msg.textContent='Update failed or was not verified. The source may have changed; refresh before retrying.';}
     }
   });
   app.addEventListener('input',event=>{
@@ -176,13 +199,13 @@
       const report=reportById(state.report);if(!report)return;const draft=draftFor(report);draft.text=el.value;
       document.querySelector('#report-preview').innerHTML=markdown(draft.text);
       if(draft.status!=='conflict') draft.status='unsaved';
-      const writable=!!(BoardAPI.capability(state.data,'reportWrite')&&draft.revision!=null);
+      const writable=reportWritable(draft);
       document.querySelector('#report-status').textContent=reportStatus(draft,writable);
       clearTimeout(draft.timer);if(writable && draft.status!=='conflict')draft.timer=setTimeout(()=>saveDraft(draft),600);
     }
   });
   async function saveDraft(draft){
-    if(draft.inflight||draft.status==='conflict'||draft.text===draft.original)return;
+    if(!reportWritable(draft)||draft.inflight||draft.status==='conflict'||draft.text===draft.original)return;
     const text=draft.text, revision=draft.revision; draft.inflight=true;draft.status='saving';refreshStatus(draft);
     try {
       const result=await BoardAPI.write(state.data,'reportWrite',{programId:draft.program,lane:draft.lane,reportId:draft.id,content:text,revision});
@@ -191,6 +214,6 @@
     } catch(error){draft.status=error.status===409?'conflict':'error';}
     finally {draft.inflight=false;refreshStatus(draft);if(draft.status==='unsaved'){clearTimeout(draft.timer);draft.timer=setTimeout(()=>saveDraft(draft),600);}}
   }
-  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && state.program===draft.program && state.lane===draft.lane && state.report===draft.id)status.textContent=reportStatus(draft,!!(BoardAPI.capability(state.data,'reportWrite')&&draft.revision!=null));}
+  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && state.program===draft.program && state.lane===draft.lane && state.report===draft.id)status.textContent=reportStatus(draft,reportWritable(draft));}
   load();
 })();

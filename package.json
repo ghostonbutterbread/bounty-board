@@ -1,0 +1,12 @@
+{
+  "name": "bounty-board",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first bug bounty research workspace",
+  "scripts": {
+    "test": "node --test static/tests/app.test.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.60.0"
+  }
+}

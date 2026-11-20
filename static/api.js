@@ -7,7 +7,14 @@ window.BoardAPI = (() => {
     return response.json();
   }
   function capability(data, name) {
-    const cap = data?.capabilities?.[name];
+    let cap = data?.capabilities?.[name];
+    if (name === 'findingMetadata' && !cap && data?.capabilities?.finding_metadata === true && Array.isArray(data.capabilities.finding_fields)) {
+      const fields=data.capabilities.finding_fields;
+      cap={enabled:true,method:'PATCH',url:'/api/finding',backend:'bbh',options:{}};
+      if(fields.includes('severity')) cap.options.severity=['EXCEPTIONAL','CRITICAL','HIGH','MEDIUM','LOW','INFO','UNKNOWN'];
+      if(fields.includes('status')) cap.options.status=['raw','confirmed','dormant','novel','complete','archive'];
+      if(fields.includes('class_name')) cap.textFields=['class'];
+    }
     if (!cap || cap.enabled !== true || cap.method !== 'PATCH' || typeof cap.url !== 'string') return null;
     try { const url = new URL(cap.url, location.origin); return url.origin === location.origin && /^https?:$/.test(url.protocol) ? cap : null; }
     catch { return null; }
@@ -15,12 +22,18 @@ window.BoardAPI = (() => {
   async function write(data, name, body) {
     const cap = capability(data, name);
     if (!cap) throw new Error('Write capability unavailable');
-    return request(cap.url, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    if(cap.backend==='bbh' && name==='findingMetadata') {
+      const field=body.field==='class'?'class_name':body.field;
+      const result=await request(cap.url,{method:'PATCH',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({family:body.family,program:body.program,lane:body.lane,fid:body.findingId,patch:{[field]:body.value}})});
+      if(result?.finding?.fid!==body.findingId) throw new Error('Unverified finding');
+      return {value:result.finding[field]};
+    }
+    const {family,program,...legacyBody}=body;
+    return request(cap.url, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(legacyBody)});
   }
   function normalize(data) {
     for (const program of data.programs || []) for (const lane of program.lanes || []) {
       if (Array.isArray(lane.findings)) lane.findings = lane.findings.map(f => ({...f,id:f.id ?? f.fid,class:f.class ?? f.class_name}));
-      if (lane.coverage && !Array.isArray(lane.coverage) && Array.isArray(lane.coverage.items)) lane.coverage = lane.coverage.items;
       if (Array.isArray(lane.reports)) lane.reports = lane.reports.map(r => ({...r,id:r.id ?? r.path,title:r.title ?? r.name}));
     }
     return data;
