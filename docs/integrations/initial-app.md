@@ -7,8 +7,8 @@
 - **Intended integration target:** beta
 - **Last updated:** 2026-11-20
 - **Owning feature branch/ref:** feat/initial-app
-- **Latest immutable recovery checkpoint:** none yet
-- **Feature implementation commit(s):** none yet
+- **Latest immutable recovery checkpoint:** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8
+- **Feature implementation commit(s):** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8
 - **Inspiration / canonical references:** `docs/product.md`; user-approved mockup; BBH ledger, coverage, MapStore and storage ownership skills.
 
 ## Intent
@@ -36,10 +36,10 @@ The initial read-only application discovers program and lane data and renders th
 ## Interruption / resume handoff
 
 - Owning feature branch/ref: feat/initial-app.
-- Latest immutable recovery checkpoint: none yet.
-- Feature implementation commit(s): none yet.
-- Exact resume point: reconcile worker outputs, run tests, perform independent review and fix/re-review before beta integration.
-- Working-tree state at handoff: intentionally uncommitted while workers own disjoint paths; commit a recoverable checkpoint before pausing.
+- Latest immutable recovery checkpoint: 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8.
+- Feature implementation commit(s): 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8.
+- Exact resume point: reconcile independent review, add canonical metadata write path and investigate a coordinated report autosave, then retest and re-review before beta integration.
+- Working-tree state at handoff: clean after the dossier-only checkpoint commit.
 
 ## Decision gates
 
