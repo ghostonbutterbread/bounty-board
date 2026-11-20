@@ -16,18 +16,60 @@
   };
   const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
+  let unidentifiedSequence=0;
+  const rootIdentity = () => /^[a-f0-9]{64}$/.test(state.data?.root_identity || '') ? state.data.root_identity : null;
+  const draftKey = (program,lane,id) => JSON.stringify([rootIdentity() || state.unidentifiedRoot,program,lane,String(id)]);
+  const storageKey = key => `bounty-board-report-draft-v2:${key}`;
+  // This panel lives outside #app so navigation and editor rerenders cannot
+  // hide a draft belonging to an earlier root.
+  const recovery=document.createElement('section');
+  recovery.id='draft-recovery';recovery.className='panel panel-pad draft-recovery';
+  recovery.hidden=true;recovery.setAttribute('aria-label','Draft recovery');
+  recovery.setAttribute('aria-live','polite');app.before(recovery);
+  const recoveryHeading=document.createElement('h2');recoveryHeading.textContent='Draft recovery';
+  const recoveryWarning=document.createElement('p');recoveryWarning.textContent='These drafts may exist only in this tab. Select and copy the text or download it before reloading or leaving. They are not saved to the source report.';
+  recovery.append(recoveryHeading,recoveryWarning);
+  const recoveryCards=new Map();
+  let editor = null;
+  function persistDraft(draft) {
+    if (draft.storageBlocked || draft.storageUnreadable) return;
+    try {
+      const current=localStorage.getItem(storageKey(draft.key));
+      if(current!==draft.storageSnapshot){draft.storageBlocked=true;return;}
+      const next=JSON.stringify({version:1,text:draft.text,original:draft.original,revision:draft.revision ?? null,conflict:draft.status==='conflict'});
+      localStorage.setItem(storageKey(draft.key),next);
+      draft.storageSnapshot=next;
+      draft.storageError=false;
+    } catch { draft.storageError=true; }
+  }
   function reconcileReport(draft,report) {
-    if(draft.source===report)return;
-    if(draft.status!=='conflict' && !draft.inflight && draft.text===draft.original && report.content!=null){draft.text=String(report.content);draft.original=draft.text;draft.revision=report.revision;draft.status='saved';}
-    else if(report.revision != null && draft.revision != null && report.revision!==draft.revision){clearTimeout(draft.timer);draft.status='conflict';}
-    draft.source=report;
+    const content=report.content == null ? null : String(report.content), revision=report.revision ?? null;
+    if(draft.source===report && draft.observedContent===content && draft.observedRevision===revision)return;
+    const changed = (draft.revision != null && revision != null && draft.revision!==revision) || (content!==null && content!==draft.original);
+    if(draft.hasDraft && changed && draft.status!=='conflict') {draft.status='conflict';persistDraft(draft);}
+    else if(!draft.hasDraft && content!==null){draft.text=content;draft.original=draft.text;draft.revision=report.revision;}
+    draft.source=report;draft.observedContent=content;draft.observedRevision=revision;
   }
   const draftFor = report => {
-    const key = reportKey(state.program,state.lane,report.id);
-    if (!state.drafts.has(key)) state.drafts.set(key,{key,program:state.program,lane:state.lane,id:String(report.id),text:String(report.content ?? ''),revision:report.revision,original:String(report.content ?? ''),status:'saved',timer:null,inflight:false,source:report});
+    const key = draftKey(state.program,state.lane,report.id);
+    if (!state.drafts.has(key)) {
+      const original=String(report.content ?? '');
+      const draft={key,program:state.program,lane:state.lane,id:String(report.id),text:original,revision:report.revision,original,status:'saved',source:report,hasDraft:false,storageBlocked:false,storageError:!rootIdentity(),storageUnreadable:!rootIdentity(),unidentified:!rootIdentity()};
+      try {
+        const raw=rootIdentity() ? localStorage.getItem(storageKey(key)) : null;
+        draft.storageSnapshot=raw;
+        if(raw!==null){
+          let saved;try {saved=JSON.parse(raw);} catch {}
+          if(!saved || saved.version!==1 || typeof saved.text!=='string' || typeof saved.original!=='string' || !(saved.revision===null || typeof saved.revision==='string') || (saved.conflict!==undefined && typeof saved.conflict!=='boolean')) draft.storageBlocked=true;
+          else {draft.text=saved.text;draft.original=saved.original;draft.revision=saved.revision;draft.hasDraft=true;draft.status=saved.conflict?'conflict':'unsaved';}
+        }
+      } catch {draft.storageError=true;draft.storageUnreadable=true;}
+      state.drafts.set(key,draft);
+      if(draft.hasDraft && report.content!=null){draft.source=null;reconcileReport(draft,report);}
+    }
     const draft=state.drafts.get(key);reconcileReport(draft,report);return draft;
   };
-  const hasUnsaved = () => state.metadataPending || [...state.drafts.values()].some(d => d.text !== d.original || d.inflight || d.status==='conflict') || state.rationaleDrafts.size>0;
+  const hasUnsaved = () => state.metadataPending || [...state.drafts.values()].some(d => d.hasDraft || d.storageError || d.storageBlocked) || state.rationaleDrafts.size>0;
   window.addEventListener('beforeunload', event => { if (hasUnsaved()) { event.preventDefault(); event.returnValue = ''; } });
   function applyTheme(value) { if (!['light','dark','dusk'].includes(value)) value = 'light'; document.documentElement.dataset.theme=value; theme.value=value; try { localStorage.setItem('bounty-board-theme',value); } catch {} }
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
@@ -41,17 +83,51 @@
     if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
   }
   let pendingReportRefresh=null;
+  const hasUnrecoverableDraft = () => [...state.drafts.values()].some(d=>d.hasDraft && (d.storageError || d.storageUnreadable || d.storageBlocked));
+  function renderRecovery() {
+    const drafts=[...state.drafts.values()].filter(d=>d.hasDraft && (d.storageError || d.storageUnreadable || d.storageBlocked));
+    recovery.hidden=!drafts.length;
+    const keys=new Set(drafts.map(d=>d.key));
+    for(const [key,card] of recoveryCards)if(!keys.has(key)){card.remove();recoveryCards.delete(key);}
+    for(const draft of drafts){
+      const existing=recoveryCards.get(draft.key);
+      if(existing){const text=existing.querySelector('textarea');if(text.value!==draft.text)text.value=draft.text;continue;}
+      const card=document.createElement('div');card.className='recovery-draft';
+      const identity=document.createElement('p');
+      identity.textContent=`Root: ${JSON.parse(draft.key)[0]} | Program: ${draft.program} | Lane: ${draft.lane} | Report: ${draft.id}`;
+      card.append(identity);
+      const text=document.createElement('textarea');text.readOnly=true;text.rows=6;text.value=draft.text;text.setAttribute('aria-label','Recover draft text');card.append(text);
+      const button=document.createElement('button');button.type='button';button.className='button';button.textContent='Download draft';
+      button.addEventListener('click',()=>{
+        const url=URL.createObjectURL(new Blob([draft.text],{type:'text/plain;charset=utf-8'}));
+        const link=document.createElement('a');link.href=url;link.download='recovered-draft.txt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      });
+      card.append(button);recovery.append(card);recoveryCards.set(draft.key,card);
+    }
+  }
+  function blockRefresh() {
+    state.metadataErrors=['Refresh blocked: a draft cannot be recovered from browser storage. Use Draft recovery to copy or download it before reloading.'];
+  }
   async function load() {
     if(state.metadataPending || pendingReportRefresh) return;
+    if(hasUnrecoverableDraft()) {blockRefresh();render();return;}
     let finishRefresh;pendingReportRefresh=new Promise(resolve=>{finishRefresh=resolve;});
     state.loading=true; state.error=''; render();
-    try { const data=await BoardAPI.load(); if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response'); state.data=data; state.metadataErrors=[]; normalizeSelection();
-      for(const program of programs())for(const lane of list(program.lanes)||[])for(const report of list(lane.reports)||[]){
-        const draft=state.drafts.get(reportKey(String(program.id),String(lane.name),report.id));
-        if(draft && (report.content!=null || (report.revision!=null && (draft.inflight || draft.text!==draft.original || draft.status==='conflict'))))reconcileReport(draft,report);
+    try {
+      const data=await BoardAPI.load();
+      if(hasUnrecoverableDraft()) blockRefresh();
+      else {
+        if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response');
+        state.data=data; state.unidentifiedRoot=`unidentified-${++unidentifiedSequence}`; state.metadataErrors=[]; normalizeSelection();
+        for(const program of programs())for(const lane of list(program.lanes)||[])for(const report of list(lane.reports)||[]){
+          const draft=state.drafts.get(draftKey(String(program.id),String(lane.name),report.id));
+          if(draft && (report.content!=null || (report.revision!=null && draft.hasDraft)))reconcileReport(draft,report);
+        }
       }
+    } catch {
+      if(hasUnrecoverableDraft())blockRefresh();
+      else {state.error='Could not load workspace data. Check the local backend and try Refresh.'; state.data=null;}
     }
-    catch { state.error='Could not load workspace data. Check the local backend and try Refresh.'; state.data=null; }
     state.loading=false;try{render();}finally{pendingReportRefresh=null;finishRefresh();}
   }
   const opt = (value,label,selected) => `<option value="${esc(value)}"${selected?' selected':''}>${esc(label)}</option>`;
@@ -168,22 +244,28 @@
         report.loadState='loading';const program=currentProgram(), lane=state.lane;
         BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(result.editable===false)report.editable=false;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
       }
-      return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">${report.loadState==='error'?'Report could not be loaded. Refresh the workspace to retry.':'Loading report…'}</div></section>`;
+      if(report.loadState!=='error') return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Loading report…</div></section>`;
+      if(!draftFor(report).hasDraft) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Report could not be loaded. Refresh the workspace to retry.</div></section>`;
     }
     const draft=draftFor(report);
-    const writable=reportWritable(draft);
-    const status=reportStatus(draft,writable);
-    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
+    const status=reportStatus(draft);
+    const unavailableSource=report.loadState==='error' ? '<div class="message warning">Report could not be loaded. Source is unavailable; your draft is shown below. Refresh the workspace to retry.</div>' : '';
+    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}${unavailableSource}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><p class="hint">Drafts are stored in this browser and can be lost if browser data is cleared. They are not saved to the report. Older unscoped drafts are retained but not automatically imported.</p><button class="button" disabled title="Report writing is disabled to protect source files">Save to report unavailable</button><div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
   }
-  const reportWritable = draft => !!(draft.source?.editable !== false && BoardAPI.capability(state.data,'reportWrite') && draft.revision != null);
-  function reportStatus(draft,writable) {
-    if(draft.status==='conflict') return 'Conflict: the report changed in its source. Your draft is preserved in this tab; copy it before reloading and reconcile with the source.';
-    if(draft.status==='error') return 'Save failed. Your draft is preserved in this tab; edit to retry or copy it before leaving.';
-    if(!writable) return 'Saving unavailable: no supported report-write capability and revision. Edits are temporary in this tab only.';
-    return ({saved:'Saved to source.',saving:'Saving…',unsaved:'Unsaved changes.'})[draft.status]||'Unsaved changes.';
+  function reportStatus(draft) {
+    const sourceUnavailable=draft.source?.loadState==='error' ? 'Source unavailable. ' : '';
+    if(draft.storageBlocked) return `${draft.status==='conflict'?'Conflict: the report changed in its source. The conflict warning may not be saved. ':''}${sourceUnavailable}Browser draft data is invalid or changed in another tab; it was not overwritten. Copy your edits before leaving.`;
+    if(draft.status==='conflict') return `Conflict: the report changed in its source. ${sourceUnavailable}${draft.storageError?'Browser draft storage unavailable; the conflict warning could not be saved. Copy your edits before leaving.':'Your browser draft is preserved; compare it with the source before reconciling.'}`;
+    if(sourceUnavailable && draft.storageError) return `${sourceUnavailable}Browser draft storage unavailable; copy your edits before leaving.`;
+    if(sourceUnavailable) return `${sourceUnavailable}Your draft is shown; copy it or refresh to retry.`;
+    if(draft.storageUnreadable && !rootIdentity()) return 'Root identity unavailable. Your edits are only in this tab; copy them before refreshing or leaving.';
+    if(draft.storageError) return 'Browser draft storage unavailable. Your edits are only in this tab; copy them before leaving.';
+    if(draft.hasDraft) return 'Draft saved in browser, not to the source report.';
+    return 'Saving to report unavailable. Edits are saved as browser drafts.';
   }
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return records('map','MapStore','Mapped records from the selected lane.');case 'gadgets':return records('gadgets','Gadgets','Gadget records from the selected lane.');default:return '';}}
   function render() {
+    if(editor){editor.toTextArea();editor=null;}
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':'Programs';
@@ -192,6 +274,16 @@
     else app.innerHTML=state.view==='dashboard'?dashboard():workspace();
     if(state.metadataPending && !app.querySelector('#metadata-message')) app.insertAdjacentHTML('afterbegin','<div class="message warning" role="status">Updating metadata; waiting for confirmation. Displayed values are the last loaded or confirmed values.</div>');
     if(state.metadataErrors.length) app.insertAdjacentHTML('afterbegin',state.metadataErrors.map(error=>`<div class="message warning" role="alert">${esc(error)}</div>`).join(''));
+    const source=app.querySelector('#report-source');
+    if(source && typeof EasyMDE !== 'undefined') {
+      // EasyMDE's own autosave removes empty values and clears data on submit;
+      // the board owns persistence and retains the source revision instead.
+      editor=new EasyMDE({element:source,autoDownloadFontAwesome:false,autosave:{enabled:false},forceSync:true,spellChecker:false,status:false,previewRender:markdown,toolbar:['bold','italic','heading','|','quote','unordered-list','ordered-list','code','|','preview','side-by-side']});
+      const field=editor.codemirror.getInputField();field.id='report-source-editor';app.querySelector('label[for="report-source"]').htmlFor=field.id;field.setAttribute('aria-describedby','report-status');
+      const draft=draftFor(reportById(state.report));
+      editor.codemirror.on('change',()=>updateDraft(draft,editor.value()));
+    }
+    renderRecovery();
   }
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
@@ -231,29 +323,21 @@
     const el=event.target;
     if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(reportKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
     if(el.id==='finding-search'){const pos=el.selectionStart;state.filters.query=el.value;render();const input=document.querySelector('#finding-search');input?.focus();input?.setSelectionRange(pos,pos);}
-    if(el.id==='report-source'){
-      const report=reportById(state.report);if(!report)return;const draft=draftFor(report);draft.text=el.value;
-      document.querySelector('#report-preview').innerHTML=markdown(draft.text);
-      if(draft.status!=='conflict') draft.status='unsaved';
-      const writable=reportWritable(draft);
-      document.querySelector('#report-status').textContent=reportStatus(draft,writable);
-      clearTimeout(draft.timer);if(writable && draft.status!=='conflict')draft.timer=setTimeout(()=>saveDraft(draft),600);
-    }
+    if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}
   });
-  async function saveDraft(draft){
-    if(!reportWritable(draft)||draft.inflight||draft.status==='conflict'||draft.text===draft.original)return;
-    const text=draft.text, revision=draft.revision; draft.inflight=true;draft.status='saving';refreshStatus(draft);
-    try {
-      let result, failure;
-      try {result=await BoardAPI.write(state.data,'reportWrite',{programId:draft.program,lane:draft.lane,reportId:draft.id,content:text,revision});} catch(error){failure=error;}
-      // A refresh started during this save must be reconciled before its reply can acknowledge anything.
-      while(pendingReportRefresh)await pendingReportRefresh;
-      if(failure)throw failure;
-      if(result?.revision==null || result.content!==text)throw new Error('Unverified save');
-      if(draft.status!=='conflict'){draft.revision=result.revision;draft.original=text;draft.status=draft.text===text?'saved':'unsaved';}
-    } catch(error){if(draft.status!=='conflict')draft.status=error.status===409?'conflict':'error';}
-    finally {draft.inflight=false;refreshStatus(draft);if(draft.status==='unsaved'){clearTimeout(draft.timer);draft.timer=setTimeout(()=>saveDraft(draft),600);}}
+  function updateDraft(draft,text){
+    draft.text=text;draft.hasDraft=true;if(draft.status!=='conflict')draft.status='unsaved';
+    persistDraft(draft);
+    const preview=document.querySelector('#report-preview');if(preview)preview.innerHTML=markdown(text);
+    refreshStatus(draft);
+    renderRecovery();
   }
-  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && state.program===draft.program && state.lane===draft.lane && state.report===draft.id)status.textContent=reportStatus(draft,reportWritable(draft));}
+  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && draftKey(state.program,state.lane,state.report)===draft.key)status.textContent=reportStatus(draft);}
+  window.addEventListener('storage',event=>{
+    for(const draft of state.drafts.values()) if(event.key===storageKey(draft.key) || event.key===null){
+      draft.storageBlocked=true;refreshStatus(draft);
+    }
+    renderRecovery();
+  });
   load();
 })();

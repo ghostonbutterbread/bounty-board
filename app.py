@@ -254,7 +254,15 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False)
                 return
             url = urlsplit(self.path)
             if url.path == '/api/data':
-                result = discover(root)
+                result: dict = discover(root)
+                # Identity follows the effective canonical path, not report content.
+                # It is an opaque namespace, not a secret or authentication token.
+                try:
+                    import os
+                    canonical = root.resolve(strict=True)
+                    result['root_identity'] = hashlib.sha256(os.fsencode(str(canonical))).hexdigest() if canonical.is_dir() else None
+                except (OSError, RuntimeError):
+                    result['root_identity'] = None
                 result['capabilities'] = {'finding_metadata': self.server.writer_enabled,
                                           'finding_fields': ['severity', 'class_name', 'status', 'severity_rationale'] if self.server.writer_enabled else [],
                                           'finding_options': {'severity': SEVERITIES, 'status': STATUSES} if self.server.writer_enabled else {},

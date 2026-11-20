@@ -6,7 +6,7 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 
 // Fictional in-memory records only. No bounty directories or backend are read.
-const fixture = {programs:[{id:'synthetic',name:'Example program',family:'Test',lanes:[{name:'Web',findings:[{id:'f1',title:'Example finding',severity:'High',class:'Access control',status:'Draft'}],coverage:[{surface:'Example surface',class:'XSS',state:'Mapped',notes:'One boundary observed'}],gadgets:[],map:[],reports:[{id:'r1',title:'Example report',content:'# Report\n\nInitial text',revision:'1'}],warnings:[]}]}],warnings:[]};
+const fixture = {root_identity:'a'.repeat(64),programs:[{id:'synthetic',name:'Example program',family:'Test',lanes:[{name:'Web',findings:[{id:'f1',title:'Example finding',severity:'High',class:'Access control',status:'Draft'}],coverage:[{surface:'Example surface',class:'XSS',state:'Mapped',notes:'One boundary observed'}],gadgets:[],map:[],reports:[{id:'r1',title:'Example report',content:'# Report\n\nInitial text',revision:'1'}],warnings:[]}]}],warnings:[]};
 const root = path.resolve(__dirname, '..');
 const server = http.createServer((req,res) => {
   const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -32,11 +32,13 @@ test('loads a truthful ledger and filters synthetic findings', async () => {
   await page.close();
 });
 
+async function setReport(page, text) { await page.locator('.CodeMirror').evaluate((el,value)=>el.CodeMirror.setValue(value),text); }
+
 async function openReport(page) {
   await page.goto(base);
   await page.getByRole('button',{name:'Programs',exact:true}).click();
   await page.getByRole('button',{name:'Reports',exact:true}).click();
-  await page.locator('#report-source').waitFor();
+  await page.locator('.CodeMirror').waitFor();
 }
 
 test('program, lane and ledger filters change the records in view', async () => {
@@ -59,8 +61,8 @@ test('read-only reports render Markdown without executing HTML or fetching image
   const page=await browser.newPage(); const requests=[];
   page.on('request',r=>requests.push(r.url()));
   await openReport(page);
-  assert.match(await page.locator('#report-status').innerText(),/Saving unavailable/);
-  await page.locator('#report-source').fill('# Heading\n\n**bold**\n\n<img src="https://bad.invalid/x" onerror="window.pwned=1">\n\n![x](https://bad.invalid/img)');
+  assert.match(await page.locator('#report-status').innerText(),/Saving to report unavailable/);
+  await setReport(page,'# Heading\n\n**bold**\n\n<img src="https://bad.invalid/x" onerror="window.pwned=1">\n\n![x](https://bad.invalid/img)');
   assert.equal(await page.locator('#report-preview h1').innerText(),'Heading');
   assert.equal(await page.locator('#report-preview strong').innerText(),'bold');
   assert.equal(await page.locator('#report-preview img').count(),0);
@@ -73,160 +75,36 @@ test('read-only reports render Markdown without executing HTML or fetching image
   await page.close();
 });
 
-test('advertised report saves use revisions, debounce, and preserve conflicts', async () => {
-  const page=await browser.newPage(); const writes=[];
-  const data=structuredClone(fixture);data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
+test('advertised report writes stay disabled and browser drafts survive navigation and source conflict', async () => {
+  const page=await browser.newPage(), writes=[];const data=structuredClone(fixture);
+  data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.route('**/api/report',async route=>{
-    const body=route.request().postDataJSON(); writes.push(body);
-    if(writes.length===1) return route.fulfill({json:{content:body.content,revision:'2'}});
-    return route.fulfill({status:409,json:{error:'conflict'}});
-  });
-  await openReport(page);
-  await page.locator('#report-source').fill('# New report');
-  assert.match(await page.locator('#report-status').innerText(),/Unsaved/);
-  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent==='Saved to source.');
-  assert.equal(writes.length,1);assert.equal(writes[0].revision,'1');
-  await page.locator('#report-source').fill('# Conflict draft');
-  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.startsWith('Conflict:'));
-  assert.equal(writes[1].revision,'2');
-  await page.locator('#report-source').fill('# Keep my draft');
-  await page.waitForTimeout(800);
-  assert.equal(writes.length,2);
+  await page.route('**/api/report',route=>{writes.push(route.request().method());return route.fulfill({status:500});});
+  await openReport(page);await setReport(page,'My synthetic draft');
+  assert.match(await page.locator('#report-status').innerText(),/saved in browser/i);
+  assert.equal(await page.getByRole('button',{name:'Save to report unavailable'}).isDisabled(),true);
   await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  data.programs[0].lanes[0].reports[0].content='Changed source';data.programs[0].lanes[0].reports[0].revision='2';
+  await page.getByRole('button',{name:'Refresh'}).click();await page.getByText('Example surface').waitFor();
   await page.getByRole('button',{name:'Reports',exact:true}).click();
-  assert.equal(await page.locator('#report-source').inputValue(),'# Keep my draft');
-  assert.match(await page.locator('#report-status').innerText(),/Conflict/);
+  assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);
+  assert.equal(await page.locator('#report-source').inputValue(),'My synthetic draft');
+  await setReport(page,'Still my draft');
+  assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),true);
+  await page.getByRole('button',{name:'Refresh'}).click();await page.getByText(/^Conflict:/).waitFor();
+  assert.equal(await page.locator('#report-source').inputValue(),'Still my draft');assert.deepEqual(writes,[]);
   await page.close();
 });
 
-test('report edits during a pending save are sent with its returned revision', async () => {
-  const page=await browser.newPage();const data=structuredClone(fixture), writes=[];let release;
-  const gate=new Promise(resolve=>{release=resolve;});
+test('unchanged refresh retains edited browser draft with no source write', async () => {
+  const page=await browser.newPage(), writes=[];const data=structuredClone(fixture);
   data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.route('**/api/report',async route=>{const body=route.request().postDataJSON();writes.push(body);if(writes.length===1)await gate;await route.fulfill({json:{content:body.content,revision:String(writes.length+1)}});});
-  try {
-    await openReport(page);await page.locator('#report-source').fill('First draft');
-    await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent==='Saving…');
-    await page.locator('#report-source').fill('Second draft');
-    release();
-    await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent==='Saved to source.');
-    assert.equal(writes.length,2);assert.equal(writes[0].revision,'1');assert.equal(writes[1].revision,'2');assert.equal(writes[1].content,'Second draft');
-  } finally {release();await page.close();}
-});
-
-test('a refresh conflict survives a late successful report save', async () => {
-  const page=await browser.newPage();const data=structuredClone(fixture), writes=[];let release, started;
-  const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});
-  data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
-  await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.route('**/api/report',async route=>{const body=route.request().postDataJSON();writes.push(body);started();await gate;await route.fulfill({json:{content:body.content,revision:'save-revision'}});});
-  try {
-    await page.clock.install();await openReport(page);
-    await page.evaluate(()=>{const write=BoardAPI.write;window.saveCalls=0;BoardAPI.write=async(...args)=>{window.saveCalls++;try{return await write(...args);}finally{window.saveSettled=true;}};});
-    await page.locator('#report-source').fill('Original draft');await page.clock.fastForward(600);await received;
-    await page.locator('#report-source').fill('Later draft');
-    data.programs[0].lanes[0].reports[0].content='Conflicting source';data.programs[0].lanes[0].reports[0].revision='external-revision';
-    await page.getByRole('button',{name:'Refresh'}).click();
-    await page.getByText(/^Conflict:/).waitFor();
-    release();await page.waitForFunction(()=>window.saveSettled===true,null,{polling:50});
-    assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);
-    assert.equal(await page.locator('#report-source').inputValue(),'Later draft');
-    await page.clock.fastForward(2000);await page.evaluate(()=>Promise.resolve());
-    assert.equal(writes.length,1);assert.equal(await page.evaluate(()=>window.saveCalls),1);assert.equal(writes[0].revision,'1');
-    await page.getByRole('button',{name:'Coverage',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
-    assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);
-    assert.equal(await page.locator('#report-source').inputValue(),'Later draft');
-  } finally {release();await page.close();}
-});
-
-for (const {name, outcome, returnBeforeReply} of [
-  {name:'late failure while report is open',outcome:'failure',returnBeforeReply:true},
-  {name:'late success after navigating away',outcome:'success',returnBeforeReply:false},
-  {name:'late failure after navigating away',outcome:'failure',returnBeforeReply:false},
-  {name:'late success after returning to the report',outcome:'success',returnBeforeReply:true},
-]) {
-  test(`refresh conflict persists through ${name}`, async () => {
-    const page=await browser.newPage();const data=structuredClone(fixture), writes=[];let release, started;
-    const gate=new Promise(resolve=>{release=resolve;});const received=new Promise(resolve=>{started=resolve;});
-    data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
-    await page.route('**/api/data',route=>route.fulfill({json:data}));
-    await page.route('**/api/report',async route=>{const body=route.request().postDataJSON();writes.push(body);started();await gate;if(outcome==='success')await route.fulfill({json:{content:body.content,revision:'save-revision'}});else await route.fulfill({status:500,body:'failed'});});
-    try {
-      await page.clock.install();await openReport(page);
-      await page.evaluate(()=>{const write=BoardAPI.write;window.saveCalls=0;BoardAPI.write=async(...args)=>{window.saveCalls++;try{return await write(...args);}finally{window.saveSettled=true;}};});
-      await page.locator('#report-source').fill('My draft');await page.clock.fastForward(600);await received;
-      await page.getByRole('button',{name:'Coverage',exact:true}).click();
-      data.programs[0].lanes[0].reports[0].content='Changed source';data.programs[0].lanes[0].reports[0].revision='external-revision';
-      await page.getByRole('button',{name:'Refresh'}).click();await page.getByText('Example surface').waitFor();
-      if(returnBeforeReply){await page.getByRole('button',{name:'Reports',exact:true}).click();assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);}
-      release();await page.waitForFunction(()=>window.saveSettled===true,null,{polling:50});
-      if(!returnBeforeReply)await page.getByRole('button',{name:'Reports',exact:true}).click();
-      assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);
-      assert.equal(await page.locator('#report-source').inputValue(),'My draft');
-      await page.locator('#report-source').fill('# Report\n\nInitial text');
-      assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),true);
-      await page.getByRole('button',{name:'Refresh'}).click();await page.getByText(/^Conflict:/).waitFor();
-      assert.equal(await page.locator('#report-source').inputValue(),'# Report\n\nInitial text');
-      await page.locator('#report-source').fill('Still my draft');await page.clock.fastForward(2000);await page.evaluate(()=>Promise.resolve());
-      assert.equal(writes.length,1);assert.equal(await page.evaluate(()=>window.saveCalls),1);assert.equal(writes[0].revision,'1');
-    } finally {release();await page.close();}
-  });
-}
-
-test('a refresh in progress prevents premature save acknowledgement', async () => {
-  const page=await browser.newPage();const data=structuredClone(fixture), writes=[];let releaseWrite, writeStarted, releaseLoad, loadStarted, loads=0;
-  const writeGate=new Promise(resolve=>{releaseWrite=resolve;}), writeReceived=new Promise(resolve=>{writeStarted=resolve;});
-  const loadGate=new Promise(resolve=>{releaseLoad=resolve;}), loadReceived=new Promise(resolve=>{loadStarted=resolve;});
-  data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
-  await page.route('**/api/data',async route=>{loads++;if(loads>1){loadStarted();await loadGate;}await route.fulfill({json:data});});
-  await page.route('**/api/report',async route=>{const body=route.request().postDataJSON();writes.push(body);writeStarted();await writeGate;await route.fulfill({json:{content:body.content,revision:'save-revision'}});});
-  try {
-    await page.clock.install();await openReport(page);
-    await page.evaluate(()=>{const write=BoardAPI.write;window.saveCalls=0;BoardAPI.write=async(...args)=>{window.saveCalls++;try{return await write(...args);}finally{window.saveSettled=true;}};});
-    await page.locator('#report-source').fill('My draft');await page.clock.fastForward(600);await writeReceived;
-    await page.locator('#report-source').fill('Later draft');
-    data.programs[0].lanes[0].reports[0].content='Changed source';data.programs[0].lanes[0].reports[0].revision='external-revision';
-    await page.getByRole('button',{name:'Refresh'}).click();await loadReceived;
-    releaseWrite();await page.waitForFunction(()=>window.saveSettled===true,null,{polling:50});
-    await page.clock.fastForward(2000);assert.equal(await page.evaluate(()=>window.saveCalls),1);
-    releaseLoad();await page.locator('#report-source').waitFor();
-    assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);
-    assert.equal(await page.locator('#report-source').inputValue(),'Later draft');
-    await page.clock.fastForward(2000);assert.equal(await page.evaluate(()=>window.saveCalls),1);assert.equal(writes.length,1);
-  } finally {releaseWrite();releaseLoad();await page.close();}
-});
-
-test('unchanged refresh during a save allows the next revisioned save', async () => {
-  const page=await browser.newPage();const data=structuredClone(fixture), writes=[];let releaseWrite, writeStarted, releaseLoad, loadStarted, loads=0;
-  const writeGate=new Promise(resolve=>{releaseWrite=resolve;}), writeReceived=new Promise(resolve=>{writeStarted=resolve;});
-  const loadGate=new Promise(resolve=>{releaseLoad=resolve;}), loadReceived=new Promise(resolve=>{loadStarted=resolve;});
-  data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
-  await page.route('**/api/data',async route=>{loads++;if(loads>1){loadStarted();await loadGate;}await route.fulfill({json:data});});
-  await page.route('**/api/report',async route=>{const body=route.request().postDataJSON();writes.push(body);if(writes.length===1){writeStarted();await writeGate;}await route.fulfill({json:{content:body.content,revision:String(writes.length+1)}});});
-  try {
-    await page.clock.install();await openReport(page);
-    await page.evaluate(()=>{const write=BoardAPI.write;BoardAPI.write=async(...args)=>{try{return await write(...args);}finally{window.saveSettled=true;}};});
-    await page.locator('#report-source').fill('First draft');await page.clock.fastForward(600);await writeReceived;
-    await page.locator('#report-source').fill('Next draft');
-    await page.getByRole('button',{name:'Refresh'}).click();await loadReceived;
-    releaseWrite();await page.waitForFunction(()=>window.saveSettled===true,null,{polling:50});
-    releaseLoad();await page.locator('#report-source').waitFor();
-    await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent==='Unsaved changes.',null,{polling:50});
-    await page.clock.fastForward(600);
-    await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent==='Saved to source.',null,{polling:50});
-    assert.equal(writes.length,2);assert.equal(writes[1].revision,'2');assert.equal(writes[1].content,'Next draft');
-  } finally {releaseWrite();releaseLoad();await page.close();}
-});
-
-test('failed saves preserve draft and never claim success', async () => {
-  const page=await browser.newPage();const data=structuredClone(fixture);data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
-  await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.route('**/api/report',route=>route.fulfill({status:500,body:'failed'}));
-  await openReport(page);await page.locator('#report-source').fill('Keep this');
-  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.startsWith('Save failed.'));
-  assert.equal(await page.locator('#report-source').inputValue(),'Keep this');
+  await page.route('**/api/report',route=>{writes.push(route.request().method());return route.fulfill({status:500});});
+  await openReport(page);await setReport(page,'First draft');await setReport(page,'Next draft');
+  await page.getByRole('button',{name:'Refresh'}).click();await page.locator('.CodeMirror').waitFor();
+  assert.equal(await page.locator('#report-source').inputValue(),'Next draft');
+  assert.match(await page.locator('#report-status').innerText(),/saved in browser/i);assert.deepEqual(writes,[]);
   await page.close();
 });
 
@@ -286,7 +164,7 @@ test('renders backend ledger, coverage and lazily fetched report shapes', async 
   await page.getByRole('button',{name:'Reports',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#report-source')?.value==='# Source from backend');
   assert.equal(reportQueries.length,1);assert.equal(reportQueries[0].get('path'),'Example.md');assert.equal(reportQueries[0].get('program'),'test');
-  assert.match(await page.locator('#report-status').innerText(),/Saving unavailable/);
+  assert.match(await page.locator('#report-status').innerText(),/identity unavailable/i);
   await page.close();
 });
 
@@ -297,10 +175,10 @@ test('refresh updates a clean report but retains a local draft', async () => {
   data.programs[0].lanes[0].reports[0].content='# Changed at source';data.programs[0].lanes[0].reports[0].revision='2';
   await page.getByRole('button',{name:'Refresh'}).click();
   await page.waitForFunction(()=>document.querySelector('#report-source')?.value==='# Changed at source',null,{timeout:3000});
-  await page.locator('#report-source').fill('# Local draft');
+  await setReport(page,'# Local draft');
   data.programs[0].lanes[0].reports[0].content='# Another source change';
   await page.getByRole('button',{name:'Refresh'}).click();
-  await page.locator('#report-source').waitFor();
+  await page.locator('.CodeMirror').waitFor();
   assert.equal(await page.locator('#report-source').inputValue(),'# Local draft');
   await page.close();
 });
@@ -447,9 +325,9 @@ test('explicitly read-only report never writes even when a capability exists', a
   data.capabilities={reportWrite:{enabled:true,method:'PATCH',url:'/api/report'}};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/report',route=>{writes++;return route.fulfill({status:500});});
-  await openReport(page);await page.locator('#report-source').fill('temporary');
+  await openReport(page);await setReport(page,'temporary');
   await page.waitForTimeout(800);
-  assert.equal(writes,0);assert.match(await page.locator('#report-status').innerText(),/Saving unavailable/);
+  assert.equal(writes,0);assert.match(await page.locator('#report-status').innerText(),/saved in browser/i);
   await page.close();
 });
 

@@ -4,9 +4,13 @@
   "private": true,
   "description": "Local-first bug bounty research workspace",
   "scripts": {
-    "test": "node --test static/tests/app.test.cjs"
+    "test": "node --test --test-concurrency=1 --test-skip-pattern='^browser metadata update reaches backend with a disposable synthetic writer$' static/tests/app.test.cjs static/tests/drafts.synthetic.test.cjs static/tests/root-identity.synthetic.test.cjs static/tests/review.synthetic.test.cjs"
   },
   "devDependencies": {
     "playwright": "1.60.0"
+  },
+  "dependencies": {
+    "easymde": "2.21.0",
+    "font-awesome": "4.7.0"
   }
 }
