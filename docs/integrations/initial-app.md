@@ -7,8 +7,8 @@
 - **Intended integration target:** beta
 - **Last updated:** 2026-11-20
 - **Owning feature branch/ref:** feat/initial-app
-- **Latest immutable recovery checkpoint:** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8
-- **Feature implementation commit(s):** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8
+- **Latest immutable recovery checkpoint:** a03205127cd6502cf2299a891bfc74c4304c5433
+- **Feature implementation commit(s):** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8; a03205127cd6502cf2299a891bfc74c4304c5433 adds an intentionally failing config test.
 - **Inspiration / canonical references:** `docs/product.md`; user-approved mockup; BBH ledger, coverage, MapStore and storage ownership skills.
 
 ## Intent
@@ -22,7 +22,7 @@ The initial read-only application discovers program and lane data and renders th
 ## Evidence and review
 
 - Bootstrap: private GitHub repo created and read back; initial main and beta point to base commit.
-- Tests and commands: `python3 -W error::ResourceWarning -m unittest discover -s tests -v` (14 passed); `node --test static/tests/app.test.cjs` (14 passed with preinstalled Playwright/Chrome).
+- Tests and commands: `python3 -W error::ResourceWarning -m unittest discover -s tests -v` (14 passed before config test); `node --test static/tests/app.test.cjs` (14 passed with preinstalled Playwright/Chrome). `python3 -m unittest discover -s tests -p test_config.py -v` currently fails intentionally: `--config` is not yet implemented.
 - Independent review: in progress; review agent assigned.
 - Replay/cohort/fixture evidence: browser exercised the real HTTP server using a synthetic fixture root; selected a program and read/rendered a report. Eight actual lanes were sampled read-only for adapter compatibility; no target details copied into this repository.
 - Merge/ancestry evidence: pending.
@@ -36,9 +36,9 @@ The initial read-only application discovers program and lane data and renders th
 ## Interruption / resume handoff
 
 - Owning feature branch/ref: feat/initial-app.
-- Latest immutable recovery checkpoint: 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8.
-- Feature implementation commit(s): 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8.
-- Exact resume point: reconcile independent review, add canonical metadata write path and investigate a coordinated report autosave, then retest and re-review before beta integration.
+- Latest immutable recovery checkpoint: a03205127cd6502cf2299a891bfc74c4304c5433.
+- Feature implementation commit(s): 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8; config RED test a03205127cd6502cf2299a891bfc74c4304c5433.
+- Exact resume point: implement `--config` until the config test passes, reconcile independent review, add canonical metadata write path, and investigate safe report autosave. Retest and re-review before beta integration.
 - Working-tree state at handoff: clean after the dossier-only checkpoint commit.
 
 ## Decision gates
