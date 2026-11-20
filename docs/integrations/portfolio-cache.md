@@ -1,6 +1,7 @@
 # Portfolio cache — branch integration handoff
 
 - Worktree: `/home/ryushe/projects/bounty-board-performance`
+- Latest immutable WIP checkpoint: `0d26bbbb6bf8c7e95951f306c2932dce0c66c37c` (not reviewed, do not integrate).
 - Feature branch: `feat/portfolio-cache`; base: `9bc6b4519e3e979d46adab7834311a4d2564199d`; intended integration target: `feat/tailnet-access` (parent agent to review and integrate).
 - Status: **WIP, not safe to integrate or activate.** Repeated fixes exposed architectural coupling between source identity, cache freshness and live actions; reassess architecture before further fixes. Safe Python suite passed 56 excluding real BBH; latest full browser suite had five failures, three subsequently passed focused reruns, two remain unresolved and full rerun outstanding. No runtime activation or live-root tests performed.
 
