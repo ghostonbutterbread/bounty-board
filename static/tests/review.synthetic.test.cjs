@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {chromium} = require('playwright');
 const root=path.resolve(__dirname,'..');
-const fixture=()=>({root_identity:'a'.repeat(64),programs:[{id:'synthetic',name:'Synthetic',family:'Test',lanes:[{name:'Web',findings:[],coverage:[],reports:[{id:'r',path:'r.md',content:'Original',revision:'1'}],warnings:[]}]}]});
+const fixture=()=>({source_token:'synthetic-scan-token',portfolio:{state:'ready'},root_identity:'a'.repeat(64),programs:[{id:'synthetic',name:'Synthetic',family:'Test',lanes:[{name:'Web',findings:[],coverage:[],reports:[{id:'r',path:'r.md',content:'Original',revision:'1'}],warnings:[]}]}]});
 async function run(fn){
  const data=fixture();let source={content:'Original',revision:'1'},fail=false;const requests=[];
  const server=http.createServer((req,res)=>{requests.push([req.method,req.url]);if(req.method!=='GET'){res.writeHead(405);return res.end();}const p=new URL(req.url,'http://localhost').pathname;if(p==='/api/data'){res.setHeader('content-type','application/json');return res.end(JSON.stringify(data));}if(p==='/api/report'){res.writeHead(fail?503:200,{'content-type':'application/json'});return res.end(JSON.stringify(source));}const file=path.join(root,p==='/'?'index.html':p.slice(1));if(!file.startsWith(root+path.sep)){res.writeHead(403);return res.end();}fs.readFile(file,(e,b)=>{if(e){res.writeHead(404);return res.end();}res.setHeader('content-type',({'.html':'text/html','.js':'text/javascript','.css':'text/css'})[path.extname(file)]||'text/plain');res.end(b);});});

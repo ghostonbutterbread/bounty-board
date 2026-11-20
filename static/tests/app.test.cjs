@@ -6,7 +6,7 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 
 // Fictional in-memory records only. No bounty directories or backend are read.
-const fixture = {root_identity:'a'.repeat(64),programs:[{id:'synthetic',name:'Example program',family:'Test',lanes:[{name:'Web',findings:[{id:'f1',title:'Example finding',severity:'High',class:'Access control',status:'Draft'}],coverage:[{surface:'Example surface',class:'XSS',state:'Mapped',notes:'One boundary observed'}],gadgets:[],map:[],reports:[{id:'r1',title:'Example report',content:'# Report\n\nInitial text',revision:'1'}],warnings:[]}]}],warnings:[]};
+const fixture = {source_token:'synthetic-scan-token',portfolio:{state:'ready'},root_identity:'a'.repeat(64),programs:[{id:'synthetic',name:'Example program',family:'Test',lanes:[{name:'Web',findings:[{id:'f1',title:'Example finding',severity:'High',class:'Access control',status:'Draft'}],coverage:[{surface:'Example surface',class:'XSS',state:'Mapped',notes:'One boundary observed'}],gadgets:[],map:[],reports:[{id:'r1',title:'Example report',content:'# Report\n\nInitial text',revision:'1'}],warnings:[]}]}],warnings:[]};
 const root = path.resolve(__dirname, '..');
 const server = http.createServer((req,res) => {
   const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -30,6 +30,285 @@ test('loads a truthful ledger and filters synthetic findings', async () => {
   assert.equal(await page.getByText('Example finding').count(),0);
   assert.ok(await page.getByText(/No findings match/).count());
   await page.close();
+});
+
+test('report request carries the displayed source token', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let header;
+  data.source_token='synthetic-scan-token';
+  data.programs[0].lanes[0].reports=[{path:'same.md',name:'same.md'}];
+  await page.route('**/api/data',route=>route.fulfill({json:{...data,portfolio:{state:'ready'}}}));
+  await page.route('**/api/report?*',route=>{header=route.request().headers()['x-portfolio-source'];return route.fulfill({json:{content:'source',revision:'1'}});});
+  try {await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();assert.equal(header,data.source_token);}
+  finally {await page.close();}
+});
+
+test('metadata request carries the displayed scan token', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let header;
+  data.source_token='synthetic-scan-token';
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'LOW'};
+  await page.route('**/api/data',route=>route.fulfill({json:{...data,portfolio:{state:'ready'}}}));
+  await page.route('**/api/finding',route=>{header=route.request().headers()['x-portfolio-source'];return route.fulfill({json:{finding:{fid:'F01',severity:'HIGH'}}});});
+  try {await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByLabel('severity for Example finding').selectOption('HIGH');await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);assert.equal(header,data.source_token);}
+  finally {await page.close();}
+});
+
+test('ready response without a scan token is display-only even for forced metadata events', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let writes=0;
+  delete data.source_token;
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'LOW'};
+  await page.route('**/api/data',route=>route.fulfill({json:{...data,portfolio:{state:'ready'}}}));
+  await page.route('**/api/finding',route=>{writes++;return route.fulfill({status:500});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    const control=page.getByLabel('severity for Example finding');
+    assert.equal(await control.isDisabled(),true);
+    await control.evaluate(el=>{el.value='HIGH';el.dispatchEvent(new Event('change',{bubbles:true}));});
+    assert.equal(writes,0);
+  } finally {await page.close();}
+});
+
+test('successful metadata update makes old snapshot display-only until fresh scan', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0,release,arrived;
+  const gate=new Promise(r=>release=r), blocked=new Promise(r=>arrived=r);
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'LOW'};
+  await page.route('**/api/data',async route=>{if(++calls>1){arrived();await gate;}return route.fulfill({json:data});});
+  await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F01',severity:'HIGH'}}}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('HIGH');await blocked;
+    assert.equal(await page.getByLabel('severity for Example finding').isDisabled(),true);
+  } finally {release();await page.close();}
+});
+
+test('post-write old ready token cannot restore stale metadata', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0,arrived,release;
+  const blocked=new Promise(r=>arrived=r), gate=new Promise(r=>release=r);
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'LOW'};
+  await page.route('**/api/data',async route=>{if(++calls===2){arrived();await gate;}return route.fulfill({json:{...data,portfolio:{state:'ready',updated_at:calls===2?'stale':'initial'}}});});
+  await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F01',severity:'HIGH'}}}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('HIGH');await blocked;release();
+    await page.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('stale'));
+    assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'HIGH');
+    assert.equal(await page.getByLabel('severity for Example finding').isDisabled(),true);
+  } finally {release();await page.close();}
+});
+
+test('retained snapshot is display-only for existing and new clients during refresh', async () => {
+  const data=structuredClone(fixture);let busy=false, writes=0, reports=0;
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'LOW'};
+  data.programs[0].lanes[0].reports=[{path:'same.md',name:'same.md'}];
+  const setup=async page=>{
+    await page.route('**/api/data',route=>route.fulfill({json:{...data,portfolio:{state:busy?'refreshing':'ready'}}}));
+    await page.route('**/api/finding',route=>{writes++;return route.fulfill({status:500});});
+    await page.route('**/api/report?*',route=>{reports++;return route.fulfill({json:{content:'wrong root',revision:'1'}});});
+  };
+  const first=await browser.newPage(), second=await browser.newPage();
+  try {
+    await setup(first);await setup(second);await first.goto(base);
+    await first.getByRole('button',{name:'Programs',exact:true}).click();
+    busy=true;await first.getByRole('button',{name:'Refresh'}).click();
+    await first.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('Refreshing'));
+    assert.equal(await first.getByLabel('severity for Example finding').isDisabled(),true);
+    await first.getByRole('button',{name:'Reports',exact:true}).click();
+    await first.getByText(/source identity.*unverified/i).waitFor();
+    await second.goto(base);await second.getByRole('button',{name:'Programs',exact:true}).click();
+    assert.equal(await second.getByLabel('severity for Example finding').isDisabled(),true);
+    await second.getByRole('button',{name:'Reports',exact:true}).click();
+    await second.getByText(/source identity.*unverified/i).waitFor();
+    assert.equal(writes,0);assert.equal(reports,0);
+  } finally {await first.close();await second.close();}
+});
+
+test('rationale draft is isolated across matching roots', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'Example finding',severity_rationale:'Saved'}];
+  await page.route('**/api/data',route=>route.fulfill({json:structuredClone(data)}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).click();
+    await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).fill('Root A draft');
+    data.root_identity='b'.repeat(64);
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).waitFor({timeout:3000});
+    assert.equal(await page.getByText('Root A draft',{exact:true}).count(),0);
+    data.root_identity='a'.repeat(64);
+    await page.getByRole('button',{name:'Refresh'}).click();
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).inputValue(),'Root A draft');
+  } finally {await page.close();}
+});
+
+test('initial loading waits for the real portfolio before rendering counts', async () => {
+  const page=await browser.newPage();let calls=0;
+  await page.route('**/api/data', route=>{
+    calls++;
+    return route.fulfill(calls===1 ? {status:202,json:{portfolio:{state:'loading',updated_at:null}}} : {json:{...fixture,portfolio:{state:'ready',updated_at:'2026-01-01T00:00:00Z'}}});
+  });
+  await page.goto(base);
+  await page.getByText(/Loading workspace/).waitFor();
+  await page.getByText('Example program').first().waitFor({timeout:5000});
+  assert.ok(calls>=2);
+  await page.close();
+});
+
+test('refresh clicked during a background poll is sent after that poll', async () => {
+  const page=await browser.newPage();let calls=0, release, arrived, requested;
+  const gate=new Promise(r=>release=r), blocked=new Promise(r=>arrived=r), next=new Promise(r=>requested=r);
+  await page.route('**/api/data',async route=>{
+    const n=++calls;
+    if(n===3){arrived();await gate;}
+    if(n===4){requested(route.request().headers()['x-portfolio-refresh']);}
+    return route.fulfill({json:{...fixture,portfolio:{state:n===2?'refreshing':'ready'}}});
+  });
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Refresh'}).click();await blocked;
+    await page.getByRole('button',{name:'Refresh'}).click();release();
+    assert.equal(await Promise.race([next,new Promise((_,reject)=>setTimeout(()=>reject(new Error('refresh was lost')),3000))]),'1');
+  } finally {release();await page.close();}
+});
+
+test('ready background poll preserves focused uncommitted class input', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0,release,arrived;
+  const gate=new Promise(r=>release=r), blocked=new Promise(r=>arrived=r);
+  data.capabilities={finding_metadata:true,finding_fields:['class_name','severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',class_name:'xss',severity:'LOW'};
+  await page.route('**/api/data',async route=>{
+    const n=++calls;if(n===2){arrived();await gate;}
+    return route.fulfill({json:{...data,portfolio:{state:'ready',updated_at:n===2?'final':'old'}}});
+  });
+  await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F01',severity:'HIGH'}}}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('HIGH');await blocked;
+    const input=page.getByLabel('class for Example finding');await input.fill('unsaved-class');await input.focus();
+    release();await page.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('final'));
+    assert.match(await page.locator('#portfolio-status').innerText(),/display.*deferred/i);
+    assert.equal(await input.inputValue(),'unsaved-class');
+    assert.equal(await input.evaluate(el=>document.activeElement===el),true);
+  } finally {release();await page.close();}
+});
+
+test('ready background poll preserves the real report editor and caret', async () => {
+  const page=await browser.newPage();let calls=0,release,arrived;
+  const gate=new Promise(r=>release=r), blocked=new Promise(r=>arrived=r);
+  await page.route('**/api/data',async route=>{
+    const n=++calls;if(n===3){arrived();await gate;}
+    return route.fulfill({json:{...fixture,portfolio:{state:n===2?'refreshing':'ready',updated_at:n===3?'final':'old'}}});
+  });
+  try {
+    await openReport(page);await page.getByRole('button',{name:'Refresh'}).click();await blocked;
+    const editor=page.locator('.CodeMirror');await editor.evaluate(el=>{el.dataset.sentinel='original';el.CodeMirror.focus();el.CodeMirror.setCursor({line:0,ch:2});});
+    release();await page.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('final'));
+    assert.equal(await editor.getAttribute('data-sentinel'),'original');
+    assert.deepEqual(await editor.evaluate(el=>el.CodeMirror.getCursor()),{line:0,ch:2});
+    assert.equal(await editor.evaluate(el=>el.CodeMirror.hasFocus()),true);
+  } finally {release();await page.close();}
+});
+
+test('background polling leaves an active editor intact', async () => {
+  const page=await browser.newPage();let calls=0, fourth;
+  const observed=new Promise(resolve=>{fourth=resolve;});
+  await page.route('**/api/data', route=>{
+    calls++;
+    if(calls===4) fourth();
+    return route.fulfill({json:{...fixture,portfolio:{state:calls===1?'ready':'refreshing',updated_at:'2026-01-01T00:00:00Z'}}});
+  });
+  await openReport(page);
+  await page.getByRole('button',{name:'Refresh'}).click();
+  await page.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('Refreshing'));
+  await page.locator('.CodeMirror').evaluate(el=>{el.dataset.pollSentinel='same';});
+  await observed;
+  assert.equal(await page.locator('.CodeMirror').getAttribute('data-poll-sentinel'),'same');
+  await page.close();
+});
+
+test('a poll begun before a metadata update cannot restore old values', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0, release, arrived, followup;
+  const gate=new Promise(resolve=>{release=resolve;}), blocked=new Promise(resolve=>{arrived=resolve;}), next=new Promise(resolve=>{followup=resolve;});
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'HIGH'};
+  await page.route('**/api/data',async route=>{
+    calls++;
+    if(calls===2){arrived();await gate;const stale=structuredClone(data);stale.programs[0].lanes[0].findings[0].severity='LOW';return route.fulfill({json:{...stale,portfolio:{state:'ready'}}});}
+    if(calls>=3){followup();return route.fulfill({json:{...data,portfolio:{state:'ready'}}});}
+    return route.fulfill({json:{...data,portfolio:{state:'ready'}}});
+  });
+  await page.route('**/api/finding',route=>{const value=route.request().postDataJSON().patch.severity;return route.fulfill({json:{finding:{fid:'F01',severity:value}}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('LOW');await blocked;
+    await page.getByLabel('severity for Example finding').selectOption('HIGH');
+    await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    release();await Promise.race([next,new Promise((_,reject)=>setTimeout(()=>reject(new Error('stale poll was not retried')),3500))]);
+    assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'HIGH');
+  } finally {release();await page.close();}
+});
+
+test('unidentified replacement server never serves reports into the old root', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0, reports=0;
+  data.programs[0].lanes[0].reports=[{path:'same.md',name:'same.md'}];
+  await page.route('**/api/data',route=>route.fulfill(++calls===1 ? {json:{...data,portfolio:{state:'ready'}}} : {status:202,json:{portfolio:{state:'loading'}}}));
+  await page.route('**/api/report?*',route=>{reports++;return route.fulfill({json:{content:'new root',revision:'2'}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('Refreshing'));
+    await page.getByRole('button',{name:'Reports',exact:true}).click();
+    await page.getByText(/source identity.*unverified/i).waitFor({timeout:3000});
+    assert.equal(reports,0);
+  } finally {await page.close();}
+});
+
+test('inflight report response is not accepted after refresh starts', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0, release, arrived;
+  const gate=new Promise(resolve=>{release=resolve;}), blocked=new Promise(resolve=>{arrived=resolve;});
+  data.programs[0].lanes[0].reports=[{path:'same.md',name:'same.md'}];
+  await page.route('**/api/data',route=>route.fulfill(++calls===1 ? {json:{...data,portfolio:{state:'ready'}}} : {status:202,json:{portfolio:{state:'loading'}}}));
+  await page.route('**/api/report?*',async route=>{arrived();await gate;return route.fulfill({json:{content:'wrong root content',revision:'2'}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await blocked;
+    await page.getByRole('button',{name:'Refresh'}).click();await page.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('Refreshing'));
+    await page.evaluate(()=>{window.reportRendered=new Promise(resolve=>{const observer=new MutationObserver(()=>{observer.disconnect();resolve();});observer.observe(document.querySelector('#app'),{childList:true});});});
+    release();await page.evaluate(()=>window.reportRendered);
+    await page.getByText(/source identity.*unverified/i).waitFor({timeout:3000});
+    assert.equal(await page.getByText('wrong root content').count(),0);
+  } finally {release();await page.close();}
+});
+
+test('failed post-write scan keeps confirmed metadata and distrusts retained snapshot', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0;
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'LOW'};
+  await page.route('**/api/data',route=>route.fulfill({json:{...data,portfolio:{state:++calls===1?'ready':'error',error:calls===1?null:'Scan failed'}}}));
+  await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F01',severity:'HIGH'}}}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('HIGH');
+    await page.waitForFunction(()=>document.querySelector('#portfolio-status').textContent.includes('Scan failed'),null,{timeout:4000});
+    assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'HIGH');
+    assert.equal(await page.getByLabel('severity for Example finding').isDisabled(),true);
+  } finally {await page.close();}
+});
+
+test('successful BBH update polls the invalidated portfolio', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let calls=0, polled;
+  const next=new Promise(resolve=>{polled=resolve;});
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  data.programs[0].lanes[0].findings[0]={fid:'F01',title:'Example finding',severity:'LOW'};
+  await page.route('**/api/data',route=>{if(++calls>1)polled();return route.fulfill({json:{...data,portfolio:{state:'ready'}}});});
+  await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F01',severity:'HIGH'}}}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Example finding').selectOption('HIGH');
+    await Promise.race([next,new Promise((_,reject)=>setTimeout(()=>reject(new Error('portfolio was not polled')),3000))]);
+  } finally {await page.close();}
 });
 
 async function setReport(page, text) { await page.locator('.CodeMirror').evaluate((el,value)=>el.CodeMirror.setValue(value),text); }
@@ -152,6 +431,7 @@ test('renders backend ledger, coverage and lazily fetched report shapes', async 
   const page=await browser.newPage();
   const data={programs:[{id:'web_bounty/test',name:'test',family:'web_bounty',lanes:[{name:'web',findings:[{fid:'SYN-1',title:'Synthetic issue',class_name:'XSS',severity:'High',status:'Draft',submission_status:'submitted',platform_outcome:'duplicate'}],coverage:{items:[{surface_key:'Synthetic surface',class_name:'XSS',status:'open'}],counts:{open:1},total:1},map:[],gadgets:[],reports:[{path:'Example.md',name:'Example.md'}],warnings:[]}]}],warnings:[]};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
+  data.portfolio={state:'ready'};data.source_token='synthetic-source-token';
   let reportQueries=[];
   await page.route('**/api/report?*',route=>{reportQueries.push(new URL(route.request().url()).searchParams);return route.fulfill({json:{content:'# Source from backend',revision:'rev1',editable:false}})});
   await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
@@ -425,7 +705,7 @@ test('advertised BBH metadata capability sends the actual backend contract', asy
   data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',severity:'HIGH',class_name:'xss',status:'raw'}];
   data.capabilities={finding_metadata:true,finding_fields:['severity','class_name','status','severity_rationale'],report_edit:false};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();headers=route.request().headers();return route.fulfill({json:{finding:{fid:'F01',severity:'LOW',class_name:'xss',status:'raw'}}});});
+  await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();headers=route.request().headers();data.source_token='updated-token';data.programs[0].lanes[0].findings[0].severity='LOW';return route.fulfill({json:{finding:{fid:'F01',severity:'LOW',class_name:'xss',status:'raw'}}});});
   await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
   assert.match(await page.locator('.footnote').innerText(),/supported fields/i);
   await page.getByLabel('severity for Synthetic BBH finding').selectOption('LOW',{timeout:2000});
@@ -440,7 +720,7 @@ test('BBH class metadata uses the recorded class_name and verified owner ID', as
   data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',class_name:'xss'}];
   data.capabilities={finding_metadata:true,finding_fields:['class_name']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();return route.fulfill({json:{finding:{fid:'F01',class_name:'sqli'}}});});
+  await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();data.source_token='updated-token';data.programs[0].lanes[0].findings[0].class_name='sqli';return route.fulfill({json:{finding:{fid:'F01',class_name:'sqli'}}});});
   await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
   const input=page.getByLabel('class for Synthetic BBH finding');
   assert.equal(await input.inputValue(),'xss');await input.fill('sqli',{timeout:2000});await input.press('Tab');

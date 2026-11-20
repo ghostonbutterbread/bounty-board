@@ -215,6 +215,144 @@ def discover(root):
     return {'programs': programs, 'warnings': global_warnings}
 
 
+class PortfolioCache:
+    """One in-process scan at a time; no filesystem work under the lock."""
+    def __init__(self, root):
+        import threading
+        self.root = root
+        self.lock = threading.RLock()
+        self.snapshot = None
+        self.snapshot_root = None
+        self.updated = None
+        self.running = False
+        self.error = None
+        self.generation = 0
+        self.started_once = False
+        self.writers = 0
+
+    def _start_locked(self):
+        import threading
+        self.running = True
+        self.started_once = True
+        generation = self.generation
+        try:
+            threading.Thread(target=self._scan, args=(generation,), daemon=True).start()
+        except Exception:
+            self.running = False
+            self.error = 'Portfolio scan could not start. Retry refresh.'
+
+    def _scan(self, generation):
+        import hashlib
+        import logging
+        import os
+        from datetime import datetime, timezone
+        try:
+            try:
+                canonical = self.root.resolve(strict=True)
+                before = canonical.stat()
+                if not canonical.is_dir():
+                    raise OSError('root is not a directory')
+            except (OSError, RuntimeError):
+                canonical = None
+            if canonical is None:
+                result = {'programs': [], 'warnings': ['root_unavailable'], 'root_identity': None}
+            else:
+                result = discover(canonical)
+                try:
+                    current = self.root.resolve(strict=True)
+                    after = current.stat()
+                    if current != canonical or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                        raise OSError('root changed during discovery')
+                except (OSError, RuntimeError):
+                    raise RuntimeError('Portfolio root changed during discovery')
+                result['root_identity'] = hashlib.sha256(os.fsencode(str(canonical))).hexdigest()
+            warnings = result.get('warnings', [])
+            problem = ('Portfolio root unavailable.' if 'root_unavailable' in warnings else
+                       'Portfolio discovery incomplete.' if 'discovery_incomplete' in warnings else None)
+            with self.lock:
+                if generation == self.generation:
+                    if problem and self.snapshot is not None:
+                        self.error = problem + ' Showing the previous snapshot.'
+                    else:
+                        if canonical is not None and not problem:
+                            import secrets
+                            result['source_token'] = secrets.token_urlsafe(32)
+                        self.snapshot = result
+                        self.snapshot_root = (canonical, before.st_dev, before.st_ino) if canonical is not None and not problem else None
+                        self.updated = datetime.now(timezone.utc).isoformat()
+                        self.error = problem
+        except BaseException:
+            logging.exception('Portfolio scan failed')
+            with self.lock:
+                if generation == self.generation:
+                    self.error = 'Portfolio scan failed. Retry refresh.'
+        finally:
+            with self.lock:
+                self.running = False
+                if generation != self.generation and not self.writers:
+                    self._start_locked()
+
+    def verified_root(self, token):
+        # Snapshot identity describes the completed scan, not the live path.
+        with self.lock:
+            if (self.running or self.writers or self.error or not self.snapshot_root or
+                    not token or token != self.snapshot.get('source_token')):
+                return None
+            expected, generation = self.snapshot_root, self.generation
+        try:
+            current = self.root.resolve(strict=True)
+            info = current.stat()
+            if (current, info.st_dev, info.st_ino) != expected:
+                return None
+        except (OSError, RuntimeError):
+            return None
+        with self.lock:
+            if (self.running or self.writers or self.error or self.generation != generation or
+                    self.snapshot_root != expected):
+                return None
+        return current
+
+    def begin_write(self, token, root):
+        with self.lock:
+            if (self.running or self.writers or self.error or not self.snapshot_root or
+                    not self.snapshot or not token or token != self.snapshot.get('source_token') or
+                    self.snapshot_root[0] != root):
+                return False
+            self.writers += 1
+            self.generation += 1
+            return True
+
+    def write_root_current(self, root):
+        with self.lock:
+            expected = self.snapshot_root
+        try:
+            current = self.root.resolve(strict=True)
+            info = current.stat()
+            return bool(expected and current == root and (current, info.st_dev, info.st_ino) == expected)
+        except (OSError, RuntimeError):
+            return False
+
+    def end_write(self):
+        with self.lock:
+            self.writers -= 1
+            self.invalidate()
+
+    def invalidate(self):
+        with self.lock:
+            self.generation += 1
+            if not self.running and not self.writers:
+                self._start_locked()
+
+    def get(self, refresh=False):
+        with self.lock:
+            if not self.running and not self.writers and (refresh or not self.started_once):
+                self._start_locked()
+            busy = self.running or self.writers
+            state = 'refreshing' if busy and self.snapshot is not None else 'loading' if busy else 'error' if self.error else 'ready'
+            status = {'state': state, 'updated_at': self.updated, 'error': self.error}
+            return (dict(self.snapshot) if self.snapshot is not None else {}), status
+
+
 def writer_available(writer):
     import subprocess
     if not writer:
@@ -276,23 +414,21 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return
             url = urlsplit(self.path)
             if url.path == '/api/data':
-                result: dict = discover(root)
-                # Identity follows the effective canonical path, not report content.
-                # It is an opaque namespace, not a secret or authentication token.
-                try:
-                    import os
-                    canonical = root.resolve(strict=True)
-                    result['root_identity'] = hashlib.sha256(os.fsencode(str(canonical))).hexdigest() if canonical.is_dir() else None
-                except (OSError, RuntimeError):
-                    result['root_identity'] = None
+                result, portfolio = self.server.portfolio.get(refresh=self.headers.get('X-Portfolio-Refresh') == '1')
+                result['portfolio'] = portfolio
                 result['capabilities'] = {'finding_metadata': self.server.writer_enabled,
                                           'finding_fields': ['severity', 'class_name', 'status', 'severity_rationale'] if self.server.writer_enabled else [],
                                           'finding_options': {'severity': SEVERITIES, 'status': STATUSES} if self.server.writer_enabled else {},
                                           'finding_metadata_warning': METADATA_WRITE_WARNING,
                                           'report_edit': False}
-                self.reply(200, result)
+                self.reply(200 if 'programs' in result else (202 if portfolio['state'] == 'loading' else 503), result)
                 return
             if url.path == '/api/report':
+                tokens = self.headers.get_all('X-Portfolio-Source', [])
+                token = tokens[0] if len(tokens) == 1 else None
+                report_root = self.server.portfolio.verified_root(token)
+                if report_root is None:
+                    return self.reply(409, {'error': 'source_unverified'})
                 params = parse_qs(url.query, keep_blank_values=True)
                 try:
                     if set(params) != {'family', 'program', 'lane', 'path'} or any(len(v) != 1 for v in params.values()):
@@ -302,7 +438,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         raise ValueError()
                     if path.startswith('/') or Path(path).suffix.lower() != '.md' or any(p in ('..', '.') for p in path.split('/')):
                         raise ValueError()
-                    content = read_file(Path(root), f'{family}/{program}/{lane}/reports/{path}')
+                    content = read_file(report_root, f'{family}/{program}/{lane}/reports/{path}')
+                    if self.server.portfolio.verified_root(token) != report_root:
+                        return self.reply(409, {'error': 'source_unverified'})
                     text = content.decode('utf-8')
                     revision = hashlib.sha256(content).hexdigest()
                     self.reply(200, {'content': text, 'revision': revision, 'editable': False}, {'ETag': '"' + revision + '"'})
@@ -366,6 +504,20 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     raise ValueError('invalid value')
             except (ValueError, UnicodeError, json.JSONDecodeError):
                 return self.reply(400, {'error': 'invalid_finding_patch'})
+            tokens = self.headers.get_all('X-Portfolio-Source', [])
+            token = tokens[0] if len(tokens) == 1 else None
+            root = self.server.portfolio.verified_root(token)
+            if root is None or not self.server.portfolio.begin_write(token, root):
+                return self.reply(409, {'error': 'source_unverified'})
+            try:
+                return self.write_finding(root, family, program, lane, fid, patch)
+            finally:
+                self.server.portfolio.end_write()
+
+        def write_finding(self, root, family, program, lane, fid, patch):
+            import os
+            import subprocess
+            import tempfile
             lane_path = root / family / program / lane
             if any(path.is_symlink() or not path.is_dir() for path in (root, root / family, root / family / program, lane_path)):
                 return self.reply(404, {'error': 'finding_not_found'})
@@ -401,6 +553,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if len(matches) != 1 or matches[0]['fid'] != fid:
                 return self.reply(404, {'error': 'finding_not_found'})
             try:
+                if not self.server.portfolio.write_root_current(root):
+                    return self.reply(409, {'error': 'source_unverified'})
                 with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
                     patchfile = Path(temp) / 'patch.json'
                     patchfile.write_text(json.dumps(patch), encoding='utf-8')
@@ -410,6 +564,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 if result.returncode != 0:
                     self.server.writer_enabled = False
                     return self.reply(502, {'error': 'writer_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
+                if not self.server.portfolio.write_root_current(root):
+                    return self.reply(409, {'error': 'source_unverified', 'message': 'Update may be incomplete; refresh before retrying.'})
                 updated = [f for f in ledger(lane_path, []) or [] if f.get('fid') == fid]
                 if (len(updated) != 1 or any(updated[0].get(k) != v for k, v in patch.items()) or
                     ('status' in patch and isinstance(updated[0].get('current'), dict) and
@@ -428,6 +584,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             pass
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.static_root = Path(__file__).parent / 'static'
+    server.portfolio = PortfolioCache(root)
     server.writer = Path(writer).absolute() if writer else None
     server.writer_enabled = bool(accept_uncoordinated_writes and writer_available(server.writer))
     return server

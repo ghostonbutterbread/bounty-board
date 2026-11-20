@@ -25,12 +25,19 @@ class RootIdentityTests(unittest.TestCase):
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:
-                    conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
-                    conn.request('GET', '/api/data')
-                    response = conn.getresponse()
+                    import time
+                    deadline = time.monotonic() + 5
+                    while True:
+                        conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                        conn.request('GET', '/api/data')
+                        response = conn.getresponse()
+                        body = response.read().decode()
+                        conn.close()
+                        if response.status != 202:
+                            break
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(.005)
                     self.assertEqual(response.status, 200)
-                    body = response.read().decode()
-                    conn.close()
                     self.assertNotIn(str(parent), body)
                     self.assertNotIn('PRIVATE SYNTHETIC SOURCE CONTENT', body)
                     return json.loads(body)['root_identity']

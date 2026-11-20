@@ -38,6 +38,13 @@ class TailnetBoundaryTests(unittest.TestCase):
             base = {'Host': 'board.example.ts.net', 'Origin': 'https://board.example.ts.net',
                     'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
             try:
+                server.portfolio.get()
+                deadline = time.monotonic() + 3
+                while server.portfolio.get()[1]['state'] == 'loading' and time.monotonic() < deadline:
+                    time.sleep(.005)
+                data, status = server.portfolio.get()
+                self.assertEqual(status['state'], 'ready')
+                base['X-Portfolio-Source'] = data['source_token']
                 for changed in ({'Origin': 'https://evil.test'}, {'Host': 'evil.test'},
                                 {'Sec-Fetch-Site': 'cross-site'}, {'Content-Type': 'text/plain'},
                                 {'X-Requested-With': 'evil'}):
@@ -80,6 +87,9 @@ class TailnetBoundaryTests(unittest.TestCase):
                         response = conn.getresponse()
                         data = response.read()
                         conn.close()
+                        if response.status == 202:
+                            time.sleep(.02)
+                            continue
                         break
                     except ConnectionRefusedError:
                         time.sleep(.02)

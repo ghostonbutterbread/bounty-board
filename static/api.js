@@ -26,7 +26,7 @@ window.BoardAPI = (() => {
     if (!cap) throw new Error('Write capability unavailable');
     if(cap.backend==='bbh' && name==='findingMetadata') {
       const field=body.field==='class'?'class_name':body.field;
-      const result=await request(cap.url,{method:'PATCH',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({family:body.family,program:body.program,lane:body.lane,fid:body.findingId,patch:{[field]:body.value}})});
+      const result=await request(cap.url,{method:'PATCH',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board',...(data?.source_token?{'X-Portfolio-Source':data.source_token}:{})},body:JSON.stringify({family:body.family,program:body.program,lane:body.lane,fid:body.findingId,patch:{[field]:body.value}})});
       if(result?.finding?.fid!==body.findingId) throw new Error('Unverified finding');
       return {value:result.finding[field]};
     }
@@ -40,9 +40,9 @@ window.BoardAPI = (() => {
     }
     return data;
   }
-  function report(program, lane, path) {
+  function report(program, lane, path, token) {
     const query = new URLSearchParams({family:program.family,program:program.name,lane,path});
-    return request(`/api/report?${query}`, {cache:'no-store'});
+    return request(`/api/report?${query}`, {cache:'no-store',headers:token?{'X-Portfolio-Source':token}:{}});
   }
-  return { load: async () => normalize(await request('/api/data', {cache:'no-store'})), report, capability, write };
+  return { load: async (refresh=false) => normalize(await request('/api/data', {cache:'no-store',headers:refresh?{'X-Portfolio-Refresh':'1'}:{}})), report, capability, write };
 })();

@@ -24,13 +24,81 @@ class BackendTests(unittest.TestCase):
         self.temp.cleanup()
 
     def request(self, method, path, body=None, headers=None):
-        conn = HTTPConnection('127.0.0.1', self.port, timeout=3)
-        conn.request(method, path, body=body, headers=headers or {})
-        response = conn.getresponse()
-        data = response.read()
-        result = (response.status, dict(response.getheaders()), data)
-        conn.close()
-        return result
+        import time
+        headers = dict(headers or {})
+        portfolio = method == 'GET' and path == '/api/data'
+        if portfolio:
+            headers['X-Portfolio-Refresh'] = '1'
+        deadline = time.monotonic() + 5
+        while True:
+            conn = HTTPConnection('127.0.0.1', self.port, timeout=3)
+            conn.request(method, path, body=body, headers=headers)
+            response = conn.getresponse()
+            data = response.read()
+            result = (response.status, dict(response.getheaders()), data)
+            conn.close()
+            if not portfolio or response.status not in (200, 202):
+                return result
+            if json.loads(data)['portfolio']['state'] not in ('loading', 'refreshing'):
+                return result
+            if time.monotonic() >= deadline:
+                self.fail('portfolio did not finish within test guard')
+            headers.pop('X-Portfolio-Refresh', None)
+            time.sleep(.005)
+
+    def test_metadata_rejects_missing_and_previous_scan_tokens_without_writer(self):
+        from unittest.mock import patch
+        lane = self.root / 'web_bounty/fictional/web'
+        (lane / 'ledgers').mkdir(parents=True); (lane / 'reports').mkdir()
+        ledger = lane / 'ledgers/ledger.json'
+        original = json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]})
+        ledger.write_text(original)
+        self.server.writer_enabled = True; self.server.writer = self.root / 'synthetic-writer'
+        old = json.loads(self.request('GET', '/api/data')[2])['source_token']
+        new = json.loads(self.request('GET', '/api/data')[2])['source_token']
+        self.assertNotEqual(old, new)
+        payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
+        headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+        with patch('subprocess.run') as writer:
+            for extra in ({}, {'X-Portfolio-Source': old}):
+                status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), {**headers, **extra})
+                self.assertEqual((status, json.loads(body)['error']), (409, 'source_unverified'))
+            writer.assert_not_called()
+        self.assertEqual(ledger.read_text(), original)
+
+    def test_portfolio_not_published_while_metadata_writer_is_in_flight(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        import time
+        lane = self.root / 'web_bounty/fictional/web'
+        (lane / 'ledgers').mkdir(parents=True); (lane / 'reports').mkdir()
+        ledger = lane / 'ledgers/ledger.json'
+        def write(value): ledger.write_text(json.dumps({'findings': [{'fid': 'F01', 'severity': value}]}))
+        write('LOW'); token = json.loads(self.request('GET', '/api/data')[2])['source_token']
+        self.server.writer_enabled = True; self.server.writer = self.root / 'synthetic-writer'
+        entered, release = threading.Event(), threading.Event()
+        def writer(*args, **kwargs):
+            write('INTERMEDIATE'); entered.set()
+            if not release.wait(5): raise RuntimeError('barrier timed out')
+            write('HIGH'); return SimpleNamespace(returncode=0)
+        payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
+        headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+        headers['X-Portfolio-Source'] = token
+        result = []
+        with patch('subprocess.run', writer):
+            worker = threading.Thread(target=lambda: result.append(self.request('PATCH', '/api/finding', json.dumps(payload), headers)))
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.server.portfolio.get(refresh=True)
+                deadline = time.monotonic() + 2
+                while self.server.portfolio.running and time.monotonic() < deadline: time.sleep(.005)
+                data, status = self.server.portfolio.get()
+                self.assertNotEqual(status['state'], 'ready')
+                self.assertEqual(data['programs'][0]['lanes'][0]['findings'][0]['severity'], 'LOW')
+            finally:
+                release.set(); worker.join(5)
+            self.assertFalse(worker.is_alive()); self.assertEqual(result[0][0], 200)
 
     def test_missing_writer_disables_writes_but_read_endpoint_works(self):
         server = app.make_server(self.root, port=0, writer=self.root / 'missing-bbh', accept_uncoordinated_writes=True)
@@ -123,8 +191,12 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
-            status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
-            self.assertEqual(status, 200, body)
+            from unittest.mock import patch
+            headers['X-Portfolio-Source'] = json.loads(self.request('GET', '/api/data')[2])['source_token']
+            with patch.object(server.portfolio, 'invalidate', wraps=server.portfolio.invalidate) as invalidate:
+                status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
+                self.assertEqual(status, 200, body)
+                invalidate.assert_called_once_with()
             self.assertEqual(json.loads(body)['finding']['severity'], 'HIGH')
             self.assertEqual(json.loads(ledger.read_text())['findings'][0]['severity'], 'HIGH')
         finally:
@@ -146,6 +218,7 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            headers['X-Portfolio-Source'] = json.loads(self.request('GET', '/api/data')[2])['source_token']
             self.assertEqual(self.request('PATCH', '/api/finding', json.dumps(payload), headers)[0], 502)
             status, _, body = self.request('GET', '/api/data')
             data = json.loads(body)
@@ -173,6 +246,7 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            headers['X-Portfolio-Source'] = json.loads(self.request('GET', '/api/data')[2])['source_token']
             status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
             self.assertEqual(status, 409, body)
             self.assertFalse(marker.exists())
@@ -181,6 +255,7 @@ class BackendTests(unittest.TestCase):
             inaccessible.mkdir()
             inaccessible.chmod(0)
             try:
+                headers['X-Portfolio-Source'] = json.loads(self.request('GET', '/api/data')[2])['source_token']
                 status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
                 self.assertEqual(status, 409, body)
                 self.assertFalse(marker.exists())
@@ -205,6 +280,7 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'status': 'dormant'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            headers['X-Portfolio-Source'] = json.loads(self.request('GET', '/api/data')[2])['source_token']
             status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
             self.assertEqual(status, 502, body)
             self.assertEqual(json.loads(body)['error'], 'verification_failed')
@@ -385,9 +461,10 @@ class BackendTests(unittest.TestCase):
         report.write_text('# Original\n')
         _, _, body = self.request('GET', '/api/data')
         listing = json.loads(body)['programs'][0]['lanes'][0]['reports']
+        token = json.loads(body)['source_token']
         self.assertEqual(listing[0]['path'], 'raw/F01_example.md')
         url = '/api/report?' + urlencode({'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'path': 'raw/F01_example.md'})
-        status, headers, body = self.request('GET', url)
+        status, headers, body = self.request('GET', url, headers={'X-Portfolio-Source': token})
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['content'], '# Original\n')
         revision = json.loads(body)['revision']
@@ -416,9 +493,10 @@ class BackendTests(unittest.TestCase):
         outside.write_text('private sentinel')
         (lane / 'reports' / 'link.md').symlink_to(outside)
         (lane / 'reports' / 'sub').symlink_to(self.root, target_is_directory=True)
+        token = json.loads(self.request('GET', '/api/data')[2])['source_token']
         for path in ('link.md', 'sub/outside.md', '../../../outside.md', '/outside.md'):
             query = urlencode({'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'path': path})
-            status, _, body = self.request('GET', '/api/report?' + query)
+            status, _, body = self.request('GET', '/api/report?' + query, headers={'X-Portfolio-Source': token})
             self.assertEqual(status, 404)
             self.assertNotIn(b'private sentinel', body)
         _, _, body = self.request('GET', '/api/data')
@@ -482,7 +560,8 @@ class BackendTests(unittest.TestCase):
         report = lane / 'reports' / 'example.md'
         report.write_text('before')
         url = '/api/report?' + urlencode({'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'path': 'example.md'})
-        revision = json.loads(self.request('GET', url)[2])['revision']
+        token = json.loads(self.request('GET', '/api/data')[2])['source_token']
+        revision = json.loads(self.request('GET', url, headers={'X-Portfolio-Source': token})[2])['revision']
         report.write_text('outside edit')
         barrier = threading.Barrier(2)
         def save(value):

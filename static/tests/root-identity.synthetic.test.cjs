@@ -20,10 +20,10 @@ test('same origin separates drafts when backend root changes and restores them o
     const base=`http://127.0.0.1:${port}`;
     async function open(){await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();}
     await page.goto(base);await open();await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('Root A draft');
-    await stop();await start(roots[1]);await page.getByRole('button',{name:'Refresh'}).click();await page.locator('.CodeMirror').waitFor();
+    await stop();await start(roots[1]);await page.getByRole('button',{name:'Refresh'}).click();await page.locator('.CodeMirror').filter({hasText:'Identical source'}).waitFor();
     assert.match(await page.locator('.CodeMirror').innerText(),/Identical source/);
     await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('Root B draft');
-    await stop();await start(roots[0]);await page.getByRole('button',{name:'Refresh'}).click();await page.locator('.CodeMirror').waitFor();
+    await stop();await start(roots[0]);await page.getByRole('button',{name:'Refresh'}).click();await page.locator('.CodeMirror').filter({hasText:'Root A draft'}).waitFor();
     assert.match(await page.locator('.CodeMirror').innerText(),/Root A draft/);
     await page.reload();await open();assert.match(await page.locator('.CodeMirror').innerText(),/Root A draft/);
     for(const root of roots)assert.equal(fs.readFileSync(path.join(root,'web_bounty','fictional','web','reports','same.md'),'utf8'),'# Identical source');

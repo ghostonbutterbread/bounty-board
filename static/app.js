@@ -14,10 +14,11 @@
     const value=currentLane()?.[key];
     return list(key==='coverage' && value && !Array.isArray(value) ? value.items : value);
   };
-  const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
+
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
   let unidentifiedSequence=0;
   const rootIdentity = () => /^[a-f0-9]{64}$/.test(state.data?.root_identity || '') ? state.data.root_identity : null;
+  const metadataCapability = () => state.sourceUnverified ? null : BoardAPI.capability(state.data,'findingMetadata');
   const draftKey = (program,lane,id) => JSON.stringify([rootIdentity() || state.unidentifiedRoot,program,lane,String(id)]);
   const storageKey = key => `bounty-board-report-draft-v2:${key}`;
   // This panel lives outside #app so navigation and editor rerenders cannot
@@ -75,7 +76,7 @@
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
   theme.addEventListener('change', () => applyTheme(theme.value));
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {state.view=button.dataset.view;render();}));
-  document.querySelector('#refresh').addEventListener('click', load);
+  document.querySelector('#refresh').addEventListener('click', () => load(true));
   function normalizeSelection() {
     const ps=programs();
     if (!ps.some(p=>String(p.id)===state.program)) state.program=ps.length ? String(ps[0].id) : '';
@@ -108,27 +109,74 @@
   function blockRefresh() {
     state.metadataErrors=['Refresh blocked: a draft cannot be recovered from browser storage. Use Draft recovery to copy or download it before reloading.'];
   }
-  async function load() {
-    if(state.metadataPending || pendingReportRefresh) return;
+  let pollTimer=null, pollDelay=500, metadataRevision=0, sourceRevision=0, invalidatedSourceToken=null;
+  const portfolioStatus=document.createElement('span');
+  portfolioStatus.setAttribute('role','status');portfolioStatus.id='portfolio-status';
+  portfolioStatus.className='message';
+  app.before(portfolioStatus);
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    pollTimer=setTimeout(()=>load(false, true),pollDelay);
+    pollDelay=Math.min(pollDelay*2,8000);
+  }
+  function pollAfterMetadata() {
+    if(BoardAPI.capability(state.data,'findingMetadata')?.backend==='bbh') {
+      invalidatedSourceToken=state.data?.source_token || null;
+      state.sourceUnverified=true;sourceRevision++;
+      portfolioStatus.textContent='Refreshing portfolio after metadata update.';
+      pollDelay=500;schedulePoll();
+    }
+  }
+  async function load(refresh=false, polling=false) {
+    if(state.metadataPending) {if(polling)schedulePoll();return;}
+    if(pendingReportRefresh) {
+      if(refresh){state.sourceUnverified=true;sourceRevision++;await pendingReportRefresh;return load(true);}
+      if(polling)schedulePoll();return;
+    }
     if(hasUnrecoverableDraft()) {blockRefresh();render();return;}
+    if(!polling){clearTimeout(pollTimer);pollDelay=500;}
     let finishRefresh;pendingReportRefresh=new Promise(resolve=>{finishRefresh=resolve;});
-    state.loading=true; state.error=''; render();
+    const hadData=!!state.data, loadRevision=metadataRevision;
+    let rerender=true;
+    if(refresh && hadData) {state.sourceUnverified=true;sourceRevision++;}
+    state.loading=refresh || !state.data; state.error='';
+    if(!polling || !hadData) render();
     try {
-      const data=await BoardAPI.load();
+      const data=await BoardAPI.load(refresh);
+      if(state.metadataPending || loadRevision!==metadataRevision) {
+        schedulePoll();rerender=false;
+      } else {
+      const status=data?.portfolio;
+      const busy=status && (status.state==='loading' || status.state==='refreshing');
+      const failed=status?.state==='error';
+      const focused=document.activeElement;
+      const editing=!!(polling && hadData && focused && app.contains(focused) &&
+        (focused.matches('input, textarea, [contenteditable="true"]') || focused.closest('.CodeMirror')));
+      const deferred=editing && !busy && !failed && state.data?.root_identity!==data?.root_identity;
+      const staleToken=!!invalidatedSourceToken && data?.source_token===invalidatedSourceToken;
+      if(!busy && !failed && status?.state==='ready' && data?.source_token && !staleToken)invalidatedSourceToken=null;
+      const unverified=!!busy || !!failed || staleToken || status?.state!=='ready' || typeof data?.source_token!=='string' || !data.source_token || (!!state.data && (!Array.isArray(data?.programs) || deferred));
+      if(unverified && !state.sourceUnverified)sourceRevision++;
+      state.sourceUnverified=unverified;
+      portfolioStatus.textContent=status ? `${busy?'Refreshing portfolio; previous snapshot is stale and read-only. ':status.state==='error'?'Portfolio stale or unavailable. ':''}${status.updated_at ? `Last updated: ${status.updated_at}. `:''}${status.error || ''}` : '';
       if(hasUnrecoverableDraft()) blockRefresh();
-      else {
-        if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response');
+      else if(!deferred && !staleToken && Array.isArray(data?.programs) && ((!busy && !failed) || !state.data)) {
         state.data=data; state.unidentifiedRoot=`unidentified-${++unidentifiedSequence}`; state.metadataErrors=[]; normalizeSelection();
         for(const program of programs())for(const lane of list(program.lanes)||[])for(const report of list(lane.reports)||[]){
           const draft=state.drafts.get(draftKey(String(program.id),String(lane.name),report.id));
           if(draft && (report.content!=null || (report.revision!=null && draft.hasDraft)))reconcileReport(draft,report);
         }
+      } else if(!busy && !Array.isArray(data?.programs)) throw new Error('Invalid response');
+      if(busy) {schedulePoll();if(polling && hadData && !hasUnrecoverableDraft())rerender=false;}
+      if(staleToken) schedulePoll();
+      if(editing && !failed && !hasUnrecoverableDraft()) {rerender=false;if(!busy)portfolioStatus.textContent+=' Display update deferred while editing; navigate to apply.';if(deferred){portfolioStatus.textContent+=' Source changed; finish editing before applying the refreshed portfolio.';schedulePoll();}}
       }
     } catch {
       if(hasUnrecoverableDraft())blockRefresh();
-      else {state.error='Could not load workspace data. Check the local backend and try Refresh.'; state.data=null;}
+      else if(state.data) {state.sourceUnverified=true;portfolioStatus.textContent='Refresh failed; showing the previous snapshot. Retry Refresh.';}
+      else state.error='Could not load workspace data. Check the local backend and try Refresh.';
     }
-    state.loading=false;try{render();}finally{pendingReportRefresh=null;finishRefresh();}
+    state.loading=!state.data && !state.error;try{if(rerender)render();}finally{pendingReportRefresh=null;finishRefresh();}
   }
   const opt = (value,label,selected) => `<option value="${esc(value)}"${selected?' selected':''}>${esc(label)}</option>`;
   function warnings() {
@@ -172,15 +220,15 @@
     return `<select data-filter="${key}" aria-label="Filter ${label}">${opt('',`All ${label}`,!state.filters[key])}${values.map(v=>opt(v,v,state.filters[key]===v)).join('')}</select>`;
   }
   function metadataCell(row,key) {
-    const value=String(row[key]??''); const cap=BoardAPI.capability(state.data,'findingMetadata');
+    const value=String(row[key]??''); const cap=metadataCapability();
     if(cap?.textFields?.includes(key)) return `<input data-metadata="${esc(key)}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" aria-describedby="metadata-warning" title="Lowercase class identifier; change applies on leaving the field" value="${esc(value)}" ${row.id != null && !state.metadataPending?'':'disabled'}>`;
     const options=cap?.options?.[key]; const writable=cap && row.id != null && Array.isArray(options) && options.length && !state.metadataPending;
     const values=[...new Set([value,...(Array.isArray(options)?options.map(String):[])].filter(Boolean))];
     return `<select data-metadata="${key}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${cap?'aria-describedby="metadata-warning"':''} ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,v,v===value)).join('')}</select>`;
   }
   function rationale(row) {
-    const label=String(row.title||row.id||'finding'), edit=state.rationaleDrafts.get(reportKey(state.program,state.lane,row.id));
-    const writable=BoardAPI.capability(state.data,'findingMetadata')?.textFields?.includes('severity_rationale') && row.id != null;
+    const label=String(row.title||row.id||'finding'), edit=state.rationaleDrafts.get(draftKey(state.program,state.lane,row.id));
+    const writable=metadataCapability()?.textFields?.includes('severity_rationale') && row.id != null;
     if(edit) return `<div class="rationale"><p>Saved rationale: <span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span></p><label>Unsaved draft — Severity rationale for ${esc(label)}<textarea data-rationale-input="${esc(row.id)}" aria-label="Severity rationale for ${esc(label)}" aria-describedby="metadata-warning" rows="3" ${state.metadataPending?'disabled':''}>${esc(edit.text)}</textarea></label>${writable?`<button class="button" data-rationale-save="${esc(row.id)}" aria-label="Save severity rationale for ${esc(label)}" aria-describedby="metadata-warning" ${state.metadataPending?'disabled':''}>Save rationale</button>`:'<p class="hint">Saving unavailable; copy this draft before leaving.</p>'} <button class="button subtle" data-rationale-cancel="${esc(row.id)}" ${state.metadataPending?'disabled':''}>Cancel</button></div>`;
     return `<div class="rationale"><span>Severity rationale: </span><span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span>${writable?` <button class="link-button" data-rationale-edit="${esc(row.id)}" aria-label="Edit severity rationale for ${esc(label)}" ${state.metadataPending?'disabled':''}>Edit rationale</button>`:''}</div>`;
   }
@@ -189,7 +237,7 @@
     const f=state.filters, query=f.query.trim().toLowerCase();
     const filtered=all.filter(r=>['severity','class','status'].every(k=>!f[k]||String(r[k]??'')===f[k]) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query))));
     const body=filtered.map(r=>`<tr><td><strong>${esc(r.title||'Untitled finding')}</strong><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission?.state ? `<span class="id">Submission state: ${esc(r.submission.state)}</span>` : ''}${r.submission?.result ? `<span class="id">Submission result: ${esc(r.submission.result)}</span>` : ''}${r.submission_status ? `<span class="id">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="id">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}</td><td>${metadataCell(r,'severity')}${rationale(r)}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td></tr>`).join('');
-    const cap=BoardAPI.capability(state.data,'findingMetadata');
+    const cap=metadataCapability();
     return `<section class="panel"><div class="panel-pad"><h2>Findings ledger</h2><p class="hint">Filter the findings in this lane.</p>${cap?'<div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div>':''}</div><div class="filters">${filterControl('severity','severities',all)}${filterControl('class','classes',all)}${filterControl('status','statuses',all)}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}"><span class="muted">${filtered.length} of ${all.length}</span></div>${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr><th>Finding</th><th>Severity</th><th>Class</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></div>`:'<div class="state">No findings match these filters.</div>'}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
   }
   function unavailable(name){return `<section class="panel panel-pad"><h2>${esc(name)}</h2><div class="state">This collection was not provided by the backend.</div></section>`;}
@@ -240,9 +288,10 @@
     const owner=Array.isArray(report.owner_fids) && report.owner_fids.length ? `Finding owner IDs: ${report.owner_fids.map(display).join(', ')}` : '';
     const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>`;
     if(report.content == null && report.path){
+      if(state.sourceUnverified) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Source identity is unverified; wait for portfolio refresh before opening a report.</div></section>`;
       if(!report.loadState) {
-        report.loadState='loading';const program=currentProgram(), lane=state.lane;
-        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(result.editable===false)report.editable=false;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
+        report.loadState='loading';const program=currentProgram(), lane=state.lane, revision=sourceRevision;
+        BoardAPI.report(program,lane,report.path,state.data?.source_token).then(result=>{if(revision!==sourceRevision){report.loadState=null;return;}if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(result.editable===false)report.editable=false;report.loadState='loaded';}).catch(()=>{report.loadState=revision===sourceRevision?'error':null;}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
       }
       if(report.loadState!=='error') return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Loading report…</div></section>`;
       if(!draftFor(report).hasDraft) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Report could not be loaded. Refresh the workspace to retry.</div></section>`;
@@ -292,17 +341,17 @@
     else if(target.dataset.section){state.section=target.dataset.section;render();}
     else if(target.hasAttribute('data-rationale-edit')){
       const row=(rows('findings')||[]).find(r=>String(r.id)===target.dataset.rationaleEdit);
-      if(row && !state.metadataPending){const key=reportKey(state.program,state.lane,row.id), text=String(row.severity_rationale??'');if(!state.rationaleDrafts.has(key))state.rationaleDrafts.set(key,{program:state.program,lane:state.lane,id:String(row.id),text});render();app.querySelector(`[data-rationale-input="${CSS.escape(String(row.id))}"]`)?.focus();}
+      if(row && !state.metadataPending){const key=draftKey(state.program,state.lane,row.id), text=String(row.severity_rationale??'');if(!state.rationaleDrafts.has(key))state.rationaleDrafts.set(key,{program:state.program,lane:state.lane,id:String(row.id),text});render();app.querySelector(`[data-rationale-input="${CSS.escape(String(row.id))}"]`)?.focus();}
     }
-    else if(target.hasAttribute('data-rationale-cancel')){state.rationaleDrafts.delete(reportKey(state.program,state.lane,target.dataset.rationaleCancel));render();}
+    else if(target.hasAttribute('data-rationale-cancel')){state.rationaleDrafts.delete(draftKey(state.program,state.lane,target.dataset.rationaleCancel));render();}
     else if(target.hasAttribute('data-rationale-save')){
-      const draftKey=reportKey(state.program,state.lane,target.dataset.rationaleSave), edit=state.rationaleDrafts.get(draftKey), row=(rows('findings')||[]).find(r=>String(r.id)===edit?.id);
-      if(!edit || !row || state.metadataPending || edit.program!==state.program || edit.lane!==state.lane || !BoardAPI.capability(state.data,'findingMetadata')?.textFields?.includes('severity_rationale'))return;
-      const family=currentProgram()?.family, name=currentProgram()?.name; state.metadataPending=true;render();
+      const key=draftKey(state.program,state.lane,target.dataset.rationaleSave), edit=state.rationaleDrafts.get(key), row=(rows('findings')||[]).find(r=>String(r.id)===edit?.id);
+      if(!edit || !row || state.metadataPending || edit.program!==state.program || edit.lane!==state.lane || !metadataCapability()?.textFields?.includes('severity_rationale'))return;
+      const family=currentProgram()?.family, name=currentProgram()?.name; metadataRevision++;state.metadataPending=true;render();
       try {
         const response=await BoardAPI.write(state.data,'findingMetadata',{programId:edit.program,program:name,family,lane:edit.lane,findingId:edit.id,field:'severity_rationale',value:edit.text});
         if(response?.value!==edit.text)throw new Error('Unverified value');
-        row.severity_rationale=response.value;state.rationaleDrafts.delete(draftKey);state.metadataPending=false;render();
+        row.severity_rationale=response.value;state.rationaleDrafts.delete(key);state.metadataPending=false;pollAfterMetadata();render();
       } catch {state.metadataPending=false;state.metadataErrors.push(`Update failed or was not verified for ${edit.program} / ${edit.lane} / ${edit.id} (severity rationale). The source may have changed; refresh before retrying. Your rationale draft remains in this tab.`);render();}
     }
   });
@@ -313,15 +362,15 @@
     else if(el.id==='report-select'){state.report=el.value;render();}
     else if(el.dataset.filter){state.filters[el.dataset.filter]=el.value;render();}
     else if(el.dataset.metadata){
-      const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
-      const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name;state.metadataPending=true;render();
-      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value; state.metadataPending=false;render();}
+      const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending || !metadataCapability())return;
+      const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name;metadataRevision++;state.metadataPending=true;render();
+      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value; state.metadataPending=false;pollAfterMetadata();render();}
       catch {state.metadataPending=false;state.metadataErrors.push(`Update failed or was not verified for ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);render();}
     }
   });
   app.addEventListener('input',event=>{
     const el=event.target;
-    if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(reportKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
+    if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(draftKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
     if(el.id==='finding-search'){const pos=el.selectionStart;state.filters.query=el.value;render();const input=document.querySelector('#finding-search');input?.focus();input?.setSelectionRange(pos,pos);}
     if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}
   });
