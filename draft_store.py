@@ -118,21 +118,45 @@ def save_draft(root, report_key, content, base_revision, request_id):
         os.close(directory_fd)
 
 
-def list_drafts(root, report_key):
+def _validated_record(directory_fd, name, report_key):
+    record = _read(directory_fd, name)
+    if (record.get('report_key') != report_key
+            or not isinstance(record.get('request_id'), str)
+            or name != _digest(record['request_id']) + '.json'
+            or not isinstance(record.get('base_revision'), str)):
+        raise ValueError('invalid report draft identity')
+    return record
+
+
+def _list(root, report_key, recover):
     report_key = _identity(report_key, 'report key')
     try:
         directory_fd = _directory(root, report_key, False)
     except FileNotFoundError:
-        return []
+        return {'drafts': [], 'errors': []}
     try:
-        drafts = []
+        drafts, errors = [], []
         for name in sorted(os.listdir(directory_fd)):
             if not name.endswith('.json'):
                 continue
-            record = _read(directory_fd, name)
-            if not isinstance(record, dict) or record.get('report_key') != report_key:
-                raise ValueError('invalid report draft identity')
-            drafts.append(record)
-        return sorted(drafts, key=lambda x: (x['saved_at_ns'], x['request_id']))
+            try:
+                drafts.append(_validated_record(directory_fd, name, report_key))
+            except (OSError, ValueError, UnicodeError):
+                if not recover:
+                    raise
+                # Only the opaque version filename and a category are exposed.
+                errors.append({'version': name, 'error': 'unreadable_or_invalid'})
+        drafts.sort(key=lambda x: (x['saved_at_ns'], x['request_id']))
+        return {'drafts': drafts, 'errors': errors}
     finally:
         os.close(directory_fd)
+
+
+def list_drafts(root, report_key):
+    """Strict read: refuse to hide an invalid version."""
+    return _list(root, report_key, False)['drafts']
+
+
+def list_recoverable_drafts(root, report_key):
+    """Return valid versions and explicit per-version errors for recovery."""
+    return _list(root, report_key, True)

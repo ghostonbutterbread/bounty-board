@@ -76,5 +76,21 @@ class DraftStorageTests(unittest.TestCase):
             self.assertEqual({x['content'] for x in draft_store.list_drafts(root, 'report')}, {'draft-1', 'draft-2'})
             self.assertTrue(all((p.stat().st_mode & 0o077) == 0 for p in root.glob('*/*.json')))
 
+    def test_recovery_returns_valid_versions_and_reports_corruption(self):
+        import draft_store
+        import json
+        self.assertTrue(hasattr(draft_store, 'list_recoverable_drafts'))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'drafts'
+            good = draft_store.save_draft(root, 'report', 'recover me', 'rev', 'good')
+            draft_store.save_draft(root, 'report', 'bad version', 'rev', 'bad')
+            files = list(root.glob('*/*.json'))
+            bad_path = next(p for p in files if json.loads(p.read_text())['request_id'] == 'bad')
+            bad_path.write_text('{broken json')
+            result = draft_store.list_recoverable_drafts(root, 'report')
+            self.assertEqual(result['drafts'], [good])
+            self.assertEqual(len(result['errors']), 1)
+            self.assertNotIn('bad version', str(result['errors']))
+
 if __name__ == '__main__':
     unittest.main()
