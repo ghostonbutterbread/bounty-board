@@ -13,7 +13,9 @@ window.BoardAPI = (() => {
       cap={enabled:true,method:'PATCH',url:'/api/finding',backend:'bbh',options:{}};
       if(fields.includes('severity')) cap.options.severity=['EXCEPTIONAL','CRITICAL','HIGH','MEDIUM','LOW','INFO','UNKNOWN'];
       if(fields.includes('status')) cap.options.status=['raw','confirmed','dormant','novel','complete','archive'];
-      if(fields.includes('class_name')) cap.textFields=['class'];
+      cap.textFields=[];
+      if(fields.includes('class_name')) cap.textFields.push('class');
+      if(fields.includes('severity_rationale')) cap.textFields.push('severity_rationale');
     }
     if (!cap || cap.enabled !== true || cap.method !== 'PATCH' || typeof cap.url !== 'string') return null;
     try { const url = new URL(cap.url, location.origin); return url.origin === location.origin && /^https?:$/.test(url.protocol) ? cap : null; }

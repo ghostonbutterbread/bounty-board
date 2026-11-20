@@ -33,7 +33,7 @@ class BackendTests(unittest.TestCase):
         return result
 
     def test_missing_writer_disables_writes_but_read_endpoint_works(self):
-        server = app.make_server(self.root, port=0, writer=self.root / 'missing-bbh')
+        server = app.make_server(self.root, port=0, writer=self.root / 'missing-bbh', accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -47,19 +47,86 @@ class BackendTests(unittest.TestCase):
             self.server, self.port = old_server, old_port
             server.shutdown(); thread.join(); server.server_close()
 
+    def test_writer_requires_explicit_uncoordinated_write_acknowledgement(self):
+        writer = self.root / 'fake-bbh'
+        marker = self.root / 'invoked'
+        writer.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nprintf "%s\\n" "--edit-finding --patch-file --root --family --lane"\n')
+        writer.chmod(0o700)
+        lane = self.root / 'web_bounty/fictional/web'
+        (lane / 'ledgers').mkdir(parents=True)
+        (lane / 'reports').mkdir()
+        ledger = lane / 'ledgers/ledger.json'
+        before = json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]})
+        ledger.write_text(before)
+        server = app.make_server(self.root, port=0, writer=writer)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        old_server, old_port = self.server, self.port
+        self.server, self.port = server, server.server_port
+        try:
+            data = json.loads(self.request('GET', '/api/data')[2])
+            self.assertFalse(data['capabilities']['finding_metadata'])
+            self.assertEqual(data['capabilities']['finding_fields'], [])
+            self.assertEqual(data['capabilities']['finding_options'], {})
+            self.assertIn('uncoordinated', data['capabilities']['finding_metadata_warning'].lower())
+            headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
+            self.assertEqual(self.request('PATCH', '/api/finding', json.dumps(payload), headers)[0], 503)
+            self.assertFalse(marker.exists())
+            self.assertEqual(ledger.read_text(), before)
+        finally:
+            self.server, self.port = old_server, old_port
+            server.shutdown(); thread.join(); server.server_close()
+
     def test_capability_reports_explicit_metadata_options(self):
         writer = self.root / 'fake-bbh'
         writer.write_text('#!/bin/sh\nprintf "%s\\n" "--edit-finding --patch-file --root --family --lane"\n')
         writer.chmod(0o700)
-        server = app.make_server(self.root, port=0, writer=writer)
+        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
         try:
             cap = json.loads(self.request('GET', '/api/data')[2])['capabilities']
             self.assertTrue(cap['finding_metadata'])
+            self.assertIn('uncoordinated', cap['finding_metadata_warning'].lower())
             self.assertIn('HIGH', cap['finding_options']['severity'])
             self.assertIn('dormant', cap['finding_options']['status'])
+        finally:
+            self.server, self.port = old_server, old_port
+            server.shutdown(); thread.join(); server.server_close()
+
+    def test_acknowledged_synthetic_writer_updates_finding(self):
+        import sys
+        writer = self.root / 'fake-bbh'
+        writer.write_text(
+            '#!' + sys.executable + '\n'
+            'import json, sys\nfrom pathlib import Path\n'
+            'if "--help" in sys.argv:\n'
+            '    print("--edit-finding --patch-file --root --family --lane")\n'
+            'else:\n'
+            '    args = sys.argv\n'
+            '    value = lambda key: args[args.index(key) + 1]\n'
+            '    ledger = Path(value("--root")) / value("--family") / args[2] / value("--lane") / "ledgers/ledger.json"\n'
+            '    data = json.loads(ledger.read_text())\n'
+            '    data["findings"][0].update(json.loads(Path(value("--patch-file")).read_text()))\n'
+            '    ledger.write_text(json.dumps(data))\n')
+        writer.chmod(0o700)
+        lane = self.root / 'web_bounty/fictional/web'
+        (lane / 'ledgers').mkdir(parents=True)
+        (lane / 'reports').mkdir()
+        ledger = lane / 'ledgers/ledger.json'
+        ledger.write_text(json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]}))
+        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        old_server, old_port = self.server, self.port
+        self.server, self.port = server, server.server_port
+        try:
+            payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
+            headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(json.loads(body)['finding']['severity'], 'HIGH')
+            self.assertEqual(json.loads(ledger.read_text())['findings'][0]['severity'], 'HIGH')
         finally:
             self.server, self.port = old_server, old_port
             server.shutdown(); thread.join(); server.server_close()
@@ -72,7 +139,7 @@ class BackendTests(unittest.TestCase):
         (lane / 'ledgers').mkdir(parents=True)
         (lane / 'reports').mkdir()
         (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]}))
-        server = app.make_server(self.root, port=0, writer=writer)
+        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -99,7 +166,7 @@ class BackendTests(unittest.TestCase):
         (lane / 'reports').mkdir()
         (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01'}]}))
         (lane / 'context').symlink_to(self.root, target_is_directory=True)
-        server = app.make_server(self.root, port=0, writer=writer)
+        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -131,7 +198,7 @@ class BackendTests(unittest.TestCase):
         (lane / 'ledgers').mkdir(parents=True)
         (lane / 'reports').mkdir()
         (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01', 'status': 'dormant', 'current': {'status': 'raw'}}]}))
-        server = app.make_server(self.root, port=0, writer=writer)
+        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -173,7 +240,7 @@ class BackendTests(unittest.TestCase):
         before = json.loads(ledger.read_text())['findings'][0]
         report_before = report.read_bytes()
         with patch.dict(os.environ, env, clear=True):
-            server = app.make_server(data_root, port=0, writer=bbh)
+            server = app.make_server(data_root, port=0, writer=bbh, accept_uncoordinated_writes=True)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             old_server, old_port = self.server, self.port
@@ -284,6 +351,30 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(by_path['findings/one/EVIDENCE.md']['owner_fids'], ['F01'])
         self.assertEqual(by_path['raw/index.md']['kind'], 'generated_navigation')
         self.assertTrue(all(x['editable'] is False for x in items))
+
+    def test_unreadable_report_classification_is_unknown_with_warning(self):
+        from unittest.mock import patch
+        lane = self.root / 'web_bounty' / 'fictional' / 'web'
+        (lane / 'reports').mkdir(parents=True)
+        (lane / 'ledgers').mkdir()
+        (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01', 'report_path': str(lane / 'reports/registered.md')}]}))
+        (lane / 'reports/unreadable.md').write_text('fixture')
+        (lane / 'reports/oversized.md').write_bytes(b'x' * 5_000_001)
+        (lane / 'reports/invalid.md').write_bytes(b'\xff')
+        (lane / 'reports/registered.md').write_bytes(b'\xff')
+        real_read = app.read_file
+        def fail_one(root, relative):
+            if relative == 'reports/unreadable.md':
+                raise PermissionError('fixture')
+            return real_read(root, relative)
+        with patch.object(app, 'read_file', side_effect=fail_one):
+            data = json.loads(self.request('GET', '/api/data')[2])['programs'][0]['lanes'][0]
+        items = {item['path']: item for item in data['reports']}
+        for path in ('unreadable.md', 'oversized.md', 'invalid.md'):
+            self.assertEqual(items[path]['kind'], 'unknown')
+        self.assertEqual(items['registered.md']['kind'], 'registered_report')
+        self.assertEqual(items['registered.md']['owner_fids'], ['F01'])
+        self.assertEqual(data['warnings'].count('report_content_unavailable_or_invalid'), 1)
 
     def test_report_open_revision_and_refuses_even_stale_autosaves(self):
         from urllib.parse import urlencode

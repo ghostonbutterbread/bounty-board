@@ -8,6 +8,9 @@ from urllib.parse import urlsplit, parse_qs
 FAMILIES = {'web_bounty': {'web', 'api'}, 'binaries': {'apk', 'exe', 'mac'}}
 SEVERITIES = ('EXCEPTIONAL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', 'UNKNOWN')
 STATUSES = ('raw', 'confirmed', 'dormant', 'novel', 'complete', 'archive')
+METADATA_WRITE_WARNING = ('Uncoordinated metadata writes can overwrite concurrent edits, including edits '
+                          'on other hosts or from sync clients; no shared compare-and-swap exists. '
+                          'Stop other writers before editing.')
 
 
 def read_file(root, relative):
@@ -153,13 +156,17 @@ def reports(lane, warnings, findings=None):
                 try:
                     text = read_file(lane, 'reports/' + rel).decode('utf-8')
                 except (OSError, ValueError, UnicodeError):
-                    text = ''
+                    text = None
+                    if 'report_content_unavailable_or_invalid' not in warnings:
+                        warnings.append('report_content_unavailable_or_invalid')
                 if owners['report_path']:
                     kind = 'registered_report'
                     fids = owners['report_path']
                 elif owners['evidence_path']:
                     kind = 'generated_evidence'
                     fids = owners['evidence_path']
+                elif text is None:
+                    kind, fids = 'unknown', []
                 elif any(marker in text for marker in ('<!-- generated: bounty-core-report-navigation -->', '<!-- generated: bounty-core-category-link-stub -->')):
                     kind, fids = 'generated_navigation', []
                 elif '<!-- generated: bounty-core-finding-report -->' in text:
@@ -221,7 +228,7 @@ def writer_available(writer):
         return False
 
 
-def make_server(root, port=9001, writer=None):
+def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False):
     root = Path(root).absolute()
     class Handler(BaseHTTPRequestHandler):
         def reply(self, status, payload, extra=None):
@@ -251,6 +258,7 @@ def make_server(root, port=9001, writer=None):
                 result['capabilities'] = {'finding_metadata': self.server.writer_enabled,
                                           'finding_fields': ['severity', 'class_name', 'status', 'severity_rationale'] if self.server.writer_enabled else [],
                                           'finding_options': {'severity': SEVERITIES, 'status': STATUSES} if self.server.writer_enabled else {},
+                                          'finding_metadata_warning': METADATA_WRITE_WARNING,
                                           'report_edit': False}
                 self.reply(200, result)
                 return
@@ -396,7 +404,7 @@ def make_server(root, port=9001, writer=None):
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.static_root = Path(__file__).parent / 'static'
     server.writer = Path(writer).absolute() if writer else None
-    server.writer_enabled = writer_available(server.writer)
+    server.writer_enabled = bool(accept_uncoordinated_writes and writer_available(server.writer))
     return server
 
 
@@ -407,6 +415,8 @@ def parse_config(argv=None):
     parser.add_argument('--root', type=Path, help='data root (overrides config)')
     parser.add_argument('--port', type=int, help='listen port (overrides config)')
     parser.add_argument('--bbh', type=Path, help='opt in to metadata writes with this BBH executable')
+    parser.add_argument('--accept-uncoordinated-writes', action='store_true',
+                        help='accept metadata write risk: concurrent edits can be overwritten; no shared compare-and-swap')
     args = parser.parse_args(argv)
     settings = {}
     if args.config:
@@ -438,7 +448,8 @@ def parse_config(argv=None):
 
 def main():
     args = parse_config()
-    make_server(args.root, args.port, writer=args.bbh).serve_forever()
+    make_server(args.root, args.port, writer=args.bbh,
+                accept_uncoordinated_writes=args.accept_uncoordinated_writes).serve_forever()
 
 
 if __name__ == '__main__':

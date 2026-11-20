@@ -26,13 +26,13 @@ TOML files with top-level `root` and `port` are also accepted. Relative roots re
 
 ### Optional finding edits
 
-To enable finding severity, class, status, and severity-rationale changes using a compatible BBH writer, supply its absolute launcher path:
+To enable finding severity, class, status, and severity-rationale changes using a compatible BBH writer, supply its absolute launcher path **and** explicitly acknowledge the overwrite risk:
 
 ```sh
-python3 app.py --config /path/to/board.json --bbh /absolute/path/to/bbh
+python3 app.py --config /path/to/board.json --bbh /absolute/path/to/bbh --accept-uncoordinated-writes
 ```
 
-This invokes BBH's own finding-edit workflow and reads the result back. BBH may refresh generated indexes and create related evidence/context files. Its local advisory lock does **not** coordinate arbitrary editors or separate sync replicas. Avoid concurrent edits to the same finding. A failed write may be partial; refresh and inspect the source before retrying. Submission and platform outcome edits are not yet supported in this application.
+This invokes BBH's own finding-edit workflow and reads the result back. BBH may refresh generated indexes and create related evidence/context files. There is no shared compare-and-swap across Board sessions, arbitrary editors, or separate sync replicas: a stale or concurrent edit can overwrite another update. Stop other writers, including sync activity, and refresh before editing; even then the operator accepts the residual risk. A failed write may be partial; refresh and inspect the source before retrying. Submission and platform outcome edits are not yet supported in this application.
 
 The server binds only to IPv4 loopback, has no user authentication or TLS, and is intended for a trusted single-user local environment. Other local processes can access it. Do **not** proxy it, expose it on a network, or point it at a data tree writable by untrusted local users. Program names, findings, evidence references, URLs, and report contents can be sensitive.
 

@@ -11,6 +11,25 @@ class ConfigCliTest(unittest.TestCase):
         self.assertIsNone(app.parse_config([]).bbh)
         self.assertEqual(app.parse_config(['--bbh', '/opt/bbh']).bbh, Path('/opt/bbh'))
 
+    def test_uncoordinated_writes_acknowledgement_is_cli_only(self):
+        import app
+        import tempfile
+        self.assertFalse(app.parse_config(['--bbh', '/opt/bbh']).accept_uncoordinated_writes)
+        self.assertTrue(app.parse_config(['--bbh', '/opt/bbh', '--accept-uncoordinated-writes']).accept_uncoordinated_writes)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'config.json'
+            config.write_text('{"accept_uncoordinated_writes": true}')
+            with self.assertRaises(SystemExit):
+                app.parse_config(['--config', str(config)])
+
+    def test_main_forwards_explicit_acknowledgement(self):
+        import app
+        from unittest.mock import patch
+        with patch.object(sys, 'argv', ['app.py', '--root', '/fixture', '--bbh', '/fake', '--accept-uncoordinated-writes']), patch.object(app, 'make_server') as make_server:
+            app.main()
+        make_server.assert_called_once_with(Path('/fixture'), 9001, writer=Path('/fake'), accept_uncoordinated_writes=True)
+        make_server.return_value.serve_forever.assert_called_once_with()
+
     def test_json_toml_and_cli_overrides(self):
         import tempfile
         import app

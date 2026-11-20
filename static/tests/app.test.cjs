@@ -401,7 +401,7 @@ test('browser metadata update reaches backend with a disposable synthetic writer
   const ledger=path.join(lane,'ledgers','ledger.json');fs.writeFileSync(ledger,JSON.stringify({findings:[{fid:'F01',title:'Synthetic fixture',severity:'LOW'}]}));
   const writer=path.join(tmp,'fixture-writer.py');
   fs.writeFileSync(writer,`#!/usr/bin/python3\nimport sys,json\nfrom pathlib import Path\nif '--help' in sys.argv:\n print('--edit-finding --patch-file --root --family --lane');sys.exit(0)\np=Path(${JSON.stringify(ledger)})\nd=json.loads(p.read_text());d['findings'][0].update(json.loads(Path(sys.argv[sys.argv.index('--patch-file')+1]).read_text()));p.write_text(json.dumps(d))\n`);fs.chmodSync(writer,0o700);
-  const source='import sys, app; s=app.make_server(sys.argv[1],0,writer=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()';
+  const source='import sys, app; s=app.make_server(sys.argv[1],0,writer=sys.argv[2],accept_uncoordinated_writes=True); print(s.server_port,flush=True); s.serve_forever()';
   const proc=spawn('python3',['-B','-u','-c',source,tmp,writer],{cwd:path.resolve(root,'..'),stdio:['ignore','pipe','pipe'],env:{...process.env,TMPDIR:tmp}});let page;
   try {
     const [chunk]=await Promise.race([once(proc.stdout,'data'),new Promise((_,reject)=>setTimeout(()=>reject(new Error('backend startup timeout')),5000))]);
@@ -438,6 +438,93 @@ test('coverage and report ownership remain readable across themes on mobile', as
     await page.getByRole('button',{name:'Coverage',exact:true}).click();assert.ok(await page.getByText('Mapped inventory').isVisible());
     await page.getByRole('button',{name:'Reports',exact:true}).click();assert.ok(await page.getByText(/Registered report/).isVisible());
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,themeName);
+  }
+  await page.close();
+});
+
+test('severity rationale is visible and explicitly saved for its own finding', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);const writes=[];
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'First finding',severity:'HIGH',severity_rationale:'Original rationale'}, {fid:'F02',title:'Second finding',severity:'LOW',severity_rationale:'Other rationale'}];
+  data.capabilities={finding_metadata:true,finding_fields:['severity','severity_rationale']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',route=>{const body=route.request().postDataJSON();writes.push(body);return route.fulfill({json:{finding:{fid:body.fid,...body.patch}}});});
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  assert.ok(await page.getByText('Original rationale',{exact:true}).isVisible());
+  await page.getByRole('button',{name:'Edit severity rationale for First finding'}).click();
+  await page.getByLabel('Severity rationale for First finding',{exact:true}).fill('Corrected rationale');
+  assert.equal(writes.length,0);
+  await page.getByRole('button',{name:'Save severity rationale for First finding'}).click();
+  await page.getByText('Corrected rationale',{exact:true}).waitFor();
+  assert.equal(writes.length,1);assert.equal(writes[0].fid,'F01');assert.deepEqual(writes[0].patch,{severity_rationale:'Corrected rationale'});
+  assert.ok(await page.getByText('Other rationale',{exact:true}).isVisible());
+  await page.close();
+});
+
+test('active metadata controls warn about uncoordinated local and sync overwrites', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  assert.equal(await page.getByLabel('severity for Example finding').isEnabled(),true);
+  const warning=page.locator('.metadata-warning');
+  assert.match(await warning.innerText(),/local.*sync.*overwrit/i);
+  assert.equal(await page.getByLabel('severity for Example finding').getAttribute('aria-describedby'),'metadata-warning');
+  await page.close();
+});
+
+test('severity breakdown counts loaded values and labels incomplete collections', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].findings=[{severity:'HIGH'},{severity:'LOW'},{severity:'HIGH'},{severity:null}];
+  data.programs[0].lanes.push({name:'Unavailable'});
+  await page.route('**/api/data',route=>route.fulfill({json:data}));await page.goto(base);
+  const panel=page.getByRole('region',{name:'Severity breakdown'});
+  assert.match(await panel.innerText(),/incomplete|partial/i);
+  assert.match(await panel.innerText(),/HIGH\s+2/);
+  assert.match(await panel.innerText(),/LOW\s+1/);
+  assert.match(await panel.innerText(),/Not recorded\s+1/);
+  await page.close();
+});
+
+test('read-only rationale remains visible as inert text without an editor', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].findings[0].severity_rationale='<img src=x onerror="window.pwned=1">';
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  assert.ok(await page.getByText('<img src=x onerror="window.pwned=1">',{exact:true}).isVisible());
+  assert.equal(await page.locator('#app img').count(),0);
+  assert.equal(await page.getByRole('button',{name:/Edit severity rationale/}).count(),0);
+  assert.equal(await page.evaluate(()=>window.pwned),undefined);await page.close();
+});
+
+test('failed rationale save preserves the draft and warns to refresh', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].findings[0].severity_rationale='Previously saved';
+  data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',route=>route.fulfill({status:500,body:'failed'}));
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).click();
+  await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).fill('Unsaved draft');
+  await page.getByRole('button',{name:'Save severity rationale for Example finding'}).click();
+  await page.getByText(/source may have changed; refresh/).waitFor();
+  assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).inputValue(),'Unsaved draft');
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  assert.ok(await page.getByText('Previously saved',{exact:true}).isVisible());await page.close();
+});
+
+test('rationale editor and overwrite warning stay accessible on mobile themes', async () => {
+  const page=await browser.newPage({viewport:{width:375,height:800}});const data=structuredClone(fixture);
+  data.programs[0].lanes[0].findings[0].severity_rationale='Synthetic rationale';
+  data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));await page.goto(base);
+  await page.getByRole('button',{name:'Programs',exact:true}).click();
+  for(const themeName of ['light','dark','dusk']) {
+    await page.getByLabel('Theme').selectOption(themeName);
+    assert.ok(await page.locator('.metadata-warning').isVisible());
+    await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).click();
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).getAttribute('aria-describedby'),'metadata-warning');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,themeName);
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
   }
   await page.close();
 });
