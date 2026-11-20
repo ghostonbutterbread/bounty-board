@@ -7,8 +7,8 @@
 - **Intended integration target:** beta
 - **Last updated:** 2026-11-20
 - **Owning feature branch/ref:** feat/initial-app
-- **Latest immutable recovery checkpoint:** a03205127cd6502cf2299a891bfc74c4304c5433
-- **Feature implementation commit(s):** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8; a03205127cd6502cf2299a891bfc74c4304c5433 adds an intentionally failing config test.
+- **Latest immutable recovery checkpoint:** b57fe7f362125474c315fcbd6e880ef70620886f
+- **Feature implementation commit(s):** 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8; a03205127cd6502cf2299a891bfc74c4304c5433 adds an intentionally failing config test; b57fe7f362125474c315fcbd6e880ef70620886f adds a draft storage primitive, not yet connected to the UI.
 - **Inspiration / canonical references:** `docs/product.md`; user-approved mockup; BBH ledger, coverage, MapStore and storage ownership skills.
 
 ## Intent
@@ -23,7 +23,8 @@ The initial read-only application discovers program and lane data and renders th
 
 - Bootstrap: private GitHub repo created and read back; initial main and beta point to base commit.
 - Tests and commands: `python3 -W error::ResourceWarning -m unittest discover -s tests -v` (14 passed before config test); `node --test static/tests/app.test.cjs` (14 passed with preinstalled Playwright/Chrome). `python3 -m unittest discover -s tests -p test_config.py -v` currently fails intentionally: `--config` is not yet implemented.
-- Independent review: in progress; review agent assigned.
+- Draft primitive: `python3 -W error::ResourceWarning -m unittest discover -s tests -p test_drafts.py -v` passed 6 tests, including retained-version identity, idempotent retries, permissions, corruption detection, and simultaneous saves. These are isolated unit/fixture tests; the primitive is not wired to the app or independently reviewed.
+- Independent review: initial read-only foundation reviewed with blockers; fixes in progress. Draft primitive needs a new review.
 - Replay/cohort/fixture evidence: browser exercised the real HTTP server using a synthetic fixture root; selected a program and read/rendered a report. Eight actual lanes were sampled read-only for adapter compatibility; no target details copied into this repository.
 - Merge/ancestry evidence: pending.
 
@@ -36,10 +37,10 @@ The initial read-only application discovers program and lane data and renders th
 ## Interruption / resume handoff
 
 - Owning feature branch/ref: feat/initial-app.
-- Latest immutable recovery checkpoint: a03205127cd6502cf2299a891bfc74c4304c5433.
-- Feature implementation commit(s): 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8; config RED test a03205127cd6502cf2299a891bfc74c4304c5433.
-- Exact resume point: implement `--config` until the config test passes, reconcile independent review, add canonical metadata write path, and investigate safe report autosave. Retest and re-review before beta integration.
-- Working-tree state at handoff: clean after the dossier-only checkpoint commit.
+- Latest immutable recovery checkpoint: b57fe7f362125474c315fcbd6e880ef70620886f.
+- Feature implementation commit(s): 960ab0d6a50adf79bc23e23b1e2bb5208fb11ae8; config RED test a03205127cd6502cf2299a891bfc74c4304c5433; local draft primitive b57fe7f362125474c315fcbd6e880ef70620886f.
+- Exact resume point: reconcile backend/frontend workers, review and integrate durable draft primitive only after operator chooses autosave semantics, retest and independently review before beta integration.
+- Working-tree state at handoff: backend/frontend workers are modifying their owned paths; do not overwrite or stage them until they return.
 
 ## Decision gates
 
