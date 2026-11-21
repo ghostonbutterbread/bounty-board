@@ -87,3 +87,18 @@ test('default disabled keeps shared edits out of synthetic Markdown', {timeout:5
   assert.equal(result.publication,undefined);assert.equal(fs.readFileSync(report,'utf8'),initial);
   assert.doesNotMatch(await page.locator('#report-status').innerText(),/Markdown file saved/);
 },false));
+
+test('disabling after a published save never writes later shared edits to Markdown', {timeout:60000},()=>fixture(async({browser,base,report,restart})=>{
+  const first=await browser.newPage();await open(first,base);
+  const saved=first.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+  await edit(first,'published before disable\n');
+  assert.equal((await (await saved).json()).publication.state,'published');
+  assert.equal(fs.readFileSync(report,'utf8'),'published before disable\n');
+  await first.close();await restart(false);
+  const next=await browser.newPage();await open(next,base);
+  const stored=next.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+  await edit(next,'store after disable\n');
+  assert.equal((await (await stored).json()).publication,undefined);
+  assert.equal(fs.readFileSync(report,'utf8'),'published before disable\n');
+  assert.doesNotMatch(await next.locator('#report-status').innerText(),/Markdown file saved/);
+}));
