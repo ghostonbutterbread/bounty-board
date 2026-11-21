@@ -184,6 +184,22 @@ class CollaborationStore:
             db.execute('UPDATE documents SET source=? WHERE key=?', (rev, key))
             return result
 
+    def receipt(self, key, base, content, request_id, conflict_id=None):
+        """Return only an exact previously committed request; never create work."""
+        key = self._key(key)
+        _revision(content)
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
+            raise ValueError('invalid request id')
+        payload = json.dumps([base, content, conflict_id], ensure_ascii=False)
+        with self._connect() as db:
+            row = db.execute('SELECT payload,result FROM requests WHERE key=? AND request_id=?',
+                             (key, request_id)).fetchone()
+            if row is None:
+                return None
+            if row[0] != payload:
+                raise ValueError('request id reused')
+            return json.loads(row[1])
+
     def submit(self, key, base, content, request_id=None, conflict_id=None):
         key = self._key(key)
         _revision(content)

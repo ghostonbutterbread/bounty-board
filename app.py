@@ -354,13 +354,42 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         raise ValueError('invalid payload')
                 with collaboration_lock, collaboration.observation():
                     collaboration.bind_source(root)
-                    content = read_file(root, relative).decode('utf-8')
+                    try:
+                        content = read_file(root, relative).decode('utf-8')
+                    except FileNotFoundError:
+                        # Recover only an existing observed identity; do not create work.
+                        current = collaboration.current(key)
+                        if current is None:
+                            return self.reply(404, {'error': 'source_unavailable'})
+                        if write:
+                            if 'action' not in payload:
+                                receipt = collaboration.receipt(key, payload['base'], payload['content'],
+                                                                payload['request_id'], payload.get('conflict_id'))
+                                if receipt is not None:
+                                    return self.reply(200, receipt)
+                            return self.reply(409, {'error': 'source_unavailable', 'message': 'Retain your local draft; restore the source before saving.'})
+                        if view == 'history':
+                            result = collaboration.history_page(key, before)
+                        elif view == 'version':
+                            result = collaboration.version(key, params['revision'][0])
+                        else:
+                            result = current
+                            page = collaboration.history_page(key)
+                            result['history'] = page['history']
+                            result['unresolved_count'] = page['unresolved_count']
+                        result['source_status'] = 'source_unavailable'
+                        return self.reply(200, result)
                     if view == 'current':
                         collaboration.observe_source(key, content)
                     if view == 'history':
                         result = collaboration.history_page(key, before)
                     elif view == 'version':
                         result = collaboration.version(key, params['revision'][0])
+                    elif view == 'recovery':
+                        result = collaboration.current(key)
+                        if result is None:
+                            return self.reply(404, {'error': 'not_observed'})
+                        result['source_status'] = 'available'
                     elif write and payload.get('action') == 'publish':
                         if not experimental_fixture_publish:
                             return self.reply(403, {'error': 'publication_disabled'})
@@ -429,6 +458,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             url = urlsplit(self.path)
             if url.path == '/api/collaboration':
                 return self.collaboration_admitted()
+            if url.path == '/api/collaboration/recovery':
+                return self.collaboration_admitted(view='recovery')
             if url.path == '/api/collaboration/history':
                 return self.collaboration_admitted(view='history')
             if url.path == '/api/collaboration/version':

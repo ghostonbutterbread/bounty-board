@@ -3,7 +3,11 @@
 window.BoardAPI = (() => {
   async function request(url, options) {
     const response = await fetch(url, options);
-    if (!response.ok) { const error = new Error(`Request failed (${response.status})`); error.status = response.status; throw error; }
+    if (!response.ok) {
+      const error = new Error(`Request failed (${response.status})`); error.status = response.status;
+      try {error.code=(await response.json())?.error;} catch {}
+      throw error;
+    }
     return response.json();
   }
   function capability(data, name) {

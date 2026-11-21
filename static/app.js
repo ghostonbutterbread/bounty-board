@@ -261,7 +261,14 @@
     }
     if(inList)result.push('</ul>');if(code)result.push('</code></pre>');return result.join('');
   }
+  function savedSharedRecovery() {
+    if(!state.data?.capabilities?.collaboration)return '';
+    return `<section class="panel panel-pad"><h2>Recover a saved shared draft</h2><p class="hint">Deleted or renamed reports disappear from the picker. Enter the original path relative to this lane's reports folder. Only previously observed reports can be recovered; this does not save a report file.</p><label for="saved-shared-path">Original report path</label> <input id="saved-shared-path" type="text" autocomplete="off"><button type="button" class="button" data-find-shared>Find saved shared draft</button><div data-shared-recovery role="status"></div></section>`;
+  }
   function reports() {
+    return savedSharedRecovery()+reportEditor();
+  }
+  function reportEditor() {
     const all=rows('reports'); if(!all)return unavailable('Reports');
     if(!all.length)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">No reports in this lane.</div></section>';
     if(!all.some(r=>String(r.id)===state.report)) state.report=String(all[0].id??'');
@@ -415,6 +422,7 @@
     });
   }
   async function publishFixture(draft, expectedRevision) {
+    if(draft.sourceUnavailable){draft.collabMessage='Source unavailable. Publication was not attempted.';refreshStatus(draft);return;}
     if(draft.hasDraft || draft.collabBusy || !expectedRevision || draft.sharedRevision!==expectedRevision){draft.collabMessage='Save or resolve your local draft before publishing; retry if the shared revision changed.';refreshStatus(draft);return;}
     draft.collabBusy=true;draft.fixturePublishedRevision=null;
     try {
@@ -451,6 +459,7 @@
     try {
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,null,draft.collabRoot);
       draft.sharedRevision=result.revision;draft.pollAttempts=0;draft.pollRetryAt=0;
+      draft.sourceUnavailable=result.source_status==='source_unavailable';
       const recent=result.history || [];
       const previous=draft.historyRecent||[];
       const priorHead=previous.length ? Math.max(...previous.map(item=>item.id)) : null;
@@ -503,7 +512,7 @@
   }
   function scheduleSharedSave(draft, delay=500) {
     clearTimeout(draft.saveTimer);
-    if(draft.retryExhausted || draft.storageBlocked || draft.storageUnreadable || draft.storageError)return;
+    if(draft.retryExhausted || draft.storageBlocked || draft.storageUnreadable || draft.storageError || (draft.sourceUnavailable && !draft.pendingShared))return;
     draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
   }
   async function saveShared(draft) {
@@ -533,7 +542,12 @@
         draft.revision=result.incoming_revision; draft.original=pending.content; persistDraft(draft); scheduleSharedSave(draft);
       }
     } catch (error) {
-      if(error.status===409){draft.pendingShared=null;draft.staleResolution=!!pending.conflict_id;draft.status='conflict';draft.collabMessage='Conflict or stale resolution. Your draft is preserved; review history before retrying.';persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);}
+      if(error.code==='source_unavailable'){
+        draft.sourceUnavailable=true;draft.retryExhausted=true;
+        draft.collabMessage='Source unavailable; pending request and local draft are retained. Restore the source before retrying.';
+        persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);
+      }
+      else if(error.status===409){draft.pendingShared=null;draft.staleResolution=!!pending.conflict_id;draft.status='conflict';draft.collabMessage='Conflict or stale resolution. Your draft is preserved; review history before retrying.';persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);}
       else {
         draft.retryAttempts=(draft.retryAttempts||0)+1;
         if(draft.retryAttempts>=3){draft.retryExhausted=true;draft.collabMessage='Shared save failed. Your local draft is retained; use Retry shared save.';showSharedHistory(draft,draft.sharedHistory||[]);}
@@ -544,6 +558,7 @@
   }
   setInterval(()=>{for(const draft of state.drafts.values()) if(draft.collabStarted && !draft.collabBusy && !draft.pendingShared) pollShared(draft);},2000);
   function reportStatus(draft) {
+    if(draft.sourceUnavailable) return 'Source unavailable. Shared history is retained but not saved to the report. Restore the source before saving; copy any local edits.';
     const sourceUnavailable=draft.source?.loadState==='error' ? 'Source unavailable. ' : '';
     if(state.data?.capabilities?.collaboration && !tabReloadRecovery) return 'This browser cannot safely restore collaborative drafts on reload. Copy unsaved edits before leaving. '+(draft.collabMessage||'');
     if(draft.storageBlocked) return `${draft.status==='conflict'?'Conflict: the report changed in its source. The conflict warning may not be saved. ':''}${sourceUnavailable}Browser draft data is invalid or changed in another tab; it was not overwritten. Copy your edits before leaving.`;
@@ -581,7 +596,21 @@
   }
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
-    if(target.hasAttribute('data-find-drafts')){const report=reportById(state.report);if(report)findSavedDrafts(draftFor(report));}
+    if(target.hasAttribute('data-find-shared')){
+      const box=app.querySelector('[data-shared-recovery]'), input=app.querySelector('#saved-shared-path');
+      const program=currentProgram(), lane=state.lane, path=input.value, root=rootIdentity();
+      box.replaceChildren();target.disabled=true;
+      try {
+        const result=await BoardAPI.collaborationRead(program,lane,path,root,'recovery',{});
+        if(!box.isConnected)return;
+        const message=document.createElement('p');
+        message.textContent=result.source_status==='source_unavailable' ? 'Source unavailable. This is a saved shared draft, not saved to the report. Select and copy it.' : 'Source is available. This is a saved shared draft, not saved to the report. Select and copy it.';
+        const label=document.createElement('label');label.textContent='Recovered shared draft';
+        const text=document.createElement('textarea');text.readOnly=true;text.rows=10;text.value=result.content;label.append(text);box.append(message,label);
+      } catch {if(box.isConnected)box.textContent='No saved shared draft found or recovery is unavailable. Check the original path and retry.';}
+      finally {if(target.isConnected)target.disabled=false;}
+    }
+    else if(target.hasAttribute('data-find-drafts')){const report=reportById(state.report);if(report)findSavedDrafts(draftFor(report));}
     else if(target.hasAttribute('data-go-program')){state.view='program';render();}
     else if(target.hasAttribute('data-open-program')){state.program=target.dataset.openProgram;state.lane='';normalizeSelection();state.view='program';state.section='findings';render();}
     else if(target.dataset.section){state.section=target.dataset.section;render();}
