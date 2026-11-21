@@ -66,7 +66,9 @@ test('nonfinite map input leaves the healthy program usable in a real browser', 
     await page.goto(`http://127.0.0.1:${port}`);
     await page.getByRole('button',{name:'Open workspace'}).click();
     await page.getByRole('button',{name:'MapStore',exact:true}).click();
-    assert.match(await page.locator('#app').innerText(),/map_unavailable_or_invalid/);
+    const availability=page.getByRole('region',{name:'Data availability'});
+    await availability.locator('summary').click();
+    assert.match(await availability.innerText(),/Map inaccessible or invalid/);
     await page.locator('#program-select').selectOption('web_bounty/beta');
     assert.match(await page.locator('#app').innerText(),/beta gadget/);
     await page.getByRole('button',{name:'Gadgets',exact:true}).click();

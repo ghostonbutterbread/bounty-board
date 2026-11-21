@@ -266,13 +266,15 @@ test('dashboard does not present incomplete discovery or partial reports as tota
   data.warnings=[];
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.getByRole('button',{name:'Refresh'}).click();
-  await page.getByText('reports_unavailable_or_invalid').waitFor();
+  const availability=page.getByRole('region',{name:'Data availability'});
+  await availability.locator('summary').click();
+  await availability.getByText(/Reports inaccessible or invalid/).waitFor();
   assert.match(await page.locator('.stat').filter({hasText:'Report records'}).innerText(),/Unknown/i);
   assert.match(await page.locator('.stat').filter({hasText:'Finding records'}).innerText(),/1/);
   await page.unroute('**/api/data');
   await page.route('**/api/data',route=>route.fulfill({json:{programs:[],warnings:['root_unavailable']}}));
   await page.getByRole('button',{name:'Refresh'}).click();
-  await page.getByText('root_unavailable').waitFor();
+  await page.getByRole('alert').getByText(/root unavailable/i).waitFor();
   assert.match(await page.locator('.stat').filter({hasText:'Programs loaded'}).innerText(),/Unknown/i);
   assert.doesNotMatch(await page.locator('#app').innerText(),/No programs returned/);
   await page.close();
