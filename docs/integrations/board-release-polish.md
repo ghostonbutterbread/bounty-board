@@ -3,7 +3,7 @@
 - **Status:** local feature; parent independent complete-diff review required. No merge, push, deployment or real Shared use authorized.
 - **Owner/ref/worktree:** delegated worker, `feat/board-release-polish`, `/home/ryushe/projects/bounty-board-release-polish`.
 - **Base:** `cf6f52e`; eventual target `beta` through parent review/integration. This is a correction to the combined release candidate, not a stable-branch repair; downstream propagation is deferred to the parent.
-- **Implementation checkpoint:** pending first task commit; a subsequent dossier-only handoff will record its immutable SHA.
+- **Implementation checkpoint:** `c6a897106ddf423f01499e1b6330084b41bee245`; the next commit updates this dossier only. Verify current branch tip and the exact diff before integration.
 
 ## Contract
 
