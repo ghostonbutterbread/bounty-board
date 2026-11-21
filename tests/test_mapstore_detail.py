@@ -75,6 +75,38 @@ class MapDetailTests(unittest.TestCase):
         (self.maps / 'map.jsonl').unlink()
         self.assertNotEqual(self.get()[0], 200)
 
+    def test_deep_index_is_unavailable_without_disconnecting(self):
+        deep = '[' * 15000 + '0' + ']' * 15000
+        (self.maps / 'map.jsonl').write_text('{"path":' + json.dumps(self.path) + ',"tags":' + deep + '}\n')
+        try:
+            json.loads(deep)
+        except RecursionError:
+            parseable = False
+        else:
+            parseable = True
+        status, detail = self.get()
+        self.assertIn(status, (200, 404))
+        if not parseable:
+            self.assertEqual(status, 404)
+        if status == 404:
+            self.assertEqual(detail, {'error': 'observation_not_found_or_unavailable'})
+        conn = HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
+        try:
+            conn.request('GET', '/api/data')
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            raw = response.read()
+            self.assertNotIn(str(self.root), raw.decode())
+            lane = json.loads(raw)['programs'][0]['lanes'][0]
+            if status == 404:
+                self.assertIsNone(lane['map'])
+                self.assertIn('map_unavailable_or_invalid', lane['warnings'])
+            else:
+                self.assertEqual(lane['map'][0]['path'], self.path)
+                self.assertNotIn('map_unavailable_or_invalid', lane['warnings'])
+        finally:
+            conn.close()
+
     def test_current_index_and_program_are_authoritative(self):
         other = self.root / 'web_bounty/beta/web/recon/maps'
         other.mkdir(parents=True)
