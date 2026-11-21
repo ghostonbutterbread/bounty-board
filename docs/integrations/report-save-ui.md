@@ -4,7 +4,7 @@
 - **Owner / branch / worktree:** delegated UI worker, `feat/board-report-save-ui`, `/home/ryushe/projects/bounty-board-report-save-ui`.
 - **Assigned base:** `a0d8a03fc28f43f12b45fb3605176a3ec902b9a1`; target `beta` (fetched `origin/beta` at `553a06cebadd4fe9ded2213466a68510117060d9`). This UI branch deliberately starts on the experimental backend handoff; parent owns dependency ordering and integration.
 - **Inspiration / contract:** `BACKEND_API.md` experimental collaboration source autosave. Backend worker is concurrently correcting the publication and recovery protocol; no backend work is included here.
-- **Recovery checkpoint / implementation commit:** `c19980cfc30306bfb4d75573e1ebf1a3dade5c7d`; the branch tip contains a later dossier-only handoff commit, which must also be reviewed.
+- **Recovery checkpoint:** `9fa85841e40b58be15770780fc5c4097238f3760`; the branch tip contains a later dossier-only handoff commit. **Implementation commits:** `c19980cfc30306bfb4d75573e1ebf1a3dade5c7d` and `9fa85841e40b58be15770780fc5c4097238f3760`; review the entire branch range, including the dossier-only commits.
 
 ## Contract implemented
 
