@@ -6,7 +6,7 @@
 - **Base:** `fea88bc7428b23c55be4d376ac38b81e5e89da8d`
 - **Intended integration target:** `beta`; no merge, push or activation authorized here
 - **Last updated:** 2026-11-21
-- **Recovery checkpoint:** see subsequent handoff-only commit
+- **Recovery checkpoint:** `ac94fb2cfeb46d733400f7af3fc1487cddbb8269` (RED tests and original dossier); the branch tip contains a later dossier-only handoff commit
 - **Feature implementation commits:** none
 
 ## Intent and current contract
