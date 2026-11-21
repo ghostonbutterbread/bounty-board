@@ -84,6 +84,94 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(status, 403, result)
         self.assertEqual(self.report.read_text(), original)
 
+    def test_editability_contract_and_seeded_indexes(self):
+        base = self.report.parent
+        examples = {
+            'ordinary.md': ('# Normal report\n', True),
+            'index.md': ('# Human-authored index\nDetails\n', True),
+            'EVIDENCE.md': ('# Evidence\n', True),
+            'finding.md': ('<!-- generated: bounty-core-finding-report -->\n# Report\n', True),
+            'stub.md': ('<!-- generated: bounty-core-category-link-stub -->\n# Link\n', False),
+            'raw/2026-01-01/index.md': ('# Raw 2026-01-01\n', False),
+            'index/novel_findings.md': ('# Novel Findings\n', False),
+        }
+        for path, (text, _) in examples.items():
+            target = base / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_text(text)
+        conn = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=30)
+        try:
+            conn.request('GET', '/api/data', headers={'Host': self.host})
+            data = json.loads(conn.getresponse().read())
+        finally:
+            conn.close()
+        entries = {e['path']: e for e in data['programs'][0]['lanes'][0]['reports']}
+        for path, (text, allowed) in examples.items():
+            query = urlencode(dict(family='web_bounty', program='example', lane='web', path=path))
+            conn = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=30)
+            try:
+                conn.request('GET', '/api/report?' + query, headers={'Host': self.host})
+                response = conn.getresponse(); body = json.loads(response.read())
+            finally:
+                conn.close()
+            self.assertEqual(response.status, 200, path)
+            self.assertEqual(body['editable'], allowed, path)
+            self.assertEqual(entries[path]['editable'], allowed, path)
+
+    def test_publisher_rejects_navigation_even_when_called_directly(self):
+        original = '<!-- generated: bounty-core-category-link-stub -->\n# Link\n'
+        self.report.write_text(original)
+        result = report_publisher.publish(self.root, 'web_bounty/example/web/reports/report.md',
+                                          self.private, self.key, 'hostile', original, 'overwrite\n')
+        self.assertNotEqual(result['state'], 'published')
+        self.assertEqual(self.report.read_text(), original)
+
+    def test_navigation_appearing_at_final_check_is_not_exchanged(self):
+        original = self.text
+        navigation = '<!-- generated: bounty-core-report-navigation -->\n# Navigation\n'
+        def change(phase, _operation):
+            if phase == 'before_exchange':
+                self.report.write_text(navigation)
+        result = report_publisher.publish(self.root, 'web_bounty/example/web/reports/report.md',
+                                          self.private, self.key, 'late-marker', original, 'overwrite\n', change)
+        self.assertEqual(result['state'], 'conflict')
+        self.assertEqual(self.report.read_text(), navigation)
+
+    def test_navigation_replacing_source_before_exchange_is_not_exchanged(self):
+        navigation = '<!-- generated: bounty-core-report-navigation -->\n# Navigation\n'
+        def change(phase, _operation):
+            if phase == 'before_exchange':
+                replacement = self.report.with_name('replacement.md')
+                replacement.write_text(navigation)
+                os.replace(replacement, self.report)
+        result = report_publisher.publish(self.root, 'web_bounty/example/web/reports/report.md',
+                                          self.private, self.key, 'replace-marker', self.text, 'overwrite\n', change)
+        self.assertEqual(result['state'], 'conflict')
+        self.assertEqual(self.report.read_text(), navigation)
+
+    def test_earlier_retained_inode_changed_mid_sweep_is_seen_next_sweep(self):
+        initial = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': initial['revision'], 'content': self.text.replace('one', 'ONE'), 'request_id': 'first'})[1]
+            store = CollaborationStore(self.private)
+            for n in range(64):
+                op = f'conflict-{n:03}'
+                store.begin_publication(self.key, op); store.complete_publication(self.key, op, 'conflict')
+            self.assertEqual(self.request()[1]['reconciliation']['state'], 'backlog')
+            late = self.text.replace('seven', 'SEVEN')
+            old.seek(0); old.write(late); old.truncate(); old.flush(); os.fsync(old.fileno())
+            state = self.request()[1]
+            self.assertEqual(state['reconciliation']['state'], 'complete')
+            payload = {'base': state['revision'], 'content': first['content'].replace('two', 'TWO'), 'request_id': 'after-sweep'}
+            status, saved = self.request('POST', payload)
+            self.assertEqual(status, 200, saved)
+            self.assertEqual(saved['publication']['state'], 'published')
+            self.assertEqual(self.request()[1]['reconciliation']['state'], 'backlog')
+            current = self.request()[1]
+            self.assertEqual(current['reconciliation']['state'], 'complete')
+            self.assertIn('SEVEN', current['content'])
+            events = [e for e in current['history'] if e['kind'].startswith('retained:')]
+            self.assertTrue(any(self.request(endpoint='/version', extra='&revision=' + e['revision'])[1]['content'] == late for e in events))
+            self.assertNotEqual(self.request('POST', payload)[1]['publication']['state'], 'published')
+
     def test_poll_interleaving_does_not_starve_real_publication_after_65_saves(self):
         state = self.request()[1]
         for n in range(65):

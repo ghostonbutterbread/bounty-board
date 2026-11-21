@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import app
 import report_publisher
+from collaborative_engine import CollaborationStore
 
 
 def server_process(root, private, pipe, barrier):
@@ -32,6 +33,55 @@ def server_process(root, private, pipe, barrier):
 
 
 class RetainedPollTests(unittest.TestCase):
+    def test_two_processes_invalidate_completed_sweep_and_make_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, private = Path(tmp) / 'source', Path(tmp) / 'private'
+            report = root / 'web_bounty/example/web/reports/report.md'
+            report.parent.mkdir(parents=True); report.write_text('initial\n')
+            servers = []
+            try:
+                for _ in range(2):
+                    parent, child = multiprocessing.Pipe()
+                    proc = multiprocessing.Process(target=server_process, args=(root, private, child, False))
+                    proc.start(); child.close(); servers.append((proc, parent, None))
+                    self.assertTrue(parent.poll(30)); servers[-1] = (proc, parent, parent.recv())
+                key = json.dumps([str(root.resolve()), 'web_bounty/example/web/reports/report.md'], ensure_ascii=False)
+                store = CollaborationStore(private)
+                with store.observation():
+                    for n in range(65):
+                        op = f'conflict-{n:03}'
+                        store.begin_publication(key, op); store.complete_publication(key, op, 'conflict')
+                query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md', root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest()))
+                def request(index, method, payload=None):
+                    port = servers[index][2]; host = f'127.0.0.1:{port}'
+                    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+                    try:
+                        conn.request(method, '/api/collaboration?' + query, json.dumps(payload) if payload else None,
+                                     {'Host': host, 'Origin': 'http://' + host, 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'})
+                        response = conn.getresponse(); return response.status, json.loads(response.read())
+                    finally:
+                        conn.close()
+                self.assertEqual(request(0, 'GET')[1]['reconciliation']['state'], 'backlog')
+                state = request(0, 'GET')[1]
+                self.assertEqual(state['reconciliation']['state'], 'complete')
+                other = {'base': state['revision'], 'content': 'other process\n', 'request_id': 'other'}
+                self.assertEqual(request(1, 'POST', other)[0], 503)
+                status, state = request(1, 'POST', other)
+                self.assertEqual(status, 200, state)
+                self.assertEqual(state['publication']['state'], 'published')
+                next_payload = {'base': state['revision'], 'content': 'next process\n', 'request_id': 'next'}
+                self.assertEqual(request(0, 'POST', next_payload)[0], 503)
+                status, result = request(0, 'POST', next_payload)
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result['publication']['state'], 'published')
+                self.assertEqual(report.read_text(), 'next process\n')
+            finally:
+                for proc, pipe, _ in servers:
+                    if proc.is_alive(): proc.terminate()
+                    proc.join(10)
+                    if proc.is_alive(): proc.kill(); proc.join()
+                    pipe.close()
+
     def exercise(self, delayed, overlap, post_first=False):
         with tempfile.TemporaryDirectory() as tmp:
             root, private = Path(tmp) / 'source', Path(tmp) / 'private'

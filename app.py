@@ -167,8 +167,9 @@ def coverage(lane, warnings):
     return None
 
 
-def reports(lane, warnings, findings=None):
+def reports(lane, warnings, findings=None, report_autosave=False):
     import os
+    from report_publisher import generated_navigation
     base = lane / 'reports'
     if not base.exists():
         warnings.append('reports_missing')
@@ -204,7 +205,10 @@ def reports(lane, warnings, findings=None):
                     text = None
                     if 'report_content_unavailable_or_invalid' not in warnings:
                         warnings.append('report_content_unavailable_or_invalid')
-                if owners['report_path']:
+                navigation = text is not None and generated_navigation(rel, text)
+                if navigation:
+                    kind, fids = 'generated_navigation', []
+                elif owners['report_path']:
                     kind = 'registered_report'
                     fids = owners['report_path']
                 elif owners['evidence_path']:
@@ -212,17 +216,16 @@ def reports(lane, warnings, findings=None):
                     fids = owners['evidence_path']
                 elif text is None:
                     kind, fids = 'unknown', []
-                elif any(marker in text for marker in ('<!-- generated: bounty-core-report-navigation -->', '<!-- generated: bounty-core-category-link-stub -->')):
-                    kind, fids = 'generated_navigation', []
                 elif '<!-- generated: bounty-core-finding-report -->' in text:
                     kind, fids = 'generated_report', []
                 else:
                     kind, fids = ('unregistered' if findings is not None else 'unknown'), []
-                items.append({'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids, 'editable': False})
+                items.append({'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids,
+                              'editable': bool(report_autosave and text is not None and not navigation)})
     return items
 
 
-def discover(root):
+def discover(root, report_autosave=False):
     if not root.is_dir():
         return {'programs': [], 'warnings': ['root_unavailable']}
     programs = []
@@ -251,7 +254,7 @@ def discover(root):
                     findings = ledger(lane, warnings)
                     entries = map_entries(lane, warnings)
                     found.append({'name': lane.name, 'findings': findings, 'map': entries,
-                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings),
+                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings, report_autosave),
                                   'gadgets': [e for e in entries if 'gadget' in (e['tags'] or [])] if entries is not None else None,
                                   'warnings': warnings})
             if found:
@@ -306,8 +309,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     collaboration_lock = threading.RLock()
     # Progress is per server: an incomplete sweep never permits a new exchange.
     retained_cursors = {}
-    # A completed multi-request sweep can authorize one immediately following
-    # explicit reconciliation, provided no publication operation was added.
+    # A completed multi-request sweep can authorize one following write,
+    # provided no publication operation was added under the shared lock.
     retained_ready = {}
     retained_scan_limit = 64
 
@@ -453,6 +456,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         raise ValueError('invalid payload')
                 with collaboration_lock, collaboration.observation():
                     collaboration.bind_source(root)
+                    from report_publisher import generated_navigation
                     reconciliation = None
                     scan_source = None
                     if report_autosave:
@@ -462,10 +466,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                             scan_source = read_file(root, relative).decode('utf-8')
                         except FileNotFoundError:
                             scan_source = None
+                        if write and scan_source is not None and generated_navigation(relative, scan_source):
+                            return self.reply(403, {'error': 'generated_navigation_not_editable',
+                                                    'message': 'This generated navigation file is read-only; edit the underlying report instead.'})
                         if scan_source is not None:
                             collaboration.observe_source(key, scan_source)
                         try:
-                            ready = retained_ready.pop(key, None) if write and payload.get('action') == 'reconcile' else None
+                            ready = retained_ready.pop(key, None) if write else None
                             if ready is not None and not collaboration.publication_page(key, ready, 1):
                                 reconciliation = {'state': 'complete', 'scanned': 0}
                             else:
@@ -540,6 +547,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         if reconciliation is not None:
                             result['reconciliation'] = reconciliation
                         return self.reply(200, result)
+                    if write and generated_navigation(relative, content):
+                        return self.reply(403, {'error': 'generated_navigation_not_editable',
+                                                'message': 'This generated navigation file is read-only; edit the underlying report instead.'})
                     if view == 'current':
                         collaboration.observe_source(key, content)
                     if view == 'history':
@@ -709,7 +719,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if url.path == '/api/collaboration/version':
                 return self.collaboration_admitted(view='version')
             if url.path == '/api/data':
-                result: dict = discover(root)
+                result: dict = discover(root, report_autosave)
                 # Identity follows the effective canonical path, not report content.
                 # It is an opaque namespace, not a secret or authentication token.
                 try:
@@ -766,7 +776,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     content = read_file(Path(root), f'{family}/{program}/{lane}/reports/{path}')
                     text = content.decode('utf-8')
                     revision = hashlib.sha256(content).hexdigest()
-                    self.reply(200, {'content': text, 'revision': revision, 'editable': False}, {'ETag': '"' + revision + '"'})
+                    from report_publisher import generated_navigation
+                    self.reply(200, {'content': text, 'revision': revision,
+                                     'editable': bool(report_autosave and not generated_navigation(path, text))}, {'ETag': '"' + revision + '"'})
                 except (OSError, ValueError, UnicodeError):
                     self.reply(404, {'error': 'report_not_found_or_unavailable'})
                 return
