@@ -121,6 +121,46 @@
     if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
   }
   let pendingReportRefresh=null;
+  let loadGeneration=0, applyGeneration=0, renderGeneration=0;
+  const phaseStatus=document.createElement('div');
+  phaseStatus.className='message';phaseStatus.setAttribute('role','status');phaseStatus.hidden=true;app.before(phaseStatus);
+  function phaseMessage(text, apply) {
+    phaseStatus.replaceChildren();phaseStatus.hidden=!text;
+    if(text)phaseStatus.append(document.createTextNode(text));
+    if(apply){const button=document.createElement('button');button.className='button';button.textContent='Apply loaded reports';button.addEventListener('click',apply);phaseStatus.append(' ',button);}
+  }
+  async function completeInitialLoad(summary, generation) {
+    try {
+      const full=await BoardAPI.load('complete',summary.root_instance);
+      if(generation!==loadGeneration || state.data!==summary)return;
+      if(!full || !Array.isArray(full.programs) || full.reports_loading!==false || full.root_identity!==summary.root_identity || full.root_instance!==summary.root_instance)throw new Error('Stale report snapshot');
+      const apply=async()=>{
+        if(generation!==loadGeneration || state.data!==summary)return;
+        const check=++applyGeneration, view=renderGeneration;
+        const stale=()=>{
+          if(check!==applyGeneration || generation!==loadGeneration || state.data!==summary)return true;
+          if(view!==renderGeneration){phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);return true;}
+          return false;
+        };
+        if(hasUnrecoverableDraft()){phaseMessage('Reports loaded, but a draft needs recovery before applying them.');return;}
+        try {
+          const current=await BoardAPI.rootInstance();
+          if(stale())return;
+          if(current.root_instance!==summary.root_instance)throw new Error('Root changed');
+        } catch {
+          if(!stale()){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+          return;
+        }
+        if(hasUnrecoverableDraft()){phaseMessage('Reports loaded, but a draft needs recovery before applying them.');return;}
+        if(app.contains(document.activeElement)){phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);return;}
+        state.data=full;normalizeSelection();phaseMessage('');render();
+      };
+      if(app.contains(document.activeElement) || hasUnsaved())phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);
+      else await apply();
+    } catch {
+      if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+    }
+  }
   const hasUnrecoverableDraft = () => [...state.drafts.values()].some(d=>d.hasDraft && (d.storageError || d.storageUnreadable || d.storageBlocked));
   function renderRecovery() {
     const drafts=[...state.drafts.values()].filter(d=>d.hasDraft && (d.storageError || d.storageUnreadable || d.storageBlocked));
@@ -149,14 +189,20 @@
   async function load() {
     if(state.metadataPending || pendingReportRefresh) return;
     if(hasUnrecoverableDraft()) {blockRefresh();render();return;}
+    const generation=++loadGeneration, initial=!state.data;
+    phaseMessage('');
     let finishRefresh;pendingReportRefresh=new Promise(resolve=>{finishRefresh=resolve;});
     state.loading=true; state.error=''; render();
     try {
-      const data=await BoardAPI.load();
+      let data=await BoardAPI.load(initial ? 'summary' : undefined);
+      // An unidentified partial snapshot cannot be paired safely. Retain the
+      // existing full-load behavior, including unscoped draft recovery.
+      if(data?.reports_loading===true && (!/^[a-f0-9]{64}$/.test(data.root_identity || '') || !/^[a-f0-9]{64}$/.test(data.root_instance || '')))data=await BoardAPI.load();
       if(hasUnrecoverableDraft()) blockRefresh();
       else {
         if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response');
         state.data=data; state.unidentifiedRoot=`unidentified-${++unidentifiedSequence}`; state.metadataErrors=[]; normalizeSelection();
+        if(data.reports_loading===true)phaseMessage('Reports are loading. Report actions are unavailable until loading completes.');
         for(const program of programs())for(const lane of list(program.lanes)||[])for(const report of list(lane.reports)||[]){
           const draft=state.drafts.get(draftKey(String(program.id),String(lane.name),report.id));
           if(draft && (report.content!=null || (report.revision!=null && draft.hasDraft)))reconcileReport(draft,report);
@@ -167,6 +213,7 @@
       else {state.error='Could not load workspace data. Check the local backend and try Refresh.'; state.data=null;}
     }
     state.loading=false;try{render();}finally{pendingReportRefresh=null;finishRefresh();}
+    if(state.data?.reports_loading===true && generation===loadGeneration)completeInitialLoad(state.data,generation);
   }
   const opt = (value,label,selected) => `<option value="${esc(value)}"${selected?' selected':''}>${esc(label)}</option>`;
   const warningText = w => typeof w==='object' && w!==null ? (w.message ?? JSON.stringify(w)) : String(w);
@@ -207,7 +254,7 @@
     const discovered=!discoveryIncomplete();
     const complete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.findings));
     const stat=(v,label)=>`<div class="stat"><strong>${esc(v)}</strong><span>${esc(label)}</span></div>`;
-    const reportsComplete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports) && !(reportsIncomplete(l)));
+    const reportsComplete=discovered && !state.data?.reports_unavailable && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports) && !(reportsIncomplete(l)));
     const submissionValues=field=>{
       const counts=new Map();for(const finding of all){const nested=finding.submission?.[field];const value=nested != null && nested !== '' ? nested : finding[field==='state'?'submission_status':'platform_outcome'];if(value!=null && value!=='')counts.set(String(value),(counts.get(String(value))||0)+1);}
       return [...counts].map(([value,count])=>`<div class="record"><span>${esc(value)}</span> <strong>${count}</strong></div>`).join('') || '<p class="hint">No recorded values available.</p>';
@@ -219,7 +266,7 @@
     const max=Math.max(1,...classes.values());
     const bars=[...classes].sort((a,b)=>b[1]-a[1]).map(([name,n])=>`<div class="chart-row"><span>${esc(name)}</span><span class="bar"><i style="width:${n/max*100}%"></i></span><strong>${n}</strong></div>`).join('');
     return `${title('Dashboard','A portfolio view of the records currently loaded.',`<div class="toolbar"><label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.id||p.name,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`)}
-      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
+      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
       ${availability(ps)}<div class="dashboard-grid"><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded finding records; not coverage.</p>${bars||'<div class="state">No classified findings available.</div>'}</section><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?'Counts from all loaded finding records.':'Incomplete data: counts include loaded finding records only, not portfolio totals.'}</p>${severityRows||'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad"><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p>${ps.length?ps.map(p=>`<div class="record"><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><p class="hint">${esc(p.family||'Family not provided')} · ${Array.isArray(p.lanes)?`${p.lanes.length} lanes`:'Lanes unavailable'}</p></div>`).join(''):discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for loaded findings only.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
   function workspace() {
@@ -314,6 +361,7 @@
     return savedSharedRecovery()+(partial ? '<div class="message warning">Report list is incomplete; some reports may be unavailable.</div>' : '')+reportEditor();
   }
   function reportEditor() {
+    if(state.data?.reports_loading)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports are loading.</div></section>';
     const all=rows('reports'); if(!all)return unavailable('Reports');
     if(!all.length)return `<section class="panel panel-pad"><h2>Reports</h2><div class="state">${reportsIncomplete(currentLane())?'No reports loaded.':'No reports in this lane.'}</div></section>`;
     if(!all.some(r=>String(r.id)===state.report)) state.report=String(all[0].id??'');
@@ -800,6 +848,7 @@
   }
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
   function render() {
+    ++renderGeneration;
     if(editor){editor.toTextArea();editor=null;}
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
@@ -829,7 +878,8 @@
       if(!item || !box || !program || typeof item.path!=='string')return;
       target.disabled=true;box.textContent='Loading observation…';
       try {
-        const result=await BoardAPI.observation(program,lane,item.path);
+        const partial=state.data?.reports_loading===true || state.data?.reports_unavailable===true;
+        const result=await BoardAPI.observation(program,lane,item.path,partial ? state.data.root_instance : undefined);
         if(!box.isConnected || currentProgram()!==program || state.lane!==lane || state.section!==section)return;
         if(typeof result.content!=='string')throw new Error('Invalid response');
         const pre=document.createElement('pre');pre.className='observation-body';pre.textContent=result.content;box.replaceChildren(pre);

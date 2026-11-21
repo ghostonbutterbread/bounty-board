@@ -233,7 +233,7 @@ def reports(lane, warnings, findings=None, report_autosave=False):
     return items
 
 
-def discover(root, report_autosave=False):
+def discover(root, report_autosave=False, *, include_reports=True):
     if not root.is_dir():
         return {'programs': [], 'warnings': ['root_unavailable']}
     programs = []
@@ -262,7 +262,7 @@ def discover(root, report_autosave=False):
                     findings = ledger(lane, warnings)
                     entries = map_entries(lane, warnings)
                     found.append({'name': lane.name, 'findings': findings, 'map': entries,
-                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings, report_autosave),
+                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings, report_autosave) if include_reports else None,
                                   'gadgets': [e for e in entries if 'gadget' in (e['tags'] or [])] if entries is not None else None,
                                   'warnings': warnings})
             if found:
@@ -307,6 +307,20 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
         raise ValueError('invalid canonical tailnet hostname')
     root = Path(root).absolute()
+
+    def root_snapshot():
+        import hashlib
+        try:
+            canonical = root.resolve(strict=True)
+            stat = canonical.stat()
+            if not canonical.is_dir():
+                return None
+            identity = hashlib.sha256(os.fsencode(str(canonical))).hexdigest()
+            instance = hashlib.sha256(os.fsencode(f'{canonical}\0{stat.st_dev}\0{stat.st_ino}')).hexdigest()
+            return canonical, identity, instance
+        except (OSError, RuntimeError):
+            return None
+
     if experimental_fixture_publish:
         if collaboration_dir is None or not os.environ.get('TMPDIR'):
             raise ValueError('fixture publication requires collaboration storage and explicit TMPDIR')
@@ -749,6 +763,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
 
         def do_GET(self):
             import hashlib
+            import os
             if not self.trusted_request():
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
@@ -762,13 +777,34 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if url.path == '/api/collaboration/version':
                 return self.collaboration_admitted(view='version')
             if url.path == '/api/data':
-                result: dict = discover(root, report_autosave)
+                params = parse_qs(url.query, keep_blank_values=True)
+                phase = params.get('phase', [self.headers.get('X-Bounty-Board-Phase', '')])[0]
+                # Only the read-only server opts in. Existing callers and all
+                # writer configurations retain the synchronous full response.
+                phased = (phase in ('summary', 'complete', 'identity') and not self.server.writer
+                          and collaboration is None and not report_autosave
+                          and not experimental_fixture_publish)
+                before = root_snapshot() if phased else None
+                if phased and phase == 'identity':
+                    self.reply(200, {'root_instance': before[2] if before else None}); return
+                if phased and phase == 'complete' and (not before or params.get('root_instance') != [before[2]]):
+                    self.reply(409, {'error': 'root_changed'}); return
+                if phased and before:
+                    result: dict = discover(before[0], include_reports=phase != 'summary')
+                    if root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'}); return
+                    result['root_identity'] = before[1]
+                    result['root_instance'] = before[2]
+                    result['reports_loading'] = phase == 'summary'
+                else:
+                    result = discover(root, report_autosave)
                 # Identity follows the effective canonical path, not report content.
                 # It is an opaque namespace, not a secret or authentication token.
                 try:
                     import os
-                    canonical = root.resolve(strict=True)
-                    result['root_identity'] = hashlib.sha256(os.fsencode(str(canonical))).hexdigest() if canonical.is_dir() else None
+                    if not (phased and before):
+                        canonical = root.resolve(strict=True)
+                        result['root_identity'] = hashlib.sha256(os.fsencode(str(canonical))).hexdigest() if canonical.is_dir() else None
                 except (OSError, RuntimeError):
                     result['root_identity'] = None
                 result['capabilities'] = {'finding_metadata': self.server.writer_enabled,
@@ -779,14 +815,24 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'collaboration': collaboration is not None,
                                           'report_autosave': report_autosave,
                                           'fixture_publish': experimental_fixture_publish}
+                if phased and phase == 'summary' and before:
+                    result['capabilities']['source_authoritative'] = False
                 self.reply(200, result)
                 return
             if url.path == '/api/map-observation':
+                before = None
+                bound = False
                 try:
                     params = parse_qs(url.query, keep_blank_values=True, strict_parsing=True,
-                                      encoding='utf-8', errors='strict', max_num_fields=4)
-                    if set(params) != {'family', 'program', 'lane', 'path'} or any(len(v) != 1 for v in params.values()):
+                                      encoding='utf-8', errors='strict', max_num_fields=5)
+                    bound = 'root_instance' in params
+                    required = {'family', 'program', 'lane', 'path'}
+                    if set(params) != required | ({'root_instance'} if bound else set()) or any(len(v) != 1 for v in params.values()):
                         raise ValueError('invalid selector')
+                    if bound:
+                        before = root_snapshot()
+                        if not before or params['root_instance'] != [before[2]]:
+                            self.reply(409, {'error': 'root_changed'}); return
                     family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
                     if (family not in FAMILIES or lane not in FAMILIES[family] or
                             not program or program.startswith('_') or program in ('.', '..') or
@@ -795,16 +841,22 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                             path.split('/')[-1] != 'index.md'):
                         raise ValueError('invalid selector')
                     prefix = f'{family}/{program}/{lane}/recon/maps/'
-                    raw = read_file(root, prefix + 'map.jsonl').decode('utf-8')
+                    source = before[0] if before else root
+                    raw = read_file(source, prefix + 'map.jsonl').decode('utf-8')
                     entries = [json.loads(line) for line in raw.splitlines() if line.strip()]
                     if any(not isinstance(item, dict) or not isinstance(item.get('tags', []), list) for item in entries):
                         raise ValueError('invalid index')
                     if sum(item.get('path') == path for item in entries) != 1:
                         raise ValueError('unindexed or ambiguous')
-                    content = read_file(root, prefix + path).decode('utf-8')
+                    content = read_file(source, prefix + path).decode('utf-8')
+                    if bound and root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'}); return
                     self.reply(200, {'content': content})
                 except (OSError, ValueError, UnicodeError, RecursionError):
-                    self.reply(404, {'error': 'observation_not_found_or_unavailable'})
+                    if bound and before and root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'})
+                    else:
+                        self.reply(404, {'error': 'observation_not_found_or_unavailable'})
                 return
             if url.path == '/api/report':
                 params = parse_qs(url.query, keep_blank_values=True)

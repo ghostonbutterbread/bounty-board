@@ -41,6 +41,28 @@ class MapDetailTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(result))
         return result
 
+    def test_summary_observation_root_binding_before_and_after_read(self):
+        from unittest.mock import patch
+        from urllib.request import urlopen
+        def summary():
+            with urlopen(f'http://127.0.0.1:{self.server.server_port}/api/data?phase=summary', timeout=5) as response:
+                return json.load(response)
+        token = summary()['root_instance']
+        self.assertEqual(self.get(root_instance=token), (200, {'content': 'Capability:\n- grants: observed\n'}))
+        self.assertEqual(self.get(root_instance='bad'), (409, {'error': 'root_changed'}))
+        self.assertNotEqual(self.get(root_instance=[token, token])[0], 200)
+        original = app.read_file
+        def swap_after_read(root, relative):
+            data = original(root, relative)
+            if relative.endswith(self.path):
+                self.root.rename(self.root.with_name(self.root.name + '-old'))
+                self.root.mkdir()
+            return data
+        with patch.object(app, 'read_file', side_effect=swap_after_read):
+            status, result = self.get(root_instance=token)
+        self.assertEqual((status, result), (409, {'error': 'root_changed'}))
+        self.assertEqual(self.get(root_instance=token), (409, {'error': 'root_changed'}))
+
     def test_indexed_observation_is_read_lazily(self):
         status, result = self.get()
         self.assertEqual(status, 200)
