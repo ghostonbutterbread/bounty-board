@@ -58,15 +58,17 @@
   const recoveryCards=new Map();
   let editor = null;
   function persistDraft(draft) {
-    if (draft.storageBlocked || draft.storageUnreadable) return;
+    if (draft.storageBlocked || draft.storageUnreadable) return false;
     try {
       const current=localStorage.getItem(storageKey(draft.key));
-      if(current!==draft.storageSnapshot){draft.storageBlocked=true;return;}
+      if(current!==draft.storageSnapshot){draft.storageBlocked=true;return false;}
       const next=JSON.stringify({version:1,text:draft.text,original:draft.original,revision:draft.revision ?? null,conflict:draft.status==='conflict',conflictId:draft.conflictId ?? null,conflictBase:draft.conflictBase ?? null,staleResolution:!!draft.staleResolution,hasDraft:draft.hasDraft,pendingShared:draft.pendingShared ?? null});
       localStorage.setItem(storageKey(draft.key),next);
+      if(localStorage.getItem(storageKey(draft.key))!==next){draft.storageBlocked=true;return false;}
       draft.storageSnapshot=next;
       draft.storageError=false;
-    } catch { draft.storageError=true; }
+      return true;
+    } catch { draft.storageError=true;return false; }
   }
   function reconcileReport(draft,report) {
     const content=report.content == null ? null : String(report.content), revision=report.revision ?? null;
@@ -309,10 +311,15 @@
               if(draft.hasDraft || draft.pendingShared || draft.storageBlocked || draft.storageUnreadable || draft.storageError || localStorage.getItem(storageKey(draft.key))!==draft.storageSnapshot){status.textContent='This tab already has unsaved or changed data. Copy the draft instead.';return;}
               if(saved.pendingShared && (typeof saved.pendingShared!=='object' || typeof saved.pendingShared.content!=='string' || typeof saved.pendingShared.request_id!=='string' || typeof saved.pendingShared.base!=='string')){status.textContent='Pending request cannot be safely replayed. Copy the text instead.';return;}
               Object.assign(draft,{text:saved.text,original:saved.original,revision:saved.revision,hasDraft:saved.hasDraft!==false,conflictId:saved.conflictId,conflictBase:saved.conflictBase,staleResolution:!!saved.staleResolution,pendingShared:saved.pendingShared||null,status:saved.conflict?'conflict':'unsaved'});
-              persistDraft(draft);
-              draft.applyingRemote=true;try {if(editor && draftKey(state.program,state.lane,state.report)===draft.key)editor.value(draft.text);}finally{draft.applyingRemote=false;}
+              const persisted=persistDraft(draft);
+              if(draftKey(state.program,state.lane,state.report)===draft.key){
+                draft.applyingRemote=true;try {if(editor)editor.value(draft.text);}finally{draft.applyingRemote=false;}
+                const preview=document.querySelector('#report-preview');if(preview)preview.innerHTML=markdown(draft.text);
+              }
+              if(!persisted){status.textContent='Recovery could not be saved in this tab. Copy the draft before leaving; the original remains unchanged.';refreshStatus(draft);renderRecovery();return;}
               status.textContent='Recovered into this tab; original saved draft retained.';
-              draft.collabMessage='Recovered local draft; saving shared draft…';refreshStatus(draft);
+              draft.collabMessage=draft.status==='conflict' ? 'Conflict: your draft is preserved. Compare history and submit a resolution.' : 'Recovered local draft; saving shared draft…';
+              showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);
               if(draft.status!=='conflict')scheduleSharedSave(draft,0);
             });
           }catch{status.textContent='Safe recovery failed. Select and copy the draft text.';}
@@ -495,8 +502,9 @@
     }
   }
   function scheduleSharedSave(draft, delay=500) {
-    if(draft.retryExhausted)return;
-    clearTimeout(draft.saveTimer); draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
+    clearTimeout(draft.saveTimer);
+    if(draft.retryExhausted || draft.storageBlocked || draft.storageUnreadable || draft.storageError)return;
+    draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
   }
   async function saveShared(draft) {
     if(draft.collabBusy || !draft.collabReady || draft.status==='conflict') return;
@@ -505,7 +513,7 @@
     if(draft.conflictId && !draft.pendingShared)pending.conflict_id=draft.conflictId;
     draft.pendingShared=pending;
     // Persist the exact idempotency payload before it can reach the server.
-    persistDraft(draft);
+    if(!persistDraft(draft)){draft.collabBusy=false;refreshStatus(draft);renderRecovery();return;}
     try {
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,pending,draft.collabRoot);
       draft.pendingShared=null; draft.sharedRevision=result.revision; draft.retryAttempts=0;

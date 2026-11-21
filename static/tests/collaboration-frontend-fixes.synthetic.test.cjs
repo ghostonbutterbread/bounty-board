@@ -11,6 +11,7 @@ async function fixture(run) {
   const root=path.join(tmp,'root'), report=path.join(root,'web_bounty/example/web/reports/example.md');
   fs.mkdirSync(path.dirname(report),{recursive:true});fs.writeFileSync(report,'original\n');
   const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:path.resolve(__dirname,'../..'),env:process.env,stdio:['ignore','pipe','pipe']});
+  proc.stderr.resume(); // Drain request logs so a large synthetic burst cannot block the server.
   let browser;
   try {
     const [chunk]=await once(proc.stdout,'data');const base='http://127.0.0.1:'+Number(chunk.toString().trim());
@@ -19,6 +20,84 @@ async function fixture(run) {
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 }
 async function open(page,base){page.setDefaultTimeout(10000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+
+for(const failure of ['quota','cas','silent']) test(`recovery ${failure} failure keeps copyable text and never sends an undurable request`, {timeout:60000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),source=await context.newPage();await open(source,base);
+  await source.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
+  await source.locator('.CodeMirror textarea').focus();await source.keyboard.press('Control+A');await source.keyboard.insertText('recovered text');
+  await source.getByText(/Shared save failed/).waitFor();
+  const sourceEntry=await source.evaluate(()=>Object.entries(localStorage).find(([k,v])=>k.startsWith('bounty-board-report-draft-v2:')&&JSON.parse(v).text==='recovered text'));
+  assert.ok(JSON.parse(sourceEntry[1]).pendingShared);
+  await source.close();
+  const page=await context.newPage(),posts=[];await page.route('**/api/collaboration?*',route=>{if(route.request().method()==='POST')posts.push(route.request().postDataJSON());return route.continue();});
+  await open(page,base);await page.getByRole('button',{name:'Find saved drafts'}).click();
+  const card=page.locator('[data-recovery-candidate]').filter({hasText:'recovered text'});
+  const destination=await page.evaluate(()=>Object.keys(localStorage).find(k=>k.startsWith('bounty-board-report-draft-v2:')&&k.endsWith(window.name.slice('bounty-board-tab:'.length))));
+  const before=await page.evaluate(k=>localStorage.getItem(k),destination);
+  assert.equal(JSON.parse(before).text,'original\n');
+  await page.evaluate(({failure,destination})=>{
+    const get=Storage.prototype.getItem,set=Storage.prototype.setItem;let reads=0;
+    Storage.prototype.getItem=function(k){if(k===destination&&failure==='cas'&&++reads===2){set.call(this,k,'concurrent destination');}return get.call(this,k);};
+    Storage.prototype.setItem=function(k,v){if(k===destination&&failure==='quota')throw new DOMException('quota','QuotaExceededError');if(k===destination&&failure==='silent')return;return set.call(this,k,v);};
+  },{failure,destination});
+  await card.getByRole('button',{name:'Recover this draft'}).click();
+  await page.locator('#draft-recovery').waitFor({state:'visible'});
+  assert.equal(await page.getByLabel('Recover draft text').inputValue(),'recovered text');
+  assert.doesNotMatch(await card.getByRole('status').innerText(),/Recovered into this tab/);
+  assert.equal(await page.evaluate(k=>localStorage.getItem(k),sourceEntry[0]),sourceEntry[1]);
+  assert.equal(await page.evaluate(k=>localStorage.getItem(k),destination),failure==='cas'?'concurrent destination':before);
+  await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('new editor text');
+  assert.equal(await page.getByLabel('Recover draft text').inputValue(),'new editor text');
+  assert.equal(await card.getByLabel('Saved draft (select and copy if recovery is unavailable)').inputValue(),'recovered text');
+  assert.equal(await page.evaluate(k=>localStorage.getItem(k),sourceEntry[0]),sourceEntry[1]);
+  await page.waitForTimeout(3000);
+  assert.deepEqual(posts,[],'no shared request may be sent without durable pending payload');
+}));
+
+test('recovered conflict updates preview and status immediately and after a poll', {timeout:60000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),source=await context.newPage();await open(source,base);
+  await source.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
+  await source.locator('.CodeMirror textarea').focus();await source.keyboard.press('Control+A');await source.keyboard.insertText('# Recovered conflict');
+  await source.getByText(/Shared save failed/).waitFor();
+  const key=await source.evaluate(()=>Object.keys(localStorage).find(k=>k.startsWith('bounty-board-report-draft-v2:')&&JSON.parse(localStorage.getItem(k)).text==='# Recovered conflict'));
+  await source.evaluate(k=>{const saved=JSON.parse(localStorage.getItem(k));saved.conflict=true;saved.pendingShared=null;localStorage.setItem(k,JSON.stringify(saved));},key);
+  await source.close();
+  const page=await context.newPage(),posts=[];await page.route('**/api/collaboration?*',route=>{if(route.request().method()==='POST')posts.push(route.request().postDataJSON());return route.continue();});
+  await open(page,base);await page.getByRole('button',{name:'Find saved drafts'}).click();
+  const card=page.locator('[data-recovery-candidate]').filter({hasText:'Recovered conflict'});
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);let held=false;
+  await page.route('**/api/collaboration?*',async route=>{if(route.request().method()!=='GET'||held)return route.continue();held=true;arrive();await gate;await route.continue();});
+  await started;
+  const response=page.waitForResponse(response=>response.url().includes('/api/collaboration?')&&response.request().method()==='GET',{timeout:30000}).catch(()=>null);
+  try {
+    await card.getByRole('button',{name:'Recover this draft'}).click();
+    await card.getByText('Recovered into this tab; original saved draft retained.').waitFor();
+    assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'# Recovered conflict');
+    assert.equal(await page.locator('#report-preview h1').innerText(),'Recovered conflict');
+    assert.match(await page.locator('#report-status').innerText(),/conflict/i);
+    assert.doesNotMatch(await page.locator('#report-status').innerText(),/saving shared/i);
+    await page.evaluate(()=>{window.beforePollHistory=document.querySelector('#collaboration-history summary');});
+  } finally {release();await response;}
+  assert.equal(await page.waitForFunction(()=>window.beforePollHistory && !window.beforePollHistory.isConnected).then(()=>true),true);
+  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('Conflict:'));
+  assert.equal(await page.locator('#report-preview h1').innerText(),'Recovered conflict');
+  assert.match(await page.locator('#report-status').innerText(),/conflict/i);
+  assert.doesNotMatch(await page.locator('#report-status').innerText(),/saving shared/i);
+  assert.deepEqual(posts,[]);
+}));
+
+test('a newly created shared request is not sent when its persistence fails', {timeout:60000},()=>fixture(async({browser,base})=>{
+ const context=await browser.newContext(),page=await context.newPage(),posts=[];
+ await page.route('**/api/collaboration?*',route=>{if(route.request().method()==='POST')posts.push(route.request().postDataJSON());return route.continue();});
+ await open(page,base);
+ await page.evaluate(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('bounty-board-report-draft-v2:')&&JSON.parse(v).pendingShared)throw new DOMException('quota','QuotaExceededError');return set.call(this,k,v);};});
+ await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('locally persisted edit');
+ await page.locator('#draft-recovery').waitFor({state:'visible'});
+ assert.equal(await page.getByLabel('Recover draft text').inputValue(),'locally persisted edit');
+ const saved=await page.evaluate(()=>Object.entries(localStorage).filter(([k])=>k.startsWith('bounty-board-report-draft-v2:')).map(([,v])=>JSON.parse(v)));
+ assert.ok(saved.some(d=>d.text==='locally persisted edit'&&!d.pendingShared));
+ await page.waitForTimeout(3000);assert.deepEqual(posts,[]);
+}));
 
 test('history bridges a 100-submission burst after older history is loaded', {timeout:120000},()=>fixture(async({browser,base})=>{
   const context=await browser.newContext(),page=await context.newPage();
