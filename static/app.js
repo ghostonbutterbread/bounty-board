@@ -97,7 +97,7 @@
           if(saved?.resolutionRejected===draft.pendingShared?.request_id)draft.resolutionRejected=saved.resolutionRejected;
           if(saved?.inspectRequested && saved.inspectRequested===draft.pendingShared?.request_id)draft.inspectRequested=saved.inspectRequested;
           if(Array.isArray(saved?.rejectedResolutions))draft.rejectedResolutions=saved.rejectedResolutions;
-          if(draft.pendingShared && draft.publicationNotice?.includes('Retrying the exact request'))draft.publicationNotice='Automatic retry stopped on reload. The outcome may be unconfirmed; inspect the original save and retain your draft.';
+          if(draft.pendingShared && (draft.publicationNotice?.includes('Retrying the exact request') || draft.publicationNotice?.includes('Waiting for the current shared read before retrying')))draft.publicationNotice='Automatic retry stopped on reload. The outcome may be unconfirmed; inspect the original save and retain your draft.';
         }
       } catch {draft.storageError=true;draft.storageUnreadable=true;}
       state.drafts.set(key,draft);
@@ -411,7 +411,17 @@
         draft.markdownInspection=report.content;showSharedHistory(draft,draft.sharedHistory||[]);
       } catch {draft.publicationNotice='Current Markdown could not be inspected. The file may have changed; retain the request and draft.';refreshStatus(draft);}
     });
-    box.querySelector('[data-retry-original]')?.addEventListener('click',()=>{clearTimeout(draft.backlogRetryTimer);draft.backlogRetries=0;draft.recoveryNotFound=false;draft.retryExhausted=false;saveShared(draft,true);});
+    box.querySelector('[data-retry-original]')?.addEventListener('click',()=>{
+      clearTimeout(draft.backlogRetryTimer);draft.backlogRetries=0;draft.recoveryNotFound=false;draft.retryExhausted=false;
+      if(draft.collabBusy && draft.pollInFlight && draft.pendingShared){
+        const pending=draft.pendingShared;
+        draft.publicationNotice='Waiting for the current shared read before retrying the exact original request; its outcome remains unconfirmed.';
+        if(persistDraft(draft))draft.retryAfterPoll=pending;
+        else {draft.retryAfterPoll=null;renderRecovery();}
+        refreshStatus(draft);return;
+      }
+      saveShared(draft,true);
+    });
     box.querySelector('[data-continue-resolution]')?.addEventListener('click',()=>{
       const pending=draft.pendingShared;
       if(draft.collabBusy || !pending?.conflict_id || !draft.recoveryNotFound || draft.resolutionRejected!==pending.request_id)return;
@@ -586,7 +596,12 @@
     finally {
       draft.collabBusy=false;draft.pollInFlight=false;
       const pendingPublish=draft.publishAfterPoll;draft.publishAfterPoll=null;
+      const retry=draft.retryAfterPoll;draft.retryAfterPoll=null;
       if(draft.inspectRequested && draft.pendingShared?.request_id===draft.inspectRequested)inspectSave(draft);
+      else if(retry && retry===draft.pendingShared){
+        if(pollSucceeded && !draft.sourceUnavailable && !draft.storageBlocked && !draft.storageUnreadable && !draft.storageError)saveShared(draft,true);
+        else {draft.publicationNotice='Shared read failed or source unavailable; the exact retry was not sent. Retain the request and inspect before retrying.';persistDraft(draft);}
+      }
       else if(draft.resolutionQueued)scheduleSharedSave(draft,0);
       else if(draft.hasDraft && draft.collabReady && draft.status!=='conflict')scheduleSharedSave(draft);
       if(pendingPublish){
@@ -599,6 +614,7 @@
   async function inspectSave(draft) {
     const pending=draft.pendingShared;
     clearTimeout(draft.backlogRetryTimer);
+    draft.retryAfterPoll=null;
     if(!pending)return;
     draft.inspectRequested=pending.request_id;
     draft.publicationNotice='Waiting to inspect the original save; its outcome remains unconfirmed.';

@@ -508,7 +508,17 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         state = collaboration.publication_state(key, operation)
                         current['publication'] = inspect(root, relative, collaboration.root / 'publication' / operation)
                         if state and state.startswith('capacity:'):
-                            current['publication'] = {'state': 'capacity', 'operation': operation, 'reasons': ['retention_capacity']}
+                            import hashlib
+                            if reconciliation['state'] != 'complete' or scan_source is None:
+                                current['publication'] = {'state': 'outcome_uncertain', 'operation': operation,
+                                                          'reasons': ['capacity_preconditions_unavailable']}
+                            elif (hashlib.sha256(scan_source.encode('utf-8')).hexdigest() != state[9:] or
+                                  current['revision'] != request_receipt['revision'] or
+                                  request_receipt['status'] == 'conflict' or collaboration.unresolved_count(key)):
+                                current['publication'] = {'state': 'conflict', 'operation': operation,
+                                                          'reasons': ['capacity_retry_changed']}
+                            else:
+                                current['publication'] = {'state': 'capacity', 'operation': operation, 'reasons': ['retention_capacity']}
                         elif state is None:
                             current['publication']['state'] = ('outcome_uncertain' if reconciliation['state'] != 'complete' else 'conflict')
                             current['publication']['reasons'].append('not_published')

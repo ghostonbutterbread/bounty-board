@@ -204,11 +204,11 @@ class RetentionCapacityTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever); thread.start()
             query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md',
                                    root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest()))
-            def request(method, payload=None):
+            def request(method, payload=None, endpoint='', extra=''):
                 host = f'127.0.0.1:{server.server_port}'
                 conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
                 try:
-                    conn.request(method, '/api/collaboration?' + query, json.dumps(payload) if payload else None,
+                    conn.request(method, '/api/collaboration' + endpoint + '?' + query + extra, json.dumps(payload) if payload else None,
                                  {'Host': host, 'Origin': 'http://' + host, 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'})
                     response = conn.getresponse(); return json.loads(response.read())
                 finally: conn.close()
@@ -221,8 +221,15 @@ class RetentionCapacityTests(unittest.TestCase):
                 retry = request('POST', payload)
                 self.assertEqual(retry['publication']['state'], 'conflict')
                 self.assertIn('capacity_retry_changed', retry['publication']['reasons'])
+                inspection = request('GET', endpoint='/recovery', extra='&request_id=blocked')
+                self.assertEqual(inspection['publication']['state'], 'conflict', inspection)
+                self.assertIn('capacity_retry_changed', inspection['publication']['reasons'])
                 self.assertEqual(source.read_text(), 'external competing edit\n')
                 self.assertEqual((private / 'publication' / first['publication']['operation'] / 'displaced').read_text(), 'original\n')
+                source.unlink()
+                missing = request('GET', endpoint='/recovery', extra='&request_id=blocked')
+                self.assertEqual(missing['publication']['state'], 'outcome_uncertain', missing)
+                self.assertIn('capacity_preconditions_unavailable', missing['publication']['reasons'])
             finally:
                 server.shutdown(); thread.join(); server.server_close()
 
