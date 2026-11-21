@@ -62,9 +62,14 @@ test('two browsers share synthetic edits and retain conflicts across restart', {
     await b.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror?.getValue()==='one\ntwo\nthree\n');
     await a.locator('.record').filter({hasText:'source:merged'}).getByRole('button',{name:'Use resulting revision'}).click();
     await b.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror?.getValue()==='B edit\ntwo\nEXTERNAL\n');
+    const publishTrace=[];
+    a.on('request',r=>{if(r.url().includes('/api/collaboration?')&&r.method()==='POST'){const body=r.postDataJSON();if(body?.action==='publish')publishTrace.push({event:'request',revision:body.revision});}});
+    a.on('response',r=>{if(r.url().includes('/api/collaboration?')&&r.request().method()==='POST'){const body=r.request().postDataJSON();if(body?.action==='publish')publishTrace.push({event:'response',status:r.status()});}});
+    await a.evaluate(()=>{window.__publishStatuses=[];const node=document.querySelector('#report-status');new MutationObserver(()=>window.__publishStatuses.push(node.textContent)).observe(node,{childList:true,characterData:true,subtree:true});});
     await a.getByText(/Shared draft ready/).waitFor();
     await a.getByRole('button',{name:'Publish fixture report'}).click();
-    await a.getByText(/Fixture report published/).waitFor();
+    try {await a.getByText(/Fixture report published/).waitFor();}
+    catch(error){const statuses=await a.evaluate(()=>window.__publishStatuses);throw new Error(`fixture publish did not reach visible success; trace=${JSON.stringify(publishTrace)} statuses=${JSON.stringify(statuses)} syntheticSource=${JSON.stringify(fs.readFileSync(report,'utf8'))}`,{cause:error});}
     assert.equal(fs.readFileSync(report,'utf8'),'B edit\ntwo\nEXTERNAL\n');
     const popupPromise=a.waitForEvent('popup'); await a.evaluate(()=>window.open('/','_blank')); const popup=await popupPromise;
     await open(popup);

@@ -309,6 +309,12 @@
     box.querySelectorAll('[data-result]').forEach(button=>button.addEventListener('click',()=>useVersion(button.dataset.result,true)));
     box.querySelector('[data-older]')?.addEventListener('click',async()=>{
       const before=draft.historyBefore; if(draft.historyLoading)return;draft.historyLoading=true;
+      // Preserve the boundary before awaiting: a poll can slide the recent page
+      // while the older-page request is in flight.
+      draft.historyPaged=true;
+      const retained=new Map((draft.historyOlder||[]).map(item=>[item.id,item]));
+      for(const item of draft.historyRecent||[])retained.set(item.id,item);
+      draft.historyOlder=[...retained.values()];
       try {const page=await BoardAPI.collaborationRead(draft.collabProgram,draft.lane,draft.collabPath,draft.collabRoot,'history',{before});
         const entries=new Map((draft.historyOlder||[]).map(item=>[item.id,item]));for(const item of page.history)entries.set(item.id,item);
         draft.historyOlder=[...entries.values()];draft.historyPaged=true;
@@ -326,15 +332,23 @@
     };
     box.querySelector('[data-resolve]')?.addEventListener('click',()=>resolve(draft.conflictId));
     box.querySelectorAll('[data-conflict]').forEach(button=>button.addEventListener('click',()=>resolve(Number(button.dataset.conflict))));
-    box.querySelector('[data-publish]')?.addEventListener('click',async()=>{
-      if(draft.hasDraft || draft.collabBusy || !draft.sharedRevision){draft.collabMessage='Save or resolve your local draft before publishing.';refreshStatus(draft);return;}
-      draft.collabBusy=true;
-      try {
-        await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,{action:'publish',revision:draft.sharedRevision},draft.collabRoot);
-        draft.collabMessage='Fixture report published. Uncoordinated writers are not protected.';
-      } catch {draft.collabMessage='Fixture publication failed or became stale. Your draft is retained; refresh and resolve conflicts.';}
-      finally {draft.collabBusy=false;refreshStatus(draft);if(draft.hasDraft && draft.status!=='conflict')scheduleSharedSave(draft);}
+    box.querySelector('[data-publish]')?.addEventListener('click',()=>{
+      if(draft.collabBusy && draft.pollInFlight && !draft.hasDraft && draft.sharedRevision){
+        draft.publishAfterPoll=draft.sharedRevision;
+        draft.collabMessage='Waiting for the current shared read before publishing…';refreshStatus(draft);return;
+      }
+      publishFixture(draft,draft.sharedRevision);
     });
+  }
+  async function publishFixture(draft, expectedRevision) {
+    if(draft.hasDraft || draft.collabBusy || !expectedRevision || draft.sharedRevision!==expectedRevision){draft.collabMessage='Save or resolve your local draft before publishing; retry if the shared revision changed.';refreshStatus(draft);return;}
+    draft.collabBusy=true;draft.fixturePublishedRevision=null;
+    try {
+      await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,{action:'publish',revision:expectedRevision},draft.collabRoot);
+      draft.fixturePublishedRevision=expectedRevision;
+      draft.collabMessage='Fixture report published. Uncoordinated writers are not protected.';
+    } catch {draft.collabMessage='Fixture publication failed or became stale. Your draft is retained; refresh and resolve conflicts.';}
+    finally {draft.collabBusy=false;refreshStatus(draft);if(draft.hasDraft && draft.status!=='conflict')scheduleSharedSave(draft);}
   }
   function applyShared(draft, content, revision) {
     draft.text=content; draft.original=content; draft.revision=revision; draft.hasDraft=false; draft.status='saved';
@@ -357,7 +371,7 @@
   }
   async function pollShared(draft) {
     if(draft.collabBusy || draft.retryExhausted || (draft.pollRetryAt && Date.now()<draft.pollRetryAt)) return;
-    draft.collabBusy=true;
+    draft.collabBusy=true;draft.pollInFlight=true;let pollSucceeded=false;
     try {
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,null,draft.collabRoot);
       draft.sharedRevision=result.revision;draft.pollAttempts=0;draft.pollRetryAt=0;
@@ -374,15 +388,25 @@
       if(!draft.hasDraft) applyShared(draft,result.content,result.revision);
       draft.collabReady=true;
       const unresolved=draft.unresolvedCount;
-      draft.collabMessage=draft.status==='conflict' ? 'Conflict: your draft is preserved. Compare history and submit a resolution.' : draft.hasDraft ? 'Unsaved locally; saving shared draft…' : `Shared draft ready. Source report is not saved.${unresolved ? ` ${unresolved} unresolved conflict(s); see history.` : ''}`;
+      draft.collabMessage=draft.status==='conflict' ? 'Conflict: your draft is preserved. Compare history and submit a resolution.' : draft.hasDraft ? 'Unsaved locally; saving shared draft…' : `Shared draft ready. Source report is not saved.${unresolved ? ` ${unresolved} unresolved conflict(s); see history.` : ''}${draft.fixturePublishedRevision===result.revision && !unresolved ? ' Fixture report published earlier; uncoordinated writers are not protected.' : ''}`;
       if(draft.hasDraft && draft.status!=='conflict') scheduleSharedSave(draft);
       showSharedHistory(draft,draft.sharedHistory);
+      pollSucceeded=true;
     } catch {
       draft.pollAttempts=(draft.pollAttempts||0)+1;
       if(draft.pollAttempts>=3){draft.retryExhausted=true;draft.collabMessage='Shared draft unavailable. Your local draft is retained; use Retry shared save.';showSharedHistory(draft,draft.sharedHistory||[]);}
       else {draft.pollRetryAt=Date.now()+500 * 2 ** (draft.pollAttempts-1);draft.collabMessage='Shared draft unavailable. Your local draft is retained; retrying.';}
     }
-    finally {draft.collabBusy=false;if(draft.hasDraft && draft.collabReady && draft.status!=='conflict') scheduleSharedSave(draft);refreshStatus(draft);}
+    finally {
+      draft.collabBusy=false;draft.pollInFlight=false;
+      const pendingPublish=draft.publishAfterPoll;draft.publishAfterPoll=null;
+      if(draft.hasDraft && draft.collabReady && draft.status!=='conflict')scheduleSharedSave(draft);
+      if(pendingPublish){
+        if(pollSucceeded)publishFixture(draft,pendingPublish);
+        else draft.collabMessage='Shared read failed; fixture publication was not attempted. Retry after refresh.';
+      }
+      refreshStatus(draft);
+    }
   }
   function scheduleSharedSave(draft, delay=500) {
     if(draft.retryExhausted)return;
@@ -399,6 +423,12 @@
     try {
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,pending,draft.collabRoot);
       draft.pendingShared=null; draft.sharedRevision=result.revision; draft.retryAttempts=0;
+      if(pending.conflict_id && result.status!=='conflict') {
+        // Older cached pages do not appear in the next bounded poll.
+        for(const list of [draft.historyOlder,draft.historyRecent,draft.sharedHistory])
+          for(const item of list||[])if(item.id===pending.conflict_id)item.resolved_revision=result.revision;
+        showSharedHistory(draft,draft.sharedHistory||[]);
+      }
       if(result.status==='conflict') {
         draft.conflictId=result.conflict_id;draft.conflictBase=pending.base;draft.staleResolution=false; draft.status='conflict'; draft.collabMessage='Conflict: your draft is preserved. Compare history and submit a resolution.'; persistDraft(draft);
       } else if(draft.text===pending.content) {
@@ -497,6 +527,7 @@
   });
   function updateDraft(draft,text){
     if(draft.applyingRemote) return;
+    draft.fixturePublishedRevision=null;
     draft.text=text;draft.hasDraft=true;if(draft.status!=='conflict')draft.status='unsaved';
     if(draft.collabReady && draft.status!=='conflict' && !draft.retryExhausted)draft.collabMessage='Unsaved locally; saving shared draft…';
     persistDraft(draft);
