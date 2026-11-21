@@ -65,6 +65,8 @@ class CollaborationStore:
                     state TEXT NOT NULL, PRIMARY KEY (key, operation));
                 CREATE INDEX IF NOT EXISTS events_key_id ON events (key, id DESC);
                 CREATE INDEX IF NOT EXISTS events_conflicts ON events (key, id) WHERE kind LIKE '%:conflict';
+                CREATE INDEX IF NOT EXISTS publication_key_order ON publication_attempts (key);
+                CREATE INDEX IF NOT EXISTS retained_key_order ON retained_requests (key, operation);
             ''')
 
     def bind_source(self, root):
@@ -254,6 +256,19 @@ class CollaborationStore:
             if row is None:
                 raise ValueError('unknown retained observation')
             return dict(zip(('operation', 'request_id', 'base'), row))
+
+    def publication_page(self, key, after, limit):
+        """Operations in creation order, bounded independently of store size."""
+        with self._connect() as db:
+            return db.execute('SELECT rowid,operation,state FROM publication_attempts '
+                              'WHERE key=? AND rowid>? ORDER BY rowid LIMIT ?',
+                              (self._key(key), after, limit)).fetchall()
+
+    def retained_latest(self, key, operation):
+        with self._connect() as db:
+            row = db.execute('SELECT revision FROM retained_requests WHERE key=? AND operation=? '
+                             'ORDER BY rowid DESC LIMIT 1', (self._key(key), operation)).fetchone()
+            return None if row is None else row[0]
 
     def publication_state(self, key, operation):
         with self._connect() as db:
