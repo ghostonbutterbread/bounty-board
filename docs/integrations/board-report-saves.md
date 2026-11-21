@@ -3,7 +3,7 @@
 - **Status:** experimental backend corrected after independent reviewer reproduced two publication/retained-inode blockers; synthetic-tested, **not independently re-reviewed, integrated, activated, or approved for real deployment**. Parent owns review, integration, UI, and activation decisions.
 - **Owner / ref / checkout:** delegated Hermes worker; `feat/board-report-saves`; `/home/ryushe/projects/bounty-board-report-saves`.
 - **Assigned base:** `21a2244ab5ee93be5667c2d3deda2276472b6345`; prior source-observation primitive `0fc6e722197307bc2da4dd7f70312fb37ec35a45`; eventual target `beta`. `git fetch origin beta` succeeded. No merge, push, service change, real source write, or frontend change.
-- **Implementation / recovery checkpoint:** `06a714f8cb3f34db25eab6f4fd7f4c5fa7bf1cca`; the branch tip includes a subsequent dossier-only handoff commit. Verify that tip separately.
+- **Implementation / recovery checkpoints:** initial backend `06a714f8cb3f34db25eab6f4fd7f4c5fa7bf1cca`; independent-review correction `fd5f50206eb60506cbc7c549cb27f00e8e4ef21b`. The branch tip includes a subsequent dossier-only handoff commit; verify that tip separately. The correction remains on its owning feature branch; the sibling UI branch at `a0d8a03` needs deliberate propagation after review.
 - **Inspiration:** separate synthetic `feat/collaboration-exchange` experiment (`exchange_experiment.py`, dossier); its TMPDIR/marker fixture guard is not repurposed as a real-use guard.
 
 ## Implemented contract
