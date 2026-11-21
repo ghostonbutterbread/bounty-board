@@ -196,6 +196,12 @@ test('default disabled keeps shared edits out of synthetic Markdown', {timeout:5
   await edit(page,'store only\n');const result=await (await response).json();
   assert.equal(result.publication,undefined);assert.equal(fs.readFileSync(report,'utf8'),initial);
   assert.doesNotMatch(await page.locator('#report-status').innerText(),/Markdown file saved/);
+  const navigation=path.join(path.dirname(report),'navigation.md');
+  fs.writeFileSync(navigation,'<!-- generated: bounty-core-report-navigation -->\n# Navigation\n');
+  await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.locator('#report-select').selectOption('navigation.md');await page.getByText(/read.only/i).waitFor();
+  assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror')?.CodeMirror.getOption('readOnly') ?? document.querySelector('#report-source')?.readOnly),true);
+  assert.equal(await page.locator('.editor-toolbar').count(),0);
 },false));
 
 test('disabling after a published save never writes later shared edits to Markdown', {timeout:60000},()=>fixture(async({browser,base,report,restart})=>{

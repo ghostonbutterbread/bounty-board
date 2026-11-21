@@ -2,7 +2,7 @@
 
 A local-first workspace for navigating bug-bounty findings, surface coverage, reports, gadgets, and MapStore observations. It is a view over existing program/lane records, not a replacement for the systems that own them.
 
-> **Development status:** This feature branch is under review. The server is read-only by default; finding metadata edits can be enabled explicitly with a compatible BBH installation. Report edits are saved as browser-local drafts, **not** to the source report. Save-to-report is unavailable while safe handling of concurrent external writers remains unresolved.
+> **Development status:** This feature branch is under review. Source writes are off by default. Shared drafts and experimental source autosave require explicit options; finding metadata edits require a compatible BBH installation. Concurrent external writers and sync replicas can race the report writer: do not enable it without accepting the limitations below.
 
 ## Run locally
 
@@ -37,9 +37,22 @@ tailscale serve --bg --https=443 http://127.0.0.1:9001
 
 Replace the hostname with the actual node name. `tailnet_host` may instead be set in the JSON/TOML config; the CLI flag overrides it. It must be a canonical lowercase `node.tailnet.ts.net` name, without scheme, port, trailing dot, or wildcard. This setting does not configure Tailscale. Check the installed Tailscale version, DNS/certificate setup, existing Serve routes, and tailnet access policy before changing Serve; that command changes Serve configuration. Do not enable Funnel or expose this service to the public internet.
 
-**Trust boundary:** Tailscale Serve enforces access at the tailnet/network-policy boundary and terminates HTTPS. The Board does not identify or authenticate users: every device allowed by that policy can read sensitive program names, findings, reports, and evidence, and other local processes can reach the loopback server. Host, Origin and Fetch Metadata checks prevent some browser cross-origin attacks; they are not authentication and can be forged by non-browser clients. Never proxy this application through an unauthenticated or public proxy. The recommended Serve deployment remains read-only: omit `--bbh` and `--accept-uncoordinated-writes`; report writes are always disabled.
+**Trust boundary:** Tailscale Serve enforces access at the tailnet/network-policy boundary and terminates HTTPS. The Board does not identify or authenticate users: every device allowed by that policy can read sensitive program names, findings, reports, and evidence, and other local processes can reach the loopback server. Host, Origin and Fetch Metadata checks prevent some browser cross-origin attacks; they are not authentication and can be forged by non-browser clients. Never proxy this application through an unauthenticated or public proxy. The recommended Serve deployment remains read-only: omit `--bbh`, `--accept-uncoordinated-writes`, `--collaboration-dir`, and `--report-autosave`.
 
-Browser storage is origin-scoped: `http://127.0.0.1:9001`, `http://localhost:9001`, and `https://<tailnet-host>` have separate drafts and preferences even for the same data root. Drafts stay on the viewing device/browser, are not synchronized or saved to the source, and may contain sensitive report material.
+Browser storage is origin-scoped: `http://127.0.0.1:9001`, `http://localhost:9001`, and `https://<tailnet-host>` have separate local drafts and preferences even for the same data root. Local drafts may contain sensitive report material. The optional collaboration store separately retains shared drafts and history on the server.
+
+### Optional shared drafts and experimental report autosave
+
+Choose a private collaboration directory outside the source tree; it contains sensitive drafts, retained versions and publication records. Shared drafts without source publication use `--collaboration-dir` alone. To also opt in to experimental source publication:
+
+```sh
+python3 app.py --root /path/to/data --port 9001 \
+  --collaboration-dir /path/to/private/board-collaboration --report-autosave
+```
+
+Eligible report and evidence edits can then be published to Markdown. Generated navigation and link stubs are read-only. When the source and shared draft diverge, inspect history and preview the merged report before explicitly saving it. An unconfirmed save must be inspected or retried as the original request; retain the local draft. Turning off `--report-autosave` leaves eligible shared-draft editing available but does not write source Markdown.
+
+The writer retains displaced source versions for later observation, but this is not a filesystem or cross-host compare-and-swap. Concurrent uncoordinated edits, sync, transient versions between scans, power loss, storage growth and retention administration remain risks. Stop other writers and sync activity before opting in, protect and monitor the private store, and do not treat a save notice as proof against subsequent change or data loss. Review and activation are separate decisions.
 
 ### Optional finding edits
 
@@ -59,7 +72,7 @@ The server binds only to IPv4 loopback and has no user authentication or TLS. Ot
 - View a portfolio dashboard, select a program and lane, and filter findings.
 - Explore live surface/class coverage questions, MapStore observations, gadgets, and Markdown report files when the source is available.
 - Switch among Light, Dark, and Dusk themes; the preference is stored in the browser.
-- Edit Markdown in the locally bundled EasyMDE editor with a safe preview; drafts autosave in browser storage and are scoped by the effective data root, program, lane and report. They do not modify the original report. Copy edits to your normal editor to apply them to the source. Browser drafts can be lost when browser data is cleared; root moves create a new draft namespace. Storage errors and detected cross-tab changes are shown in the UI. Cross-tab storage checks are not atomic, so simultaneous edits can still conflict; avoid editing the same report in multiple tabs. The separate server-side draft-storage primitive is not wired to the editor.
+- Edit Markdown in the locally bundled EasyMDE editor with a safe preview. Without collaboration, drafts remain browser-local and do not modify the source. With the optional collaboration store, drafts and history are shared; opt-in source autosave can also publish eligible reports. Generated navigation is read-only when collaboration is enabled. Browser drafts can be lost when browser data is cleared; root moves create a new namespace. Storage errors and detected cross-tab changes are shown, but cross-tab storage checks are not atomic.
 
 Coverage is bounded by recorded questions and assessments, not a claim that an application is fully mapped. A gadget or residual is not automatically a vulnerability. Submission state and platform outcome are represented separately when present in the source.
 
@@ -86,11 +99,12 @@ The equivalent explicit selection is:
 CHROME_BIN=/path/to/chrome node --test --test-concurrency=1 \
   --test-skip-pattern='^browser metadata update reaches backend with a disposable synthetic writer$' \
   static/tests/app.test.cjs static/tests/drafts.synthetic.test.cjs \
-  static/tests/root-identity.synthetic.test.cjs static/tests/review.synthetic.test.cjs
+  static/tests/root-identity.synthetic.test.cjs static/tests/review.synthetic.test.cjs \
+  static/tests/dashboard-coverage.synthetic.test.cjs static/tests/mapstore-detail.synthetic.test.cjs
 ```
 
 These are **bounded selections**, not a full integration suite. The EasyMDE tests use disposable synthetic roots; no report-source write endpoint is enabled. The excluded BBH test invokes the actual local BBH launcher against a disposable fixture; run it only after explicitly evaluating and authorizing that workflow.
 
 ## Data and security
 
-Never commit bounty records, report text, cookies, tokens, credentials, or private configuration. A missing or unreadable source is shown as unknown rather than zero. Report source writes remain disabled until safe handling of uncoordinated writers is demonstrated.
+Never commit bounty records, report text, cookies, tokens, credentials, or private configuration. A missing or unreadable source is shown as unknown rather than zero. Experimental source publication is not an atomic compare-and-swap with uncoordinated writers or remote sync replicas; a published status is a point-in-time observation, not a durability or concurrency guarantee.

@@ -221,7 +221,8 @@ def reports(lane, warnings, findings=None, report_autosave=False):
                 else:
                     kind, fids = ('unregistered' if findings is not None else 'unknown'), []
                 items.append({'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids,
-                              'editable': bool(report_autosave and text is not None and not navigation)})
+                              'editable': bool(report_autosave and text is not None and not navigation),
+                              'collaboration_editable': bool(text is not None and not navigation)})
     return items
 
 
@@ -777,8 +778,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     text = content.decode('utf-8')
                     revision = hashlib.sha256(content).hexdigest()
                     from report_publisher import generated_navigation
+                    eligible = not generated_navigation(path, text)
                     self.reply(200, {'content': text, 'revision': revision,
-                                     'editable': bool(report_autosave and not generated_navigation(path, text))}, {'ETag': '"' + revision + '"'})
+                                     'editable': bool(report_autosave and eligible),
+                                     'collaboration_editable': eligible}, {'ETag': '"' + revision + '"'})
                 except (OSError, ValueError, UnicodeError):
                     self.reply(404, {'error': 'report_not_found_or_unavailable'})
                 return

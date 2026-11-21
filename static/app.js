@@ -16,7 +16,7 @@
   };
   const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
-  const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && draft.source?.editable===false;
+  const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
   let unidentifiedSequence=0;
   const rootIdentity = () => /^[a-f0-9]{64}$/.test(state.data?.root_identity || '') ? state.data.root_identity : null;
   const draftKey = (program,lane,id) => JSON.stringify([rootIdentity() || state.unidentifiedRoot,program,lane,String(id)]);
@@ -297,7 +297,7 @@
     if(report.content == null && report.path){
       if(!report.loadState) {
         report.loadState='loading';const program=currentProgram(), lane=state.lane;
-        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(typeof result.editable==='boolean')report.editable=result.editable;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
+        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(typeof result.editable==='boolean')report.editable=result.editable;if(typeof result.collaboration_editable==='boolean')report.collaboration_editable=result.collaboration_editable;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
       }
       if(report.loadState!=='error') return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Loading report…</div></section>`;
       if(!draftFor(report).hasDraft) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Report could not be loaded. Refresh the workspace to retry.</div></section>`;

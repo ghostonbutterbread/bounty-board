@@ -16,10 +16,6 @@ async function fixture(run) {
   try {
     const [chunk]=await once(proc.stdout,'data');const base='http://127.0.0.1:'+Number(chunk.toString().trim());
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
-    // The baseline backend predates the sibling's editable=true policy for real
-    // Markdown. Adapt only this response; collaboration and publication stay real.
-    const newPage=browser.newPage.bind(browser);
-    browser.newPage=async (...args)=>{const page=await newPage(...args);await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=true;await route.fulfill({response,json:body});});return page;};
     await run({browser,base,report});
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 }
@@ -140,7 +136,7 @@ test('a saved notice is invalidated when reload observes a later external change
 test('backend editability disables collaborative editor and source writes only for denied reports', {timeout:30000},()=>fixture(async({browser,base,report})=>{
   const page=await browser.newPage();page.setDefaultTimeout(6000);let posts=0;
   await page.route('**/api/data',async route=>{const response=await route.fetch(),body=await response.json();for(const item of body.programs[0].lanes[0].reports)item.kind=item.path==='example.md'?'generated_navigation':'generated_evidence';await route.fulfill({response,json:body});});
-  await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=!route.request().url().includes('example.md');await route.fulfill({response,json:body});});
+  await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=!route.request().url().includes('example.md');body.collaboration_editable=body.editable;await route.fulfill({response,json:body});});
   page.on('request',req=>{if(req.method()==='POST'&&req.url().includes('/api/collaboration?'))posts++;});
   await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
   await page.getByText(/read.only/i).waitFor({timeout:3000});

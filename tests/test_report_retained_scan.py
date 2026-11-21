@@ -84,6 +84,30 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(status, 403, result)
         self.assertEqual(self.report.read_text(), original)
 
+    def test_store_only_editability_is_distinct_from_source_autosave(self):
+        server = app.make_server(self.root, 0, collaboration_dir=self.private / 'off')
+        thread = threading.Thread(target=server.serve_forever); thread.start()
+        try:
+            def read(path):
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+                try:
+                    conn.request('GET', path); response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    return json.loads(response.read())
+                finally:
+                    conn.close()
+            q = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md'))
+            normal = read('/api/report?' + q)
+            self.assertFalse(normal['editable'])
+            self.assertTrue(normal['collaboration_editable'])
+            entries = read('/api/data')['programs'][0]['lanes'][0]['reports']
+            self.assertTrue(next(x for x in entries if x['path'] == 'report.md')['collaboration_editable'])
+            self.report.write_text('<!-- generated: bounty-core-report-navigation -->\n# Navigation\n')
+            self.assertFalse(read('/api/report?' + q)['collaboration_editable'])
+        finally:
+            server.shutdown(); thread.join(20); server.server_close()
+            self.assertFalse(thread.is_alive())
+
     def test_editability_contract_and_seeded_indexes(self):
         base = self.report.parent
         examples = {

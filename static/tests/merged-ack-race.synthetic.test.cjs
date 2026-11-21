@@ -6,8 +6,8 @@ const {spawn} = require('node:child_process');
 const {once} = require('node:events');
 const {chromium} = require('playwright');
 
-// Disposable roots; the report-read policy is adapted. One conflict case below
-// also explicitly injects a publication status; all store operations are real.
+// Disposable roots and real backend editability policy. One conflict case below
+// explicitly injects a publication status; all store operations are real.
 async function fixture(run, enabled=true) {
   const tmp=fs.mkdtempSync(path.join(process.env.TMPDIR,'rel-'));
   const root=path.join(tmp,'root'), store=path.join(tmp,'private');
@@ -28,7 +28,7 @@ async function fixture(run, enabled=true) {
     await run({browser,base:`http://127.0.0.1:${port}`,report,initial,restart:async on=>{await stop();await start(on);}});
   } finally {if(browser)await browser.close();await stop();fs.rmSync(tmp,{recursive:true,force:true});}
 }
-async function open(page,base){await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=true;await route.fulfill({response,json:body});});page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+async function open(page,base){page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
 async function edit(page,text){await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(text);}
 async function get(page,url){return page.evaluate(async url=>{const r=await fetch(url);return {status:r.status,body:await r.json()};},url);}
 test('newer local edit while merged store receipt is in flight preserves remote text', {timeout:60000},()=>fixture(async({browser,base,report,initial})=>{
