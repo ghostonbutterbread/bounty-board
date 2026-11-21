@@ -12,6 +12,21 @@ import stat
 from pathlib import Path
 
 
+def generated_navigation(relative, text):
+    """Match BBH navigation markers and its exact seeded-index placeholders."""
+    if any(marker in text for marker in (
+            '<!-- generated: bounty-core-report-navigation -->',
+            '<!-- generated: bounty-core-category-link-stub -->')):
+        return True
+    path = Path(relative)
+    lines = '\n'.join(line for line in text.splitlines() if not line.startswith('<!-- generated:')).strip()
+    if path.name == 'index.md' and path.parent.parent.name in {'raw', 'confirmed', 'dormant', 'novel', 'complete', 'archive'}:
+        return lines == f'# {path.parent.parent.name.title()} {path.parent.name.upper()}'
+    if path.parent.name == 'index':
+        return lines == f"# {path.stem.replace('_', ' ').title()}"
+    return False
+
+
 def _digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -162,6 +177,8 @@ def publish(root, relative, store_root, key, request_id, observed, draft, hook=N
         parent, name = _open_parent(root, relative)
         source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         data, info = _snapshot(source)
+        if generated_navigation(relative, data.decode('utf-8')):
+            raise ValueError('generated navigation is not editable')
         if data != observed.encode('utf-8'):
             raise ValueError('source changed before publication')
         if info.st_dev != os.fstat(ofd).st_dev:
@@ -194,12 +211,17 @@ def publish(root, relative, store_root, key, request_id, observed, draft, hook=N
             raise ValueError('source changed before exchange')
         if hook:
             hook('before_exchange', op)
+        final_data, _ = _snapshot(source)
+        if generated_navigation(relative, final_data.decode('utf-8')):
+            raise ValueError('generated navigation is not editable')
         check, _ = _open_parent(root, relative)
         try:
             if _identity(os.fstat(check)) != _identity(os.fstat(parent)):
                 raise ValueError('source parent moved')
         finally:
             os.close(check)
+        if _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _identity(info):
+            raise ValueError('source identity changed before exchange')
         _exchange(parent, name, ofd, 'displaced')
         exchanged = True
         if hook:
