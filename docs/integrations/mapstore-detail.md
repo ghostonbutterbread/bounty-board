@@ -5,7 +5,8 @@
 - **Worktree:** `/home/ryushe/projects/bounty-board-mapstore-detail`.
 - **Feature base:** `085c58717bc430018a56e39416b94ab4fbd86ea8` (parent-supplied dashboard feature tip).
 - **Intended target:** `beta`; parent owns combined exact-tree review and integration. No remote fetch under the explicit no-remote boundary.
-- **Recovery checkpoint / implementation commit:** `d55c07c58907abe8658c7ac70f09b309f7c41d30`; the branch tip includes a subsequent dossier-only handoff commit.
+- **MapStore implementation:** `d55c07c58907abe8658c7ac70f09b309f7c41d30`.
+- **Corrected descendant implementation / recovery checkpoint:** `0c15f180c720e66dfc544de0c33e5c6b0e84e52d`; a subsequent dossier-only handoff commit follows it. The dashboard predecessor remains unfixed independently; parent should review the combined descendant, not integrate the predecessor alone.
 - **References:** MapStore skill and producer contract supplied by parent: `recon/maps/map.jsonl`, relative indexed Markdown paths, `gadget`/`residual` tags and recorded lifecycle status.
 
 ## Intent and contract
@@ -15,6 +16,10 @@ Open selected lane observation bodies on demand without leaking across programs 
 `GET /api/map-observation` requires exactly one each of family/program/lane/path and one exact matching record in the current bounded UTF-8 index. It reads a bounded regular UTF-8 `index.md` through the existing componentwise no-symlink reader rooted at the selected source root; invalid, duplicate, missing and unsafe cases return a path-free error. The backend is read-only and the index and body are not an atomic snapshot against concurrent writers. The UI opens inert text only on click, and ignores results whose original DOM/selection is gone. No Markdown rendering, auto-links or remote resource fetch.
 
 ## Evidence
+
+- Descendant corrections: real HTTP regression first reproduced disconnections for assessed BLOB `run_id` and unassessed BLOB `input_key`, then passed with only the affected lane unavailable. The WAL writer stays open and a second healthy program preserves Unicode and current freshness. Additional HTTP cases cover numeric scalars, BLOB kind/assessment fields, non-finite values and invalid Unicode in nested JSON. Existing snapshot and committed-WAL tests pass.
+- Real Chromium → real Python synthetic backend regression first showed lost selector focus, then passed repeated ArrowDown/ArrowUp, updated counts, Tab to Open workspace, and original selection/MapStore behavior.
+- At checkpoint `0c15f180c720e66dfc544de0c33e5c6b0e84e52d`, isolated `python3 -W error::ResourceWarning tests/safe_suite.py` passed **76 tests**, excluding exactly `test_real_bbh_metadata_write_on_disposable_fixture`. Isolated `npm test` passed **60 tests**; the package's exact synthetic-writer browser exclusion was checked with a disposable sentinel canary. HOME, HERMES_HOME, XDG, TMPDIR, source-first PYTHONPATH and outbound proxy settings were isolated; all test roots were synthetic. Proxy settings are not an OS-level network sandbox.
 
 - TDD: real HTTP initially failed with 404 for the requested indexed body, then passed; real Chromium initially failed because the open button was missing, then passed. The browser test runs against a real Python server and synthetic multi-program MapStore, checks lazy fetching, archived/residual labels, missing/legacy records, inert hostile markup/no remote requests, and a deterministic delayed-response program switch.
 - Under fenced HOME, HERMES_HOME, XDG, TMPDIR and source-first PYTHONPATH: `python3 -W error::ResourceWarning tests/safe_suite.py` passed 73 tests, explicitly excluding `test_real_bbh_metadata_write_on_disposable_fixture`. A subsequent targeted run passed 7 MapStore HTTP tests, including additional surface/URL path shapes.

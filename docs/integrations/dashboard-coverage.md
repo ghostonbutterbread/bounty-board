@@ -1,9 +1,10 @@
 # Dashboard and coverage integration dossier
 
-- **Status:** awaiting parent review; no integration or activation authorized.
-- **Implementation / recovery checkpoint:** `8e7c5a35e0088adee97938fd98b5e87630764294`; the branch tip contains a subsequent dossier-only handoff commit.
-- **Owner / branch:** delegated feature worker, `feat/board-dashboard-coverage`.
-- **Worktree:** `/home/ryushe/projects/bounty-board-dashboard-coverage`.
+- **Status:** predecessor review rejected two defects; corrections are on the MapStore descendant and await parent combined review. No integration or activation authorized.
+- **Original dashboard implementation:** `8e7c5a35e0088adee97938fd98b5e87630764294`.
+- **Corrected descendant implementation / recovery checkpoint:** `0c15f180c720e66dfc544de0c33e5c6b0e84e52d`; a subsequent dossier-only handoff commit follows it.
+- **Owner / branch:** delegated feature worker, `feat/board-mapstore-detail` (descended from `feat/board-dashboard-coverage`).
+- **Worktree:** `/home/ryushe/projects/bounty-board-mapstore-detail`. The separate dashboard predecessor remains unfixed and must not be integrated alone without propagating this fix.
 - **Feature base:** `68d30e413bad1c2d5871a54fbff1983405062532` (collaboration feature tip supplied by parent).
 - **Intended target:** `beta`, observed locally at `553a06cebadd4fe9ded2213466a68510117060d9`; this is an ancestor of the supplied feature base. No remote fetch was performed under the task's no-remote boundary. Parent must reconcile integration with concurrent features rather than assuming the complete feature ancestry should land.
 
@@ -11,9 +12,11 @@
 
 Dashboard program selection scopes all aggregate counts, severity/class bars, submission records, program listing and lane warnings; all-programs resets the filter. Switching workspaces clears stale ledger filters. Nonempty nested submission state/result take precedence over the corresponding flat fields independently, so one finding contributes at most one value per field. Incomplete sources remain unknown/partial, not zero.
 
-Coverage returns actual unassessed surface identities and existing assessment rows from one read transaction; the former are not conflated with `no_assessment` questions or proof of testing. Null fingerprint/run identifiers result in unknown freshness rather than a crash or false stale result. Bad assessment JSON makes coverage unavailable without disconnecting the API. WAL reads remain enabled.
+Coverage returns actual unassessed surface identities and existing assessment rows from one read transaction; the former are not conflated with `no_assessment` questions or proof of testing. Null fingerprint/run identifiers result in unknown freshness rather than a crash or false stale result. Invalid scalar or assessment JSON data makes only that lane's coverage unavailable with a warning; valid Unicode and finite numeric scalars are preserved. WAL reads remain enabled. Dashboard selector retains focus across its change rerender, allowing repeated arrow navigation and Tab to the workspace button.
 
 ## Evidence
+
+- Corrected descendant `0c15f180c720e66dfc544de0c33e5c6b0e84e52d`: fenced synthetic Python suite **76 passed** and `npm test` **60 passed**, retaining the documented real-BBH and exact browser-writer exclusions. Real HTTP tests reproduced both BLOB disconnects before repair and now cover warning isolation, valid Unicode/numeric values, and WAL. Real Chromium keyboard navigation reproduced lost focus before repair and now passes. The browser skip pattern was validated with a disposable sentinel canary. See `mapstore-detail.md` for current combined evidence and isolation limits.
 
 - TDD: real HTTP test first reproduced disconnected response from both-null fingerprint/run; after repair it passes with a WAL writer held open. A second red test reproduced the malformed assessment JSON disconnect, then passed with coverage unavailable. The browser test first failed because the dashboard selector was absent, then passed.
 - Fenced `HOME`, `HERMES_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `TMPDIR`, and source-first `PYTHONPATH`; synthetic local roots only. `python3 -W error::ResourceWarning tests/safe_suite.py`: **67 passed**, with `test_real_bbh_metadata_write_on_disposable_fixture` explicitly excluded. Existing WAL/snapshot tests included.
@@ -22,4 +25,4 @@ Coverage returns actual unassessed surface identities and existing assessment ro
 
 ## Limits / handoff
 
-MapStore/gadgets currently consume only existing `recon/maps/map.jsonl` adapter and tagged subset; application-behavior indexes and observation bodies are explicitly not loaded. Do not invent their schema here: investigate actual formats as a distinct task before implementation. Unassessed inventory and SQLite assessment lists are not paginated, matching existing limits. Parent should review contract, security, fixture paths, and base-to-feature-only changes, then perform integration and tests on the actual beta candidate; remove this branch-local dossier from the integration tree. Stable propagation and runtime activation require separate authorization.
+MapStore index and selected observation bodies are now loaded lazily by the descendant; see `mapstore-detail.md` for the contract. Application-behavior indexes remain out of scope. Unassessed inventory and SQLite assessment lists are not paginated, matching existing limits. Parent should review the combined descendant contract, security, fixture paths, and intended feature-only changes, then perform integration and tests on the actual beta candidate; remove both branch-local dossiers from the integration tree. If the dashboard predecessor is needed independently, propagate the descendant repair before integrating it. Stable propagation and runtime activation require separate authorization.
