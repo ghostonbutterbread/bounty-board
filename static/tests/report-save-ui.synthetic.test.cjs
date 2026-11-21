@@ -11,7 +11,7 @@ async function fixture(run) {
   const root=path.join(tmp,'root'), report=path.join(root,'web_bounty/example/web/reports/example.md');
   fs.mkdirSync(path.dirname(report),{recursive:true});fs.writeFileSync(report,'original\n');
   fs.writeFileSync(path.join(path.dirname(report),'second.md'),'second\n');
-  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2],report_autosave=True); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:path.resolve(__dirname,'../..'),env:process.env,stdio:['ignore','pipe','ignore']});
+  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2],report_autosave=True); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:tmp,env:{...process.env,PYTHONPATH:path.resolve(__dirname,'../..')},stdio:['ignore','pipe','ignore']});
   let browser;
   try {
     const [chunk]=await once(proc.stdout,'data');const base='http://127.0.0.1:'+Number(chunk.toString().trim());

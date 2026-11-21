@@ -18,7 +18,7 @@ async function fixture(run, enabled=true) {
   let proc, browser, port=0;
   async function start(on) {
     const code="import sys,app; kw={'report_autosave':True} if sys.argv[4]=='1' else {}; s=app.make_server(sys.argv[1],int(sys.argv[3]),collaboration_dir=sys.argv[2],**kw); print(s.server_port,flush=True); s.serve_forever()";
-    proc=spawn('python3',['-B','-u','-c',code,root,store,String(port),on?'1':'0'],{cwd:path.resolve(__dirname,'../..'),env:process.env,stdio:['ignore','pipe','ignore']});
+    proc=spawn('python3',['-B','-u','-c',code,root,store,String(port),on?'1':'0'],{cwd:tmp,env:{...process.env,PYTHONPATH:path.resolve(__dirname,'../..')},stdio:['ignore','pipe','ignore']});
     const [chunk]=await once(proc.stdout,'data'); port=Number(String(chunk).trim());assert.ok(port);
   }
   async function stop(){if(proc && proc.exitCode===null && proc.signalCode===null){const exit=once(proc,'exit');proc.kill();await exit;}}

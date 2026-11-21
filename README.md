@@ -50,7 +50,7 @@ python3 app.py --root /path/to/data --port 9001 \
   --collaboration-dir /path/to/private/board-collaboration --report-autosave
 ```
 
-Eligible report and evidence edits can then be published to Markdown. Generated navigation and link stubs are read-only. When the source and shared draft diverge, inspect history and preview the merged report before explicitly saving it. An unconfirmed save must be inspected or retried as the original request; retain the local draft. Turning off `--report-autosave` leaves eligible shared-draft editing available but does not write source Markdown.
+Eligible report and evidence edits can then be published to Markdown. Generated navigation and link stubs are read-only. When the source and shared draft diverge, inspect history and preview the merged report before explicitly saving it. A specific pre-submit retained-scan backlog response automatically retries the exact original request up to three times with backoff; the UI retains newer edits and reports exhaustion. Reload stops the automatic retry and requires inspection. Other unconfirmed saves must be inspected or retried as the original request; retain the local draft. Turning off `--report-autosave` leaves eligible shared-draft editing available but does not write source Markdown.
 
 The writer retains displaced source versions for later observation, but this is not a filesystem or cross-host compare-and-swap. Concurrent uncoordinated edits, sync, transient versions between scans, power loss, storage growth and retention administration remain risks. Stop other writers and sync activity before opting in, protect and monitor the private store, and do not treat a save notice as proof against subsequent change or data loss. Review and activation are separate decisions.
 
