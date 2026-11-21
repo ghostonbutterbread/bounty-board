@@ -31,6 +31,8 @@ All tests used this checkout and synthetic roots/private stores in `/home/ryushe
 
 ## Latest incomplete correction checkpoint
 
+- Immutable implementation checkpoint: `f3b0ae40f7cbf197b41f2e313a24eb8132b44eaf` on `feat/collaboration-combined`; the branch tip also includes a later dossier-only handoff commit. This checkpoint is not a complete or independently reviewed candidate.
+
 - (a) **Unfixed:** in-app navigation can orphan unsent localStorage namespaces. Resume with discover/copy/recover UI and test navigation, reopening, multiple orphans, collision with a live lock holder and Web Locks failure. Never overwrite a live namespace or discard an orphan.
 - (b) **Unfixed:** missing/renamed source blocks retained data and idempotent retry. Resume with report-identity-scoped, existing-document-only access and source-missing versus SQLite-full categorization; test restart, unrelated reports and symlink replacement. Do not initialize a missing source or enable production publishing.
 - (c) **Partial implementation, independent review pending:** CodeMirror remote edits use a separate-history linked document so remote changes are not added to the local undo stack; local history on disjoint lines rebases, and CodeMirror's conservative same-line history invalidation is disclosed to the user. Real Chromium/loopback tests reproduce no-local-undo and disjoint-edit failures before the change, and pass afterwards; the same-line warning was also red/green. Broader overlap, redo, multiple remote changes and explicit review are still required before claiming the safety property exhaustively.
