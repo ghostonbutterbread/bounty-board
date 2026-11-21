@@ -38,6 +38,11 @@ test('focused filter is retained until the completed data is explicitly applied'
   assert.equal(data.capabilities.report_autosave,false);
   assert.equal(data.capabilities.collaboration,false);
   await held(root);
+  await page.getByRole('button',{name:'Open workspace'}).click();
+  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByText('Reports are loading.',{exact:true}).waitFor();
+  assert.equal(await page.locator('#report-select, #report-source, .CodeMirror').count(),0);
+  await page.getByRole('button',{name:'Dashboard',exact:true}).click();
   await page.locator('#dashboard-program').selectOption('web_bounty/alpha');
   await page.locator('#dashboard-program').focus();
   fs.writeFileSync(path.join(root,'release'),'release');
