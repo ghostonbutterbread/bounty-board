@@ -103,18 +103,35 @@ def coverage(lane, warnings):
             unclassified = len(unassessed)
         finally:
             db.close()
+        # SQLite's dynamic typing permits BLOBs even in TEXT columns. Reject
+        # non-JSON scalars here, before freshness calculation or API encoding.
+        import math
+        def validate_scalars(values):
+            for value in values:
+                if value is None or isinstance(value, int):
+                    continue
+                if isinstance(value, float) and math.isfinite(value):
+                    continue
+                if isinstance(value, str):
+                    value.encode('utf-8')
+                    continue
+                raise ValueError('invalid coverage scalar')
+        validate_scalars(kinds.keys())
+        for item in unassessed:
+            validate_scalars(item.values())
         counts = {}
         items = []
         for row in rows:
             item = dict(row)
             item['surface_id'] = item.pop('id')
             axes_json, evidence_json = item.pop('axes_json'), item.pop('evidence_json')
+            validate_scalars(item.values())
             if not isinstance(axes_json, (str, bytes, bytearray)) or not isinstance(evidence_json, (str, bytes, bytearray)):
                 raise ValueError('invalid assessment JSON')
             item['axes'] = json.loads(axes_json)
             item['evidence_refs'] = json.loads(evidence_json)
             status = {'untested': 'no_assessment', 'exhausted': 'bounded_review'}.get(item['status'], item['status'])
-            baseline = item['fingerprint'] or ('@mapper-run:' + item['run_id'] if item['run_id'] else None)
+            baseline = item['fingerprint'] or (f"@mapper-run:{item['run_id']}" if item['run_id'] else None)
             item['freshness'] = ('not_applicable' if status == 'no_assessment' else
                                  'unknown' if not baseline or not item['assessed_fingerprint'] else
                                  'current' if item['assessed_fingerprint'] == baseline else 'stale')
@@ -124,9 +141,13 @@ def coverage(lane, warnings):
             item['status'] = status
             counts[status] = counts.get(status, 0) + 1
             items.append(item)
-        return {'counts': counts, 'items': items, 'total': len(items),
-                'mapped_kinds': kinds, 'unclassified_surfaces': unclassified,
-                'unassessed_surfaces': unassessed}
+        result = {'counts': counts, 'items': items, 'total': len(items),
+                  'mapped_kinds': kinds, 'unclassified_surfaces': unclassified,
+                  'unassessed_surfaces': unassessed}
+        # Decoded assessment JSON can contain non-finite numbers or invalid
+        # Unicode escapes; enforce the actual response encoding at this boundary.
+        json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        return result
     except FileNotFoundError:
         warnings.append('coverage_missing')
     except (OSError, ValueError, UnicodeError, sqlite3.Error):

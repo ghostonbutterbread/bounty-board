@@ -672,7 +672,7 @@
   });
   app.addEventListener('change',async event=>{
     const el=event.target;
-    if(el.id==='dashboard-program'){state.dashboardProgram=el.value;render();}
+    if(el.id==='dashboard-program'){const focused=document.activeElement===el;state.dashboardProgram=el.value;render();if(focused)app.querySelector('#dashboard-program')?.focus();}
     else if(el.id==='program-select'){state.program=el.value;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();render();}
     else if(el.id==='lane-select'){state.lane=el.value;state.report='';state.filters={severity:'',class:'',status:'',query:''};render();}
     else if(el.id==='report-select'){state.report=el.value;render();}
