@@ -1,0 +1,256 @@
+# Capacity recovery correction — branch handoff
+
+- **Branch/worktree:** `fix/board-capacity-recovery`, `/home/ryushe/projects/bounty-board-capacity-recovery`; **base:** `e1724bba29131b4b956369142235034eb2330707`; **intended target:** `beta`. Parent owns independent review, integration and any activation. No push, merge, service change, remote access, or live Shared access was performed.
+- **Intent:** repair two independently reproduced retention-capacity recovery bugs without deleting retained data or changing the default-disabled report writer.
+- **Contract:** a recovery inspection checks the retained capacity attempt against the current source digest, shared receipt revision, unresolved conflicts and completed reconciliation. Changed preconditions report `conflict`/`capacity_retry_changed` so the existing explicit review-and-continue flow can retain the original request and newer editor text and merge from their causal base; an unavailable source or incomplete scan is `outcome_uncertain`, not a claim of failure or success. An explicit exact retry during a poll is held in memory only after persisting the original payload and status. It sends at most once after a successful available-source poll, is cancelled by inspection, is not resumed blindly after reload, and is blocked by storage failures or a changed pending record. Server publication preconditions remain authoritative. No retained backups are automatically deleted.
+- **TDD receipts:** before changes, the isolated synthetic HTTP regression failed because inspection returned `capacity` rather than `conflict`; after the fix it passed. The real-Chromium held-poll regression failed because one click left the capacity notice and produced no retry; after the fix it passed. A later stale-preview browser case initially timed out because the selected synthetic changes conflicted; the final fixture separates the edited lines and exercises both stale refusal and a successful subsequent preview/save.
+- **Focused final regressions:** 8 real Chromium/real synthetic HTTP cases in `static/tests/capacity-recovery-real.synthetic.test.cjs` passed: one and repeated retry clicks, changed-source/store recovery with newer edits, stale preview, retained history/source, inspection cancellation, failed poll, missing source, storage denial and changed browser storage. The exact request is checked byte-for-structure against the saved payload; a newer edit is a distinct request. `python -m unittest -v test_report_retention_capacity test_report_autosave test_report_retained_scan test_report_retained_poll` passed 48 tests; the final 12-test capacity module subsequently passed with the added shared-head-only test. That test failed against the immutable base (`capacity` instead of `conflict`) and passed with the correction. The final broader Python selected suite ran 139 tests successfully, one skipped on its Python 3.13 interpreter; that skipped `test_dashboard_coverage.DashboardCoverageTests.test_encoder_depth_failure_is_isolated_for_map_and_coverage` passed separately under Python 3.12. Explicit exclusions: `test_backend.BackendTests.test_real_bbh_metadata_write_on_disposable_fixture` and `test_collaboration_api.CollaborationAPITests.test_opt_in_fixture_publication_checks_head_and_writes_source`; the latter is excluded because this task forbids `experimental_fixture_publish`. Broad suite output: `/home/ryushe/.hermes/cache/scratch/board-capacity-python-final.log` (ephemeral).
+- **Isolation and limits:** all exercised opt-in writers used disposable synthetic fixtures in a non-root, network-none, read-only-root Docker container with task-owned `/runboard` tmpfs; explicit HOME/XDG/TMPDIR/import roots and read-only code/dependency mounts. Tmpfs does not establish persistence across container or host crashes, deployment filesystem or synchronization behavior. No host `/tmp` or `/dev/shm` was used for artifacts. External writers are not coordinated, and inspection/preview cannot establish a future filesystem state.
+- **Browser regression suite:** initial 16-file run had 74/81 pass and 7 fail (six `board-release-real` cases and `collaboration-recovery.synthetic.test.cjs`'s “another client resolves a conflict”). Investigation: tests launching Python with the read-only worktree as cwd encounter an inaccessible host `.git` gitfile. A direct `git merge-file` negative control returned 128 from `/work` and 0 from tmpfs; the first failed release case and the failed conflict case passed separately using a tmpfs source copy without `.git`. The complete corrected 16-file rerun passed **81/81**, no skips, in 302.18 s (600 s wall guard); the final capacity file includes all 8 cases. Initial receipt: `/home/ryushe/.hermes/cache/scratch/board-capacity-browser.log`; corrected receipt: `/home/ryushe/.hermes/cache/scratch/board-capacity-browser-copy.log` (both ephemeral). The two browser files `collaboration.synthetic.test.cjs` and `collaboration-combined.synthetic.test.cjs` were excluded because their fixture enables the prohibited `experimental_fixture_publish`. SHA-256 of app.py, static/app.js, and the capacity browser test matched the source checkout and tmpfs copy. The selected Python run used a 120 s command guard. No timeout was waived.
+- **Implementation checkpoint:** `57fa1f3887b89f8d43385320442bf1b0a53d96f1`; added head-only HTTP regression checkpoint: `0d87f44747cca319050f417737c8c94f8f25de5c`. A later dossier-only commit records the final evidence.
+- **Next:** parent performs independent review of this exact correction plus candidate and its test receipts, reconciles intended beta separately, and decides integration/activation. Do not enable the report writer based solely on tmpfs tests.
+
+## Exact selected browser files
+
+- `static/tests/capacity-recovery-real.synthetic.test.cjs`
+- `static/tests/retention-capacity.synthetic.test.cjs`
+- `static/tests/backlog-retry.synthetic.test.cjs`
+- `static/tests/backlog-reload.synthetic.test.cjs`
+- `static/tests/merged-ack-recovery.synthetic.test.cjs`
+- `static/tests/merged-ack-race.synthetic.test.cjs`
+- `static/tests/report-save-ui.synthetic.test.cjs`
+- `static/tests/board-65-real.synthetic.test.cjs`
+- `static/tests/board-release-real.synthetic.test.cjs`
+- `static/tests/board-policy-real.synthetic.test.cjs`
+- `static/tests/collaboration-frontend-fixes.synthetic.test.cjs`
+- `static/tests/collaboration-regressions.synthetic.test.cjs`
+- `static/tests/collaboration-recovery.synthetic.test.cjs`
+- `static/tests/collaboration-recovery-blockers.synthetic.test.cjs`
+- `static/tests/collaboration-missing-source.synthetic.test.cjs`
+- `static/tests/collaboration-undo.synthetic.test.cjs`
+
+## Exact browser test names (81)
+
+- 1. reload during backlog backoff retains request without promising a retry
+- 2. injected repeated backlog is bounded and retains original request and later text
+- 3. manual inspection cancels a scheduled automatic backlog retry
+- 4. inspection during a held poll cancels the backlog retry and inspects the original
+- 5. a lost acknowledgement after a backlog retry stops automatic replay
+- 6. injected 503 retained_reconciliation_unavailable remains an unconfirmed outcome
+- 7. injected 409 retained_scan_backlog remains an unconfirmed outcome
+- 8. 65 real browser publications with polls leave the next editor save able to reach Markdown
+- 9. real report policy allows owned and unregistered files but rejects generated navigation and preserves drafts
+- 10. real clients, retained fd, history and restart retry preserve source and versions
+- 11. two real clients preview and publish a retained merge
+- 12. a later store-only edit can be previewed and published
+- 13. overlapping retained edit requires resolution and merged publication
+- 14. stale merged preview is rejected and can be reviewed again
+- 15. lost reconcile acknowledgment survives restart and exact retry
+- 16. successful normal save does not offer a stale merge preview
+- 17. default disabled keeps shared edits out of synthetic Markdown
+- 18. disabling after a published save never writes later shared edits to Markdown
+- 19. 1 retry click(s) during poll send the exact request once
+- 20. 2 retry click(s) during poll send the exact request once
+- 21. changed capacity preconditions can be reviewed without losing newer edits
+- 22. deferred retry is cancelled on inspect
+- 23. deferred retry is cancelled on poll failure
+- 24. deferred retry is cancelled on source unavailable
+- 25. deferred retry is cancelled on storage denial
+- 26. deferred retry is cancelled on storage changed
+- 27. recovery quota failure keeps copyable text and never sends an undurable request
+- 28. recovery cas failure keeps copyable text and never sends an undurable request
+- 29. recovery silent failure keeps copyable text and never sends an undurable request
+- 30. recovered conflict updates preview and status immediately and after a poll
+- 31. a newly created shared request is not sent when its persistence fails
+- 32. history bridges a 100-submission burst after older history is loaded
+- 33. history fixture releases held requests and propagates failures
+- 34. old conflict resolved in another tab cannot remain actionable
+- 35. conflict resolution waits visibly for an ordinary in-flight save
+- 36. autosave stale resolution inspects and explicitly continues without losing its causal base
+- 37. resolution recovery distinguishes network-unknown from an unobserved rejection
+- 38. resolution recovery distinguishes committed-409 from an unobserved rejection
+- 39. resolution continuation storage denial retains original and sends nothing new
+- 40. resolution survives a successful held poll, repeat clicks and later edits
+- 41. resolution survives a failed held poll, repeat clicks and later edits
+- 42. resolution storage failure preserves copyable text and never sends
+- 43. stale held-poll resolution preserves both the reviewed submission and later editor text
+- 44. reopen discovers orphan and replays the exact pending request before newer text
+- 45. multiple saved drafts and live tab survive navigation and lockless copy fallback
+- 46. a cloned reload cannot claim a live lockless namespace
+- 47. recover a saved shared draft by its old path after source deletion or rename
+- 48. missing source: path-scoped local and pending recovery stays durable without posting
+- 49. pre-opt-in unsuffixed v2 drafts appear as copy-only including old shape
+- 50. manual missing-source lookup cannot recover a live tab record
+- 51. discovered Unicode and spaced program binds collaborative editor and shared history exactly
+- 52. lost acknowledged request is replayed exactly after reload before newer edits
+- 53. inherited window name starts an independent recoverable draft namespace
+- 54. offline saves stop after bounded attempts and manual retry retains draft
+- 55. bounded metadata history pages old unresolved conflicts and fetches versions on demand
+- 56. another client resolves a conflict without stranding the original editor
+- 57. initial offline polling backs off and offers manual retry
+- 58. cloned reload state cannot claim a live tab namespace
+- 59. save acknowledgment and unchanged poll preserve cursor and undo
+- 60. remote change preserves cursor and warns when local undo overlaps
+- 61. failed unsent shared edit is restored and retried after reload
+- 62. undo with no local edits cannot revert a remote edit
+- 63. undo a local edit across a same-line remote edit preserves remote content
+- 64. undo a local edit across a disjoint remote edit preserves remote content
+- 65. newer local edit while merged store receipt is in flight preserves remote text
+- 66. overlapping newer edits remain local until explicit three-way resolution
+- 67. reviewing a publication conflict cannot treat unseen merged text as the editor base
+- 68. lost store-only acknowledgement recovers merged content
+- 69. published receipt is presented as point-in-time Markdown save
+- 70. lost acknowledgment retains exact request and newer edit until original is inspected
+- 71. mocked pending publication never claims the Markdown saved or discards edits
+- 72. mocked outcome_uncertain publication never claims the Markdown saved or discards edits
+- 73. mocked future_state publication never claims the Markdown saved or discards edits
+- 74. two clients and an external edit report conflict without claiming an untouched file
+- 75. delayed acknowledgment belongs to the original selection
+- 76. not-observed recovery permits only exact original retry before newer edit
+- 77. a saved notice is invalidated when reload observes a later external change
+- 78. backend editability disables collaborative editor and source writes only for denied reports
+- 79. mocked published receipt without incoming revision retains newer edit and request
+- 80. storage failure during in-flight acknowledgement retains unsent text and prevents another write
+- 81. capacity receipt reports unsaved Markdown and retains the original request
+
+## Exact selected Python test IDs (139)
+
+- `test_backend.BackendTests.test_acknowledged_synthetic_writer_updates_finding`
+- `test_backend.BackendTests.test_capability_reports_explicit_metadata_options`
+- `test_backend.BackendTests.test_coverage_reads_committed_wal_and_marks_stale`
+- `test_backend.BackendTests.test_coverage_summary_uses_same_snapshot_as_questions`
+- `test_backend.BackendTests.test_discovers_only_canonical_program_lanes`
+- `test_backend.BackendTests.test_malformed_ledger_record_does_not_hide_incomplete_data`
+- `test_backend.BackendTests.test_map_and_gadget_index_preserves_tags_and_missing_data`
+- `test_backend.BackendTests.test_missing_root_is_unknown_not_empty_success`
+- `test_backend.BackendTests.test_missing_writer_disables_writes_but_read_endpoint_works`
+- `test_backend.BackendTests.test_reads_ledger_fields_without_assuming_missing_status`
+- `test_backend.BackendTests.test_rejects_untrusted_host_and_cross_origin_requests`
+- `test_backend.BackendTests.test_report_open_revision_and_refuses_even_stale_autosaves`
+- `test_backend.BackendTests.test_report_paths_and_symlinks_cannot_escape_root`
+- `test_backend.BackendTests.test_reports_identify_exact_registered_owner_without_basename_matching`
+- `test_backend.BackendTests.test_serves_static_files_without_exposing_sibling_paths`
+- `test_backend.BackendTests.test_simultaneous_autosaves_never_overwrite_external_edit`
+- `test_backend.BackendTests.test_symlinked_ledgers_and_databases_are_not_read`
+- `test_backend.BackendTests.test_unreadable_program_does_not_break_portfolio`
+- `test_backend.BackendTests.test_unreadable_report_classification_is_unknown_with_warning`
+- `test_backend.BackendTests.test_v2_status_rationale_and_source_paths`
+- `test_backend.BackendTests.test_write_refuses_context_symlink_before_launching_writer`
+- `test_backend.BackendTests.test_write_verification_checks_v2_current_status_too`
+- `test_backend.BackendTests.test_writer_requires_explicit_uncoordinated_write_acknowledgement`
+- `test_backend.BackendTests.test_writer_runtime_failure_disables_capability_without_affecting_reads`
+- `test_collaboration_api.CollaborationAPITests.test_large_document_is_not_multiplied_in_history`
+- `test_collaboration_api.CollaborationAPITests.test_metadata_paging_and_report_scoped_versions`
+- `test_collaboration_api.CollaborationAPITests.test_missing_git_only_blocks_merge_and_retry_recovers`
+- `test_collaboration_api.CollaborationAPITests.test_quota_rejection_rolls_back_and_allows_retry_after_increase`
+- `test_collaboration_api.CollaborationAPITests.test_shared_drafts_conflicts_retry_and_restart`
+- `test_collaboration_api.CollaborationAPITests.test_simultaneous_slow_collaboration_requests_are_admission_bounded`
+- `test_collaboration_process.SharedStoreProcessTests.test_legacy_history_is_retained_but_not_silently_bound`
+- `test_collaboration_process.SharedStoreProcessTests.test_replaced_source_directory_does_not_reuse_history`
+- `test_collaboration_process.SharedStoreProcessTests.test_source_read_is_serialized_across_two_servers`
+- `test_collaborative_engine.CollaborationEngineTests.test_conflicts_remain_recoverable_and_undo_creates_new_head`
+- `test_collaborative_engine.CollaborationEngineTests.test_corrupt_retained_version_is_not_returned_as_confirmed`
+- `test_collaborative_engine.CollaborationEngineTests.test_disk_full_during_event_rolls_back_and_retry_retains_versions`
+- `test_collaborative_engine.CollaborationEngineTests.test_distinct_process_clients_merge_against_shared_database`
+- `test_collaborative_engine.CollaborationEngineTests.test_divergent_edits_merge_and_survive_reopening`
+- `test_collaborative_engine.CollaborationEngineTests.test_git_launch_failure_preserves_cause_and_other_os_errors`
+- `test_collaborative_engine.CollaborationEngineTests.test_history_pages_are_bounded_and_versions_recoverable`
+- `test_collaborative_engine.CollaborationEngineTests.test_multiple_conflict_hunks_preserve_incoming`
+- `test_collaborative_engine.CollaborationEngineTests.test_non_text_merge_is_retained_as_a_conflict`
+- `test_collaborative_engine.CollaborationEngineTests.test_recent_history_keeps_older_unresolved_conflicts`
+- `test_collaborative_engine.CollaborationEngineTests.test_source_observation_and_stale_restore_preserve_every_version`
+- `test_config.ConfigCliTest.test_invalid_config_fails_with_clear_error`
+- `test_config.ConfigCliTest.test_json_toml_and_cli_overrides`
+- `test_config.ConfigCliTest.test_main_forwards_explicit_acknowledgement`
+- `test_config.ConfigCliTest.test_server_help_advertises_config_file`
+- `test_config.ConfigCliTest.test_uncoordinated_writes_acknowledgement_is_cli_only`
+- `test_config.ConfigCliTest.test_writer_is_explicit_cli_opt_in`
+- `test_dashboard_coverage.DashboardCoverageTests.test_blob_values_only_disable_the_affected_lane_over_http`
+- `test_dashboard_coverage.DashboardCoverageTests.test_deep_assessment_json_is_isolated_over_http`
+- `test_dashboard_coverage.DashboardCoverageTests.test_dynamic_scalars_and_nested_json_remain_safe_over_http`
+- `test_dashboard_coverage.DashboardCoverageTests.test_encoder_depth_failure_is_isolated_for_map_and_coverage`
+- `test_dashboard_coverage.DashboardCoverageTests.test_invalid_coverage_payload_is_unavailable_without_disconnecting`
+- `test_dashboard_coverage.DashboardCoverageTests.test_mixed_kind_keys_preserve_all_counts_without_duplicate_json_names`
+- `test_dashboard_coverage.DashboardCoverageTests.test_unassessed_and_nullable_fingerprints_survive_http_read_in_wal`
+- `test_draft_failure.DraftFailureTests.test_directory_sync_failure_does_not_claim_save_and_retry_recovers`
+- `test_drafts.DraftStorageTests.test_detects_a_corrupted_retained_version`
+- `test_drafts.DraftStorageTests.test_draft_storage_module_exists`
+- `test_drafts.DraftStorageTests.test_idempotent_retry_cannot_overwrite_an_existing_version`
+- `test_drafts.DraftStorageTests.test_recovery_returns_valid_versions_and_reports_corruption`
+- `test_drafts.DraftStorageTests.test_rejects_symlinked_or_public_draft_directory`
+- `test_drafts.DraftStorageTests.test_simultaneous_distinct_saves_preserve_both_versions`
+- `test_drafts.DraftStorageTests.test_versions_are_durable_and_bound_to_report`
+- `test_ledger_isolation.LedgerIsolationTests.test_invalid_ledger_is_unknown_without_breaking_other_program`
+- `test_mapstore_detail.MapDetailTests.test_current_index_and_program_are_authoritative`
+- `test_mapstore_detail.MapDetailTests.test_deep_index_is_unavailable_without_disconnecting`
+- `test_mapstore_detail.MapDetailTests.test_indexed_observation_is_read_lazily`
+- `test_mapstore_detail.MapDetailTests.test_malformed_or_missing_index_refused`
+- `test_mapstore_detail.MapDetailTests.test_nonfinite_map_values_are_isolated_from_strict_http_json`
+- `test_mapstore_detail.MapDetailTests.test_surface_and_url_scoped_paths_are_supported`
+- `test_mapstore_detail.MapDetailTests.test_symlinked_ancestor_and_unindexed_existing_file_refused`
+- `test_mapstore_detail.MapDetailTests.test_traversal_symlink_missing_nonregular_and_invalid_files_are_refused`
+- `test_mapstore_detail.MapDetailTests.test_unindexed_duplicate_and_wrong_lane_are_refused`
+- `test_missing_source_synthetic.MissingSourceTests.test_recover_after_deletion_restart_and_exact_retry`
+- `test_program_identity_synthetic.ProgramIdentityTests.test_discovery_names_exact_binding_and_hostile_components`
+- `test_report_autosave.PublisherTests.test_barrier_deletion_after_exchange_change_and_crash_recovery`
+- `test_report_autosave.PublisherTests.test_candidate_metadata_not_preservable_refuses_exchange`
+- `test_report_autosave.PublisherTests.test_external_write_at_exchange_is_retained`
+- `test_report_autosave.PublisherTests.test_old_descriptor_change_is_reported_on_retry`
+- `test_report_autosave.PublisherTests.test_precondition_failure_has_durable_retry_receipt`
+- `test_report_autosave.PublisherTests.test_receipt_failure_never_recovers_as_published`
+- `test_report_autosave.PublisherTests.test_unsupported_exchange_retains_draft_and_source`
+- `test_report_autosave.ReportAutosaveTests.test_crash_before_http_receipt_recovers_uncertain`
+- `test_report_autosave.ReportAutosaveTests.test_http_three_way_merges_external_and_draft_edits`
+- `test_report_autosave.ReportAutosaveTests.test_late_displaced_edit_is_retained_in_history`
+- `test_report_autosave.ReportAutosaveTests.test_opt_in_submit_publishes_and_retains_original`
+- `test_report_autosave.ReportAutosaveTests.test_two_server_processes_serialize_publication`
+- `test_report_index_synthetic.ReportIndexTests.test_exact_path_ownership_and_evidence_precedence`
+- `test_report_index_synthetic.ReportIndexTests.test_ownership_is_indexed_once_per_finding`
+- `test_report_retained_poll.RetainedPollTests.test_collision_after_inspection`
+- `test_report_retained_poll.RetainedPollTests.test_late_descriptor_before_get`
+- `test_report_retained_poll.RetainedPollTests.test_late_descriptor_before_post`
+- `test_report_retained_poll.RetainedPollTests.test_two_processes_invalidate_completed_sweep_and_make_progress`
+- `test_report_retained_scan.ScanTests.test_completed_large_sweep_allows_user_to_publish_merged_report`
+- `test_report_retained_scan.ScanTests.test_earlier_retained_inode_changed_mid_sweep_is_seen_next_sweep`
+- `test_report_retained_scan.ScanTests.test_editability_contract_and_seeded_indexes`
+- `test_report_retained_scan.ScanTests.test_explicit_reconcile_publishes_retained_merge`
+- `test_report_retained_scan.ScanTests.test_generated_navigation_is_never_editable_or_publishable`
+- `test_report_retained_scan.ScanTests.test_navigation_appearing_at_final_check_is_not_exchanged`
+- `test_report_retained_scan.ScanTests.test_navigation_replacing_source_before_exchange_is_not_exchanged`
+- `test_report_retained_scan.ScanTests.test_new_operation_invalidates_completed_large_sweep`
+- `test_report_retained_scan.ScanTests.test_outstanding_operations_observed_in_creation_order_and_deduped`
+- `test_report_retained_scan.ScanTests.test_poll_interleaving_does_not_starve_real_publication_after_65_saves`
+- `test_report_retained_scan.ScanTests.test_post_exchange_sqlite_failure_recovers_without_reexchange`
+- `test_report_retained_scan.ScanTests.test_publisher_rejects_navigation_even_when_called_directly`
+- `test_report_retained_scan.ScanTests.test_reconcile_blocks_conflict_until_explicit_resolution`
+- `test_report_retained_scan.ScanTests.test_reconcile_late_exchange_edit_is_retained_and_requires_review`
+- `test_report_retained_scan.ScanTests.test_reconcile_missing_source_and_capacity_do_not_publish`
+- `test_report_retained_scan.ScanTests.test_reconcile_rejects_stale_source_and_retains_new_source`
+- `test_report_retained_scan.ScanTests.test_reconcile_retry_after_restart_never_reexchanges`
+- `test_report_retained_scan.ScanTests.test_retry_of_unpublished_merged_store_save_never_exchanges`
+- `test_report_retained_scan.ScanTests.test_scan_backlog_is_bounded_and_blocks_post_until_sweep_finishes`
+- `test_report_retained_scan.ScanTests.test_sqlite_scan_error_returns_503_without_store_submit_or_exchange`
+- `test_report_retained_scan.ScanTests.test_store_only_editability_is_distinct_from_source_autosave`
+- `test_report_retention_capacity.RetentionCapacityTests.test_actual_free_space_floor_refuses_before_operation`
+- `test_report_retention_capacity.RetentionCapacityTests.test_cached_count_invalidates_after_other_process_publication`
+- `test_report_retention_capacity.RetentionCapacityTests.test_capacity_inspection_detects_changed_shared_head_without_source_change`
+- `test_report_retention_capacity.RetentionCapacityTests.test_capacity_retry_rejects_changed_source`
+- `test_report_retention_capacity.RetentionCapacityTests.test_cli_capacity_defaults_overrides_and_invalid`
+- `test_report_retention_capacity.RetentionCapacityTests.test_crash_remnant_counts_and_sequential_saves_reuse_count`
+- `test_report_retention_capacity.RetentionCapacityTests.test_existing_symlink_counts_without_following`
+- `test_report_retention_capacity.RetentionCapacityTests.test_full_capacity_never_exchanges_and_retry_can_publish`
+- `test_report_retention_capacity.RetentionCapacityTests.test_full_capacity_preserves_changed_retained_inode`
+- `test_report_retention_capacity.RetentionCapacityTests.test_http_capacity_and_exact_retry_after_restart`
+- `test_report_retention_capacity.RetentionCapacityTests.test_swapped_retention_directory_before_exchange_refuses`
+- `test_report_retention_capacity.RetentionCapacityTests.test_two_processes_share_one_capacity_slot_repeatedly`
+- `test_retained_observation.RetainedObservationTests.test_conflicting_snapshot_provenance_and_retry_after_newer_observation`
+- `test_retained_observation.RetainedObservationTests.test_disjoint_retained_edit_merges_and_retry_is_idempotent_after_restart`
+- `test_retained_observation.RetainedObservationTests.test_failure_rolls_back_snapshot_and_exact_retry`
+- `test_retained_observation.RetainedObservationTests.test_identical_successive_observations_do_not_duplicate_conflicts`
+- `test_retained_observation.RetainedObservationTests.test_old_descriptor_write_after_exchange_is_retained_and_conflicts`
+- `test_root_identity.RootIdentityTests.test_canonical_root_identity_is_stable_distinct_and_path_free`
+- `test_tailnet.TailnetBoundaryTests.test_cli_opt_in_serves_synthetic_data_at_exact_https_host`
+- `test_tailnet.TailnetBoundaryTests.test_config_rejects_invalid_hostnames_and_null`
+- `test_tailnet.TailnetBoundaryTests.test_duplicate_host_and_origin_are_rejected_by_default`
+- `test_tailnet.TailnetBoundaryTests.test_explicit_tailnet_hostname_is_configured`
+- `test_tailnet.TailnetBoundaryTests.test_opted_in_writer_rejects_hostile_patches_before_invocation`
