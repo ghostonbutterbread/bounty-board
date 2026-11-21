@@ -2,7 +2,7 @@
 
 - Branch/worktree: `feat/collaboration-frontend-fixes`, `/home/ryushe/projects/bounty-board-collab-front-fixes`.
 - Assigned base: `55fd5a6570210baca86742c431fcdcb80ccc5f1d`; intended target: `feat/collaboration-combined`. Do not merge, push, publish, or activate from this branch. The parent owns integration and review.
-- Status: **candidate; independent review and remaining bounds/safety evidence required**. This is not approval for production collaboration or fixture publication. The common combined dossier and backend were not edited. Remote fetch was attempted but origin required unavailable credentials; this work is pinned to the assigned local base, not a claim about current origin.
+- Status: **candidate; independent review and remaining bounds/safety evidence required**. This is not approval for production collaboration or fixture publication. Implementation checkpoint `8ffb41442e7800ea3fb0b98588efa9a99f5fe99e`; the branch tip also contains a later dossier-only handoff commit. The common combined dossier and backend were not edited. Remote fetch was attempted but origin required unavailable credentials; this work is pinned to the assigned local base, not a claim about current origin.
 
 ## Contract and boundaries
 
