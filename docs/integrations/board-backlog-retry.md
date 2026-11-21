@@ -5,7 +5,7 @@
 - **Base:** `9ea3031` (`feat/board-release` at delegation); integration target: parent-owned `feat/board-release`, then parent determines beta propagation. The defect belongs to the combined release candidate, not independently applicable to beta without its autosave backend.
 - **Last updated:** 2026-11-21
 - **Owning ref:** `fix/board-backlog-retry`
-- **Latest immutable recovery checkpoint:** initial code-and-dossier commit (recorded in following handoff-only commit).
+- **Latest immutable recovery checkpoint / implementation:** `5f0c8e808b97b0943693ce3450e4afc896720d94`; this dossier-only follow-up is the current tip.
 - **Inspiration:** independent backend review of pre-submit `503 retained_scan_backlog`; `BACKEND_API.md` retained-sweep contract.
 
 ## Intent and contract
