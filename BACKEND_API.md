@@ -12,6 +12,26 @@ The server serves `static/index.html` at `/`, and other files under `static/` at
 
 ## `GET /api/data`
 
+The ordinary request remains a synchronous full discovery. A read-only browser
+may opt in to a first projection with the `X-Bounty-Board-Phase: summary` header
+(or `?phase=summary`). Only servers with no configured metadata writer,
+collaboration, source autosave, or fixture publisher honor this opt-in; all
+others return the ordinary full response. The summary retains the usual
+ledger/map/coverage data, sets every lane's `reports` to `null`, sets
+`reports_loading: true` and `capabilities.source_authoritative: false`, and
+does not advertise write capabilities. Report absence is not inferred during
+this phase. The browser then requests `?phase=complete&root_instance=<token>`
+once, and may request `?phase=identity` to recheck a deferred result. A root
+instance token binds canonical root path, device and inode before and after
+each phased scan; a mismatch returns 409. It is an opaque freshness check, not
+a lock, authentication, content snapshot, or protection against every change
+inside the root. An unavailable root uses the normal full response. If the
+full request fails, the browser retains the summary and offers Refresh.
+Refresh itself follows the existing full-load path. A focused control or draft
+defers application until the user chooses it; the source identity is checked
+again then. The projection still reads ledger, map and coverage synchronously,
+so those sources can delay it; no production latency improvement is implied.
+
 JSON shape (all collections are lane-scoped):
 
 ```json

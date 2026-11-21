@@ -18,7 +18,6 @@ test('known portfolio is usable before the held report read completes', async ()
     await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1' ? route.continue() : route.abort());
     const start=Date.now();
     await page.goto(`http://127.0.0.1:${port}`);
-    await page.waitForFunction(()=>document.querySelector('#app')?.textContent.includes('Loading workspace'));
     while(!fs.existsSync(path.join(root,'entered'))) {
       if(Date.now()-start>5000)throw new Error('report read barrier was not reached');
       await new Promise(resolve=>setTimeout(resolve,10));

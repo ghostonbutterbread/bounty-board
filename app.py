@@ -233,7 +233,7 @@ def reports(lane, warnings, findings=None, report_autosave=False):
     return items
 
 
-def discover(root, report_autosave=False):
+def discover(root, report_autosave=False, *, include_reports=True):
     if not root.is_dir():
         return {'programs': [], 'warnings': ['root_unavailable']}
     programs = []
@@ -262,7 +262,7 @@ def discover(root, report_autosave=False):
                     findings = ledger(lane, warnings)
                     entries = map_entries(lane, warnings)
                     found.append({'name': lane.name, 'findings': findings, 'map': entries,
-                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings, report_autosave),
+                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings, report_autosave) if include_reports else None,
                                   'gadgets': [e for e in entries if 'gadget' in (e['tags'] or [])] if entries is not None else None,
                                   'warnings': warnings})
             if found:
@@ -749,6 +749,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
 
         def do_GET(self):
             import hashlib
+            import os
             if not self.trusted_request():
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
@@ -762,13 +763,45 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if url.path == '/api/collaboration/version':
                 return self.collaboration_admitted(view='version')
             if url.path == '/api/data':
-                result: dict = discover(root, report_autosave)
+                params = parse_qs(url.query, keep_blank_values=True)
+                phase = params.get('phase', [self.headers.get('X-Bounty-Board-Phase', '')])[0]
+                # Only the read-only server opts in. Existing callers and all
+                # writer configurations retain the synchronous full response.
+                phased = (phase in ('summary', 'complete', 'identity') and not self.server.writer
+                          and collaboration is None and not report_autosave
+                          and not experimental_fixture_publish)
+                def root_snapshot():
+                    try:
+                        canonical = root.resolve(strict=True)
+                        stat = canonical.stat()
+                        if not canonical.is_dir():
+                            return None
+                        identity = hashlib.sha256(os.fsencode(str(canonical))).hexdigest()
+                        instance = hashlib.sha256(os.fsencode(f'{canonical}\0{stat.st_dev}\0{stat.st_ino}')).hexdigest()
+                        return canonical, identity, instance
+                    except (OSError, RuntimeError):
+                        return None
+                before = root_snapshot() if phased else None
+                if phased and phase == 'identity':
+                    self.reply(200, {'root_instance': before[2] if before else None}); return
+                if phased and phase == 'complete' and (not before or params.get('root_instance') != [before[2]]):
+                    self.reply(409, {'error': 'root_changed'}); return
+                if phased and before:
+                    result: dict = discover(before[0], include_reports=phase != 'summary')
+                    if root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'}); return
+                    result['root_identity'] = before[1]
+                    result['root_instance'] = before[2]
+                    result['reports_loading'] = phase == 'summary'
+                else:
+                    result = discover(root, report_autosave)
                 # Identity follows the effective canonical path, not report content.
                 # It is an opaque namespace, not a secret or authentication token.
                 try:
                     import os
-                    canonical = root.resolve(strict=True)
-                    result['root_identity'] = hashlib.sha256(os.fsencode(str(canonical))).hexdigest() if canonical.is_dir() else None
+                    if not (phased and before):
+                        canonical = root.resolve(strict=True)
+                        result['root_identity'] = hashlib.sha256(os.fsencode(str(canonical))).hexdigest() if canonical.is_dir() else None
                 except (OSError, RuntimeError):
                     result['root_identity'] = None
                 result['capabilities'] = {'finding_metadata': self.server.writer_enabled,
@@ -779,6 +812,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'collaboration': collaboration is not None,
                                           'report_autosave': report_autosave,
                                           'fixture_publish': experimental_fixture_publish}
+                if phased and phase == 'summary' and before:
+                    result['capabilities']['source_authoritative'] = False
                 self.reply(200, result)
                 return
             if url.path == '/api/map-observation':
