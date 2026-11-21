@@ -93,3 +93,48 @@ test('portfolio filtering, ledger and unassessed inventory end to end', async ()
     fs.rmSync(root,{recursive:true,force:true});
   }
 });
+
+test('same-name programs have distinguishable keyboard-accessible choices', async () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'bdp-'));
+  const repo=path.resolve(__dirname,'../..');
+  const child=spawn('python3',['-u','tests/dashboard_browser_fixture.py',root],{cwd:repo,env:{...process.env,PYTHONPATH:repo},stdio:['ignore','pipe','inherit']});
+  let browser;
+  try {
+    const port=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',code=>reject(new Error(`fixture exited ${code}`)));child.stdout.once('data',data=>resolve(Number(String(data).trim())));});
+    const lane=path.join(root,'binaries/alpha/apk');
+    fs.mkdirSync(path.join(lane,'ledgers'),{recursive:true});
+    fs.writeFileSync(path.join(lane,'ledgers/ledger.json'),JSON.stringify({findings:[{fid:'X1',title:'Binary alpha'}]}));
+    browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome'});
+    const page=await browser.newPage();
+    await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1' ? route.continue() : route.abort());
+    await page.goto(`http://127.0.0.1:${port}`);
+    const filter=page.getByLabel('Dashboard program');
+    await filter.waitFor();
+    const options=await filter.locator('option').evaluateAll(els=>els.map(el=>({value:el.value,label:el.textContent})));
+    const web=options.find(o=>o.value==='web_bounty/alpha'), binary=options.find(o=>o.value==='binaries/alpha');
+    assert.ok(web && binary);
+    assert.notEqual(web.label,binary.label);
+    assert.match(web.label,/web_bounty/); assert.match(binary.label,/binaries/);
+    const overview=page.locator('section').filter({has:page.getByRole('heading',{name:'Portfolio overview'})});
+    const stat=label=>overview.locator('.stat').filter({hasText:label}).locator('strong');
+    assert.equal(await stat('Finding records').innerText(),'4');
+    await filter.focus();
+    for (const [value,count] of [['web_bounty/alpha','2'],['web_bounty/beta','1'],['binaries/alpha','1']]) {
+      await page.keyboard.press('ArrowDown');
+      assert.equal(await filter.inputValue(),value);
+      assert.equal(await stat('Finding records').innerText(),count);
+      assert.equal(await filter.evaluate(el=>document.activeElement===el),true);
+    }
+    await page.getByRole('button',{name:'Open workspace'}).click();
+    const selector=page.locator('#program-select');
+    assert.equal(await selector.inputValue(),'binaries/alpha');
+    const workspace=await selector.locator('option').evaluateAll(els=>els.map(el=>({value:el.value,label:el.textContent})));
+    assert.notEqual(workspace.find(o=>o.value===web.value).label,workspace.find(o=>o.value===binary.value).label);
+    await selector.selectOption('web_bounty/alpha');
+    assert.equal(await page.getByText('Alpha finding',{exact:true}).count(),1);
+  } finally {
+    if(browser)await browser.close();
+    child.kill('SIGTERM'); await new Promise(resolve=>child.exitCode!==null||child.signalCode!==null ? resolve() : child.once('exit',resolve));
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});

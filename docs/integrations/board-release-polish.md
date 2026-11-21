@@ -1,0 +1,24 @@
+# Board release polish — integration dossier
+
+- **Status:** local feature; parent independent complete-diff review required. No merge, push, deployment or real Shared use authorized.
+- **Owner/ref/worktree:** delegated worker, `feat/board-release-polish`, `/home/ryushe/projects/bounty-board-release-polish`.
+- **Base:** `cf6f52e`; eventual target `beta` through parent review/integration. This is a correction to the combined release candidate, not a stable-branch repair; downstream propagation is deferred to the parent.
+- **Implementation checkpoint:** pending first task commit; a subsequent dossier-only handoff will record its immutable SHA.
+
+## Contract
+
+Both program selectors display full `family/name` IDs, with unchanged option values. Deep MapStore JSON that the interpreter cannot parse returns the existing path-free observation 404; the portfolio map is independently unavailable on parse/response-encoding failure. Coverage parsing and response encoding fail at the affected lane with `coverage_unavailable_or_invalid`, retaining other lanes and sources. No artificial universal JSON nesting limit is imposed: supported depths depend on the interpreter. `mapped_kinds` groups by JSON key spelling and sums collisions, preserving counts while intentionally losing source-type distinctions in that aggregate. Existing symlink/path rules, unknown values, Unicode/malicious text and SQLite WAL behavior are retained.
+
+## Evidence
+
+All commands used checkout-first PYTHONPATH, task scratch roots, isolated HOME/XDG/TMPDIR and proxy variables pointed to dead loopback except localhost; this is not an OS network sandbox. Browser tests additionally abort requests not addressed to 127.0.0.1. No remote, actual Shared, service or runtime modified.
+
+- Red-before-green: Python 3.12 real HTTP 15,000-deep map index and coverage axes each disconnected on baseline; key-collision test caught duplicate `1` in raw HTTP JSON; real Chromium selector test caught two identical `alpha` labels. The encoding-boundary test was also run on `cf6f52e`'s app copied to scratch and failed with a real JSON encoder `RecursionError`/HTTP disconnect. One initial scratch baseline attempt created an empty file because `git show` ran outside the repository; the corrected command explicitly used `git -C`, verified the imported app path and produced the real baseline failure.
+- `/usr/bin/python3.12 -m unittest -v test_mapstore_detail test_dashboard_coverage` with `PYTHONPATH=$PWD/tests:$PWD`: **15 passed**. The encoder-boundary test wraps the real encoder only to observe its exceptions; its inputs are real SQLite and map files, and its endpoint is real HTTP. It dynamically probes near the interpreter's recursion boundary and confirms both map and coverage encoder failures are isolated.
+- `python3 -m unittest -v test_mapstore_detail test_dashboard_coverage` (Python 3.14.9): **14 passed, 1 skipped** (the 3.12-specific encoder-boundary fixture). Both interpreters exercise the 15,000-deep parser fixture; Python 3.14 can handle that input and returns valid data, whereas Python 3.12 reports the affected source unavailable.
+- Python 3.14 selected `test_backend`, `test_mapstore_detail`, `test_dashboard_coverage`: **38 passed**, excluding exactly `test_backend.BackendTests.test_real_bbh_metadata_write_on_disposable_fixture`. This was before the additional encoder-boundary test was added; the latter is explicitly skipped on 3.14. Included committed-WAL visibility, path/symlink refusals, malformed coverage, dynamic scalars and unknown status handling.
+- `npm test`: **61 passed**; the configured selection excludes `browser metadata update reaches backend with a disposable synthetic writer`. The new real Chromium/real backend test checks both same-name program labels, unchanged IDs, keyboard selection/focus and counts, and cross-selector navigation. Existing browser tests cover malicious text, MapStore and coverage. These counts overlap earlier selections and must not be added.
+
+## Review, limitations and next step
+
+Parent independently reviews `cf6f52e..feat/board-release-polish`, reruns applicable isolated tests and reconciles this dossier with the combined release dossier. The prior release's incomplete source-publication/reconciliation and concurrency limitations remain unchanged. Tests are synthetic and do not establish cross-host, real sync, production-data, live-service or deployment behavior. The encoding guard checks at the current portfolio envelope nesting; future changes to that response shape must update the check and corresponding regression. Python 3.14's deeper runtime behavior does not prove an unlimited nesting capacity. Target integration and activation remain separate decisions; remove branch-local dossiers when integrating as required by the parent workflow.

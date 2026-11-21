@@ -70,10 +70,14 @@ def map_entries(lane, warnings):
         if any(not isinstance(item, dict) or not isinstance(item.get('tags', []), list) for item in entries):
             raise ValueError('unsupported map shape')
         fields = ('title', 'url', 'surface', 'scope', 'status', 'path', 'tags', 'timestamp')
-        return [{key: item.get(key) for key in fields} for item in entries]
+        result = [{key: item.get(key) for key in fields} for item in entries]
+        # Check at the actual portfolio nesting depth, before it can break the
+        # response for every other lane during final JSON encoding.
+        json.dumps({'programs': [{'lanes': [{'map': result}]}]}, ensure_ascii=False).encode('utf-8')
+        return result
     except FileNotFoundError:
         warnings.append('map_missing')
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, RecursionError):
         warnings.append('map_unavailable_or_invalid')
     return None
 
@@ -96,7 +100,7 @@ def coverage(lane, warnings):
                 s.consumer, s.fingerprint, s.run_id, a.class_name, a.status, a.pressure,
                 a.reason, a.boundary, a.axes_json, a.evidence_json, a.reopen_when,
                 a.assessed_fingerprint FROM assessments a JOIN surfaces s ON s.id=a.surface_id''').fetchall()
-            kinds = {row['kind']: row['n'] for row in db.execute('SELECT kind, COUNT(*) AS n FROM surfaces GROUP BY kind')}
+            kind_rows = db.execute('SELECT kind, COUNT(*) AS n FROM surfaces GROUP BY kind').fetchall()
             unassessed = [dict(row) for row in db.execute('''SELECT s.id AS surface_id, s.kind, s.host,
                 s.surface_key, s.input_key, s.consumer, s.fingerprint, s.run_id FROM surfaces s
                 WHERE NOT EXISTS (SELECT 1 FROM assessments a WHERE a.surface_id=s.id)''')]
@@ -116,7 +120,14 @@ def coverage(lane, warnings):
                     value.encode('utf-8')
                     continue
                 raise ValueError('invalid coverage scalar')
-        validate_scalars(kinds.keys())
+        validate_scalars(row['kind'] for row in kind_rows)
+        # JSON object names are strings: combine SQL groups that encode to the
+        # same name, rather than emitting duplicate keys that lose counts.
+        kinds = {}
+        for row in kind_rows:
+            value = row['kind']
+            key = value if isinstance(value, str) else json.dumps(value, allow_nan=False)
+            kinds[key] = kinds.get(key, 0) + row['n']
         for item in unassessed:
             validate_scalars(item.values())
         counts = {}
@@ -146,11 +157,12 @@ def coverage(lane, warnings):
                   'unassessed_surfaces': unassessed}
         # Decoded assessment JSON can contain non-finite numbers or invalid
         # Unicode escapes; enforce the actual response encoding at this boundary.
-        json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        json.dumps({'programs': [{'lanes': [{'coverage': result}]}]},
+                   ensure_ascii=False, allow_nan=False).encode('utf-8')
         return result
     except FileNotFoundError:
         warnings.append('coverage_missing')
-    except (OSError, ValueError, UnicodeError, sqlite3.Error):
+    except (OSError, ValueError, UnicodeError, RecursionError, sqlite3.Error):
         warnings.append('coverage_unavailable_or_invalid')
     return None
 
@@ -707,7 +719,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         raise ValueError('unindexed or ambiguous')
                     content = read_file(root, prefix + path).decode('utf-8')
                     self.reply(200, {'content': content})
-                except (OSError, ValueError, UnicodeError):
+                except (OSError, ValueError, UnicodeError, RecursionError):
                     self.reply(404, {'error': 'observation_not_found_or_unavailable'})
                 return
             if url.path == '/api/report':

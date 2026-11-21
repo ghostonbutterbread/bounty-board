@@ -1,11 +1,13 @@
 """Synthetic coverage contract exercised through the real HTTP endpoint."""
 import json
 import sqlite3
+import sys
 import tempfile
 import threading
 import unittest
 from http.client import HTTPConnection
 from pathlib import Path
+from unittest import mock
 
 import app
 
@@ -138,6 +140,155 @@ class DashboardCoverageTests(unittest.TestCase):
                 self.assertIsNotNone(get_lane()['coverage'])
             finally:
                 server.shutdown(); thread.join(); server.server_close(); db.close()
+
+    def test_mixed_kind_keys_preserve_all_counts_without_duplicate_json_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lane = root / 'web_bounty/synthetic/web'
+            (lane / 'ledgers').mkdir(parents=True)
+            db = sqlite3.connect(lane / 'ledgers/surface_coverage.sqlite')
+            db.executescript('''CREATE TABLE surfaces (id, kind, host, surface_key, input_key, consumer, fingerprint, run_id);
+            CREATE TABLE assessments (surface_id, class_name, status, pressure, reason, boundary, axes_json, evidence_json, reopen_when, assessed_fingerprint);''')
+            for index, kind in enumerate([1, '1', '1', None, 'null', 'unknown', 1.5, '1.5']):
+                db.execute('INSERT INTO surfaces VALUES (?,?,?,?,?,?,?,?)', (str(index), kind, 'h', '/s', None, None, None, None))
+            db.commit(); db.close()
+            server = app.make_server(root, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            try:
+                conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    conn.request('GET', '/api/data'); response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    def no_duplicates(pairs):
+                        result = {}
+                        for key, value in pairs:
+                            self.assertNotIn(key, result, f'duplicate JSON key: {key}')
+                            result[key] = value
+                        return result
+                    data = json.loads(response.read(), object_pairs_hook=no_duplicates)
+                finally:
+                    conn.close()
+                kinds = data['programs'][0]['lanes'][0]['coverage']['mapped_kinds']
+                self.assertEqual(kinds, {'1': 3, 'null': 2, 'unknown': 1, '1.5': 2})
+                self.assertEqual(sum(kinds.values()), 8)
+            finally:
+                server.shutdown(); thread.join(); server.server_close()
+
+    @unittest.skipUnless(sys.version_info[:2] == (3, 12), 'Python 3.12 encoder boundary fixture')
+    def test_encoder_depth_failure_is_isolated_for_map_and_coverage(self):
+        # Locate this interpreter's actual decoder limit rather than assuming
+        # the C recursion limit is identical across Python 3.12 builds.
+        def decodes(depth):
+            try:
+                json.loads('[' * depth + '0' + ']' * depth)
+                return True
+            except RecursionError:
+                return False
+        high = 1
+        while high < 100000 and decodes(high):
+            high *= 2
+        if high >= 100000 and decodes(high):
+            self.skipTest('no decoder recursion boundary found within fixture limit')
+        low = high // 2
+        while low + 1 < high:
+            middle = (low + high) // 2
+            if decodes(middle):
+                low = middle
+            else:
+                high = middle
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lane = root / 'web_bounty/synthetic/web'
+            (lane / 'ledgers').mkdir(parents=True)
+            (lane / 'recon/maps').mkdir(parents=True)
+            (lane / 'ledgers/ledger.json').write_text('{"findings": []}')
+            db = sqlite3.connect(lane / 'ledgers/surface_coverage.sqlite')
+            db.executescript('''CREATE TABLE surfaces (id, kind, host, surface_key, input_key, consumer, fingerprint, run_id);
+            CREATE TABLE assessments (surface_id, class_name, status, pressure, reason, boundary, axes_json, evidence_json, reopen_when, assessed_fingerprint);
+            INSERT INTO surfaces VALUES ('a','endpoint','h','/s',NULL,NULL,NULL,NULL);
+            INSERT INTO assessments VALUES ('a','xss','open',NULL,NULL,NULL,'[]','[]',NULL,NULL);''')
+            db.commit()
+            server = app.make_server(root, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            real_dumps = json.dumps
+            failed = set()
+            def observe_encoder(value, *args, **kwargs):
+                try:
+                    return real_dumps(value, *args, **kwargs)
+                except RecursionError:
+                    if isinstance(value, dict) and 'programs' in value:
+                        lane_data = value['programs'][0]['lanes'][0]
+                        failed.update(k for k in ('map', 'coverage') if k in lane_data)
+                    raise
+            try:
+                with mock.patch.object(app.json, 'dumps', side_effect=observe_encoder):
+                    # The request handler runs in a shallower Python stack than
+                    # this unittest method, so probe both sides of the limit.
+                    for depth in range(max(1, high - 60), high + 60):
+                        deep = '[' * depth + '0' + ']' * depth
+                        (lane / 'recon/maps/map.jsonl').write_text('{"path":"a/index.md","tags":' + deep + '}')
+                        db.execute('UPDATE assessments SET axes_json=?', (deep,)); db.commit()
+                        conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                        try:
+                            conn.request('GET', '/api/data'); response = conn.getresponse()
+                            self.assertEqual(response.status, 200)
+                            raw = response.read()
+                            self.assertNotIn(str(root).encode(), raw)
+                            if 'map' in failed:
+                                self.assertIn(b'map_unavailable_or_invalid', raw)
+                            if 'coverage' in failed:
+                                self.assertIn(b'coverage_unavailable_or_invalid', raw)
+                        finally:
+                            conn.close()
+                        if failed == {'map', 'coverage'}:
+                            break
+                self.assertEqual(failed, {'map', 'coverage'})
+            finally:
+                server.shutdown(); thread.join(); server.server_close(); db.close()
+
+    def test_deep_assessment_json_is_isolated_over_http(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            deep = '[' * 15000 + '0' + ']' * 15000
+            try:
+                json.loads(deep)
+            except RecursionError:
+                parseable = False
+            else:
+                parseable = True
+            for name in ('bad', 'good'):
+                lane = root / 'web_bounty' / name / 'web'
+                (lane / 'ledgers').mkdir(parents=True)
+                (lane / 'ledgers/ledger.json').write_text('{"findings": []}')
+                db = sqlite3.connect(lane / 'ledgers/surface_coverage.sqlite')
+                db.executescript('''CREATE TABLE surfaces (id, kind, host, surface_key, input_key, consumer, fingerprint, run_id);
+                CREATE TABLE assessments (surface_id, class_name, status, pressure, reason, boundary, axes_json, evidence_json, reopen_when, assessed_fingerprint);
+                INSERT INTO surfaces VALUES ('a','endpoint','h','/s',NULL,NULL,NULL,NULL);''')
+                axes = deep if name == 'bad' else '[]'
+                db.execute('INSERT INTO assessments VALUES (?,?,?,?,?,?,?,?,?,?)', ('a','xss','open',None,None,None,axes,'[]',None,None))
+                db.commit(); db.close()
+            server = app.make_server(root, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            try:
+                conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    conn.request('GET', '/api/data'); response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    raw = response.read()
+                    self.assertNotIn(str(root), raw.decode())
+                    programs = {p['name']: p['lanes'][0] for p in json.loads(raw)['programs']}
+                finally:
+                    conn.close()
+                self.assertEqual(programs['good']['coverage']['total'], 1)
+                self.assertEqual(programs['bad']['findings'], [])
+                if not parseable:
+                    self.assertIsNone(programs['bad']['coverage'])
+                if programs['bad']['coverage'] is None:
+                    self.assertIn('coverage_unavailable_or_invalid', programs['bad']['warnings'])
+                else:
+                    self.assertEqual(programs['bad']['coverage']['total'], 1)
+            finally:
+                server.shutdown(); thread.join(); server.server_close()
 
     def test_invalid_coverage_payload_is_unavailable_without_disconnecting(self):
         with tempfile.TemporaryDirectory() as tmp:
