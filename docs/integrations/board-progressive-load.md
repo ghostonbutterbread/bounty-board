@@ -1,7 +1,7 @@
 # Progressive Bounty Board loading — branch handoff
 
 - **Branch / base / target:** `fix/board-progressive-load` in `/home/ryushe/projects/bounty-board-progressive-load`; based on `2461f5fc0bdd8c65dca17433f15e4f8473ea7b09`; target `beta`, after parent-owned independent review and reconciliation with `fix/board-warning-summary`.
-- **Status:** implementation and isolated tests complete; **not integrated, independently reviewed, published, or activated**. The implementation commit is the parent of the subsequent dossier-only handoff commit; the latter records its exact SHA.
+- **Status:** implementation and isolated tests complete; **not integrated, independently reviewed, published, or activated**. Implementation checkpoint: `5026b78bc05d6b8633d29ef1da4e6783956b6ddd`; the branch tip contains a later dossier-only handoff commit.
 - **Prior red checkpoint:** `6eab3d30246ac5d69e910ea49eff9676c422b6ad` added the real HTTP/Chromium held-report regression and test-only phase experiment. The previous handoff `6a3a9e34dd7eee8bcfca6372fcb80cf51dd39c3d` recorded that regression failing before a portfolio appeared.
 - **Intent:** show accurate available ledger/map/coverage while report indexing is held, without inventing report counts or enabling writes on partial data. Do not redesign this as a persistent cache or infer production performance from synthetic timings.
 
