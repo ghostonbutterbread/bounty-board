@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 MAX_BYTES = 5_000_000
+HISTORY_PAGE_SIZE = 50
+DEFAULT_STORE_BYTES = 512 * 1024 * 1024
 
 
 def _revision(text):
@@ -25,7 +27,10 @@ def _revision(text):
 
 
 class CollaborationStore:
-    def __init__(self, root):
+    def __init__(self, root, max_store_bytes=DEFAULT_STORE_BYTES):
+        if type(max_store_bytes) is not int or max_store_bytes < 65536:
+            raise ValueError('invalid store size limit')
+        self.max_store_bytes = max_store_bytes
         self.root = Path(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = self.root.lstat()
@@ -51,6 +56,8 @@ class CollaborationStore:
                     payload TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY (key, request_id));
                 CREATE TABLE IF NOT EXISTS resolutions (key TEXT NOT NULL, conflict_id INTEGER NOT NULL,
                     revision TEXT NOT NULL, PRIMARY KEY (key, conflict_id));
+                CREATE INDEX IF NOT EXISTS events_key_id ON events (key, id DESC);
+                CREATE INDEX IF NOT EXISTS events_conflicts ON events (key, id) WHERE kind LIKE '%:conflict';
             ''')
 
     def bind_source(self, root):
@@ -88,6 +95,8 @@ class CollaborationStore:
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=10)
         try:
+            page_size = db.execute('PRAGMA page_size').fetchone()[0]
+            db.execute(f'PRAGMA max_page_count={max(1, self.max_store_bytes // page_size)}')
             with db:
                 yield db
         finally:
@@ -102,7 +111,8 @@ class CollaborationStore:
     @staticmethod
     def _put(db, key, text):
         rev = _revision(text)
-        db.execute('INSERT OR IGNORE INTO versions VALUES (?, ?, ?)', (key, rev, text))
+        if db.execute('INSERT OR IGNORE INTO versions VALUES (?, ?, ?)', (key, rev, text)).rowcount == 0:
+            CollaborationStore._text(db, key, rev)
         return rev
 
     @staticmethod
@@ -110,6 +120,8 @@ class CollaborationStore:
         row = db.execute('SELECT content FROM versions WHERE key=? AND revision=?', (key, rev)).fetchone()
         if row is None:
             raise ValueError('unknown base revision')
+        if _revision(row[0]) != rev:
+            raise ValueError('corrupt retained version')
         return row[0]
 
     def _merge(self, current, base, incoming):
@@ -222,19 +234,36 @@ class CollaborationStore:
             row = db.execute('SELECT head FROM documents WHERE key=?', (key,)).fetchone()
             return None if row is None else {'revision': row[0], 'content': self._text(db, key, row[0])}
 
-    def history(self, key, recent_limit=None):
+    def unresolved_count(self, key):
         key = self._key(key)
         with self._connect() as db:
-            query = ('SELECT e.id,e.kind,e.revision,e.base,e.head,v.content,h.content,r.revision FROM events e '
-                              'JOIN versions v ON e.key=v.key AND e.revision=v.revision '
-                              'JOIN versions h ON e.key=h.key AND e.head=h.revision '
+            return db.execute("SELECT count(*) FROM events e LEFT JOIN resolutions r "
+                              "ON e.key=r.key AND e.id=r.conflict_id WHERE e.key=? "
+                              "AND e.kind LIKE '%:conflict' AND r.revision IS NULL", (key,)).fetchone()[0]
+
+    def version(self, key, revision):
+        import re
+        key = self._key(key)
+        if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{64}', revision):
+            raise ValueError('invalid revision')
+        with self._connect() as db:
+            return {'revision': revision, 'content': self._text(db, key, revision)}
+
+    def history_page(self, key, before=None):
+        key = self._key(key)
+        if before is not None and (type(before) is not int or not 1 <= before <= 9223372036854775807):
+            raise ValueError('invalid cursor')
+        with self._connect() as db:
+            db.execute('BEGIN')
+            count = db.execute("SELECT count(*) FROM events e LEFT JOIN resolutions r "
+                               "ON e.key=r.key AND e.id=r.conflict_id WHERE e.key=? "
+                               "AND e.kind LIKE '%:conflict' AND r.revision IS NULL", (key,)).fetchone()[0]
+            cursor_clause = '' if before is None else 'AND e.id < ? '
+            params = (key, HISTORY_PAGE_SIZE + 1) if before is None else (key, before, HISTORY_PAGE_SIZE + 1)
+            rows = db.execute('SELECT e.id,e.kind,e.revision,e.base,e.head,r.revision FROM events e '
                               'LEFT JOIN resolutions r ON e.key=r.key AND e.id=r.conflict_id '
-                              'WHERE e.key=? ')
-            params = (key,)
-            if recent_limit is not None:
-                if type(recent_limit) is not int or not 1 <= recent_limit <= 1000:
-                    raise ValueError('invalid history limit')
-                query += "AND (e.id IN (SELECT id FROM events WHERE key=? ORDER BY id DESC LIMIT ?) OR (e.kind LIKE '%:conflict' AND r.revision IS NULL)) "
-                params = (key, key, recent_limit)
-            rows = db.execute(query + 'ORDER BY e.id', params).fetchall()
-            return [dict(zip(('id', 'kind', 'revision', 'base', 'head', 'content', 'head_content', 'resolved_revision'), row)) for row in rows]
+                              'WHERE e.key=? ' + cursor_clause + 'ORDER BY e.id DESC LIMIT ?', params).fetchall()
+            more = len(rows) > HISTORY_PAGE_SIZE
+            rows = rows[:HISTORY_PAGE_SIZE]
+            return {'history': [dict(zip(('id', 'kind', 'revision', 'base', 'head', 'resolved_revision'), row)) for row in rows],
+                    'next_before': rows[-1][0] if more else None, 'unresolved_count': count}
