@@ -56,6 +56,11 @@ class CollaborationStore:
                     payload TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY (key, request_id));
                 CREATE TABLE IF NOT EXISTS resolutions (key TEXT NOT NULL, conflict_id INTEGER NOT NULL,
                     revision TEXT NOT NULL, PRIMARY KEY (key, conflict_id));
+                CREATE TABLE IF NOT EXISTS retained_operations (key TEXT NOT NULL, operation TEXT NOT NULL,
+                    base TEXT NOT NULL, merge_base TEXT NOT NULL, PRIMARY KEY (key, operation));
+                CREATE TABLE IF NOT EXISTS retained_requests (key TEXT NOT NULL, operation TEXT NOT NULL,
+                    request_id TEXT NOT NULL, revision TEXT NOT NULL, event_id INTEGER NOT NULL, result TEXT NOT NULL,
+                    PRIMARY KEY (key, operation, request_id));
                 CREATE INDEX IF NOT EXISTS events_key_id ON events (key, id DESC);
                 CREATE INDEX IF NOT EXISTS events_conflicts ON events (key, id) WHERE kind LIKE '%:conflict';
             ''')
@@ -183,6 +188,70 @@ class CollaborationStore:
             result = self._change(db, key, head, source, content, 'source')
             db.execute('UPDATE documents SET source=? WHERE key=?', (rev, key))
             return result
+
+    def observe_retained(self, key, operation, base, content, request_id):
+        """Record one observed snapshot of a displaced inode, not a source save.
+
+        Callers must durably identify and serialize observations in their actual
+        observation order. Repeated bytes return the earlier historical result,
+        not necessarily the current head. A conflicting snapshot is retained
+        without advancing the merge base. This method neither reads nor watches
+        an inode.
+        """
+        key = self._key(key)
+        for value in (operation, request_id):
+            if not isinstance(value, str) or not value or len(value) > 200 or '\0' in value:
+                raise ValueError('invalid observation identity')
+        revision = _revision(content)
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._text(db, key, base)
+            row = db.execute('SELECT base,merge_base FROM retained_operations WHERE key=? AND operation=?',
+                             (key, operation)).fetchone()
+            if row is None:
+                db.execute('INSERT INTO retained_operations VALUES (?,?,?,?)', (key, operation, base, base))
+                merge_base = base
+            elif row[0] != base:
+                raise ValueError('operation base changed')
+            else:
+                merge_base = row[1]
+            old = db.execute('SELECT revision,result FROM retained_requests WHERE key=? AND operation=? AND request_id=?',
+                             (key, operation, request_id)).fetchone()
+            if old is not None:
+                if old[0] != revision:
+                    raise ValueError('observation id reused')
+                return json.loads(old[1])
+            latest = db.execute('SELECT revision,event_id,result FROM retained_requests '
+                                'WHERE key=? AND operation=? ORDER BY rowid DESC LIMIT 1',
+                                (key, operation)).fetchone()
+            if latest is not None and latest[0] == revision:
+                db.execute('INSERT INTO retained_requests VALUES (?,?,?,?,?,?)',
+                           (key, operation, request_id, revision, latest[1], latest[2]))
+                return json.loads(latest[2])
+            document = db.execute('SELECT head FROM documents WHERE key=?', (key,)).fetchone()
+            if document is None:
+                raise ValueError('report has not been observed')
+            result = self._change(db, key, document[0], merge_base, content, 'retained')
+            event_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+            if result['status'] != 'conflict':
+                db.execute('UPDATE retained_operations SET merge_base=? WHERE key=? AND operation=?',
+                           (revision, key, operation))
+            db.execute('INSERT INTO retained_requests VALUES (?,?,?,?,?,?)',
+                       (key, operation, request_id, revision, event_id, json.dumps(result, ensure_ascii=False)))
+            return result
+
+    def retained_provenance(self, key, event_id):
+        """Resolve an observation event within its report's history."""
+        key = self._key(key)
+        if type(event_id) is not int or not 1 <= event_id <= 9223372036854775807:
+            raise ValueError('invalid event')
+        with self._connect() as db:
+            row = db.execute('SELECT r.operation,r.request_id,o.base FROM retained_requests r '
+                             'JOIN retained_operations o ON o.key=r.key AND o.operation=r.operation '
+                             'WHERE r.key=? AND r.event_id=? ORDER BY r.rowid LIMIT 1', (key, event_id)).fetchone()
+            if row is None:
+                raise ValueError('unknown retained observation')
+            return dict(zip(('operation', 'request_id', 'base'), row))
 
     def receipt(self, key, base, content, request_id, conflict_id=None):
         """Return only an exact previously committed request; never create work."""
