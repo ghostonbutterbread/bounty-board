@@ -6,11 +6,11 @@ const {spawn}=require('node:child_process');
 const {once}=require('node:events');
 const {chromium}=require('playwright');
 
-async function fixture(run) {
+async function fixture(run,autosave=false) {
   const tmp=fs.mkdtempSync(path.join(process.env.TMPDIR,'front-fixes-'));
   const root=path.join(tmp,'root'), report=path.join(root,'web_bounty/example/web/reports/example.md');
   fs.mkdirSync(path.dirname(report),{recursive:true});fs.writeFileSync(report,'original\n');
-  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:tmp,env:{...process.env,PYTHONPATH:path.resolve(__dirname,'../..')},stdio:['ignore','pipe','pipe']});
+  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2],report_autosave=sys.argv[3]=='1'); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private'),autosave?'1':'0'],{cwd:tmp,env:{...process.env,PYTHONPATH:path.resolve(__dirname,'../..')},stdio:['ignore','pipe','pipe']});
   let stderr='';proc.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-12000);});
   let browser;
   try {
@@ -189,6 +189,94 @@ test('old conflict resolved in another tab cannot remain actionable', {timeout:1
   assert.equal(await a.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).count(),0);
 }));
 
+
+test('conflict resolution waits visibly for an ordinary in-flight save', {timeout:30000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),{conflict}=await recentConflict(context,base),page=await context.newPage();await open(page,base);
+  await page.getByText('Shared history and conflicts').click();
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r),posts=[];let held=false;
+  await page.route('**/api/collaboration?*',async route=>{if(route.request().method()!=='POST')return route.continue();posts.push(route.request().postDataJSON());if(!held){held=true;arrive();await gate;}return route.continue();});
+  try {
+    await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('ordinary edit\n');
+    await withTimeout(started,10000,'ordinary save');
+    const button=page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});
+    assert.equal(await button.isDisabled(),true,'resolution must not look actionable during an ordinary save');
+    assert.match(await page.locator('#collaboration-history').innerText(),/wait.*current save/i);
+  } finally {release();}
+  const button=page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});
+  await button.waitFor();await page.waitForFunction(id=>!document.querySelector(`[data-conflict="${id}"]`)?.disabled,conflict.conflict_id);
+  await button.click();
+  await page.waitForFunction(id=>!document.querySelector(`[data-conflict="${id}"]`),conflict.conflict_id,{timeout:12000});
+  assert.equal(posts.filter(p=>p.conflict_id===conflict.conflict_id).length,1);
+}));
+
+test('autosave stale resolution inspects and explicitly continues without losing its causal base', {timeout:45000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),{head,conflict,post}=await recentConflict(context,base),page=await context.newPage(),posts=[];await open(page,base);
+  await page.getByText('Shared history and conflicts').click();const button=page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});await button.waitFor();
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);let held=false;
+  await page.route('**/api/collaboration?*',async route=>{if(route.request().method()==='POST'){posts.push(route.request().postDataJSON());return route.continue();}if(held)return route.continue();held=true;arrive();await gate;return route.continue();});
+  let staleResponse;
+  try {
+    await withTimeout(started,10000,'stale autosave held poll');await button.click();
+    staleResponse=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+    await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('later local\n');
+    const resolved=await post({base:head.revision,content:'other resolution\n',request_id:'external-resolve',conflict_id:conflict.conflict_id});assert.notEqual(resolved.status,'conflict');
+  } finally {release();}
+  assert.equal((await staleResponse).status(),409);await page.getByText(/Save outcome unconfirmed/).waitFor();assert.equal(posts.length,1);
+  const original=posts[0];assert.equal(original.base,head.revision);assert.equal(original.conflict_id,conflict.conflict_id);
+  await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('button',{name:'Inspect original save'}).waitFor();assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'later local\n');
+  await page.getByRole('button',{name:'Inspect original save'}).click();await page.getByRole('button',{name:'Retry exact original request'}).waitFor();
+  const retry=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+  await page.getByRole('button',{name:'Retry exact original request'}).click();assert.equal((await retry).status(),409);assert.deepEqual(posts[1],original);
+  await page.getByRole('button',{name:'Inspect original save'}).click();
+  await page.getByRole('button',{name:'Continue as a new edit after review'}).waitFor();
+  assert.equal(posts.length,2);
+  const continued=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+  await page.getByRole('button',{name:'Continue as a new edit after review'}).click();
+  const continuedBody=await (await continued).json();assert.equal(continuedBody.status,'conflict');
+  assert.equal(posts[2].base,original.base);assert.equal(posts[2].content,'later local\n');assert.equal(posts[2].conflict_id,undefined);assert.notEqual(posts[2].request_id,original.request_id);
+  await page.getByText('Reviewed publication requests').click();const reviewed=JSON.parse(await page.getByLabel('Reviewed publication requests').inputValue());assert.deepEqual(reviewed.at(-1).request,original);
+  assert.match(await page.locator('#report-status').innerText(),/earlier resolution outcome remains unconfirmed/i);
+},true));
+
+for(const mode of ['network-unknown','committed-409'])test(`resolution recovery distinguishes ${mode} from an unobserved rejection`,{timeout:30000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),{conflict}=await recentConflict(context,base),page=await context.newPage(),posts=[];await open(page,base);
+  await page.getByText('Shared history and conflicts').click();
+  let original;
+  await page.route('**/api/collaboration?*',async route=>{
+    if(route.request().method()!=='POST')return route.continue();
+    original=route.request().postDataJSON();posts.push(original);
+    if(mode==='network-unknown')return route.abort();
+    const response=await route.fetch();assert.equal(response.status(),200);return route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({error:'invalid_or_conflicting_request'})});
+  });
+  await page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).click();
+  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('Save outcome unconfirmed'));
+  const inspection=page.waitForResponse(r=>r.url().includes('/api/collaboration/recovery?'));
+  await page.getByRole('button',{name:'Inspect original save'}).click();const result=await inspection;
+  assert.equal(result.status(),mode==='network-unknown'?404:200);
+  if(mode==='network-unknown'){
+    await page.getByRole('button',{name:'Retry exact original request'}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'Continue as a new edit after review'}).count(),0);
+    assert.deepEqual(JSON.parse(await page.getByLabel('Original pending request').inputValue()),original);
+  } else {
+    const receipt=await result.json();assert.equal(receipt.store_saved,true);assert.equal(await page.getByRole('button',{name:'Continue as a new edit after review'}).count(),0);
+  }
+  assert.equal(posts.length,1);
+},true));
+
+test('resolution continuation storage denial retains original and sends nothing new',{timeout:30000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),{conflict}=await recentConflict(context,base),page=await context.newPage(),posts=[];await open(page,base);
+  await page.getByText('Shared history and conflicts').click();
+  await page.route('**/api/collaboration?*',route=>{if(route.request().method()!=='POST')return route.continue();posts.push(route.request().postDataJSON());return route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({error:'invalid_or_conflicting_request'})});});
+  await page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).click();
+  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('Save outcome unconfirmed'));
+  await page.getByRole('button',{name:'Inspect original save'}).click();await page.getByRole('button',{name:'Continue as a new edit after review'}).waitFor();
+  await page.evaluate(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('bounty-board-report-draft-v2:'))throw new DOMException('quota','QuotaExceededError');return set.call(this,k,v);};});
+  await page.getByRole('button',{name:'Continue as a new edit after review'}).click();
+  await page.getByText(/storage unavailable/i).first().waitFor();await page.waitForTimeout(1000);
+  assert.equal(posts.length,1);assert.deepEqual(JSON.parse(await page.getByLabel('Original pending request').inputValue()),posts[0]);
+  assert.equal(await page.getByLabel('Recover draft text').inputValue(),'reviewed head\n');
+},true));
 
 async function recentConflict(context,base){
   const root=(await (await context.request.get(base+'/api/data')).json()).root_identity;

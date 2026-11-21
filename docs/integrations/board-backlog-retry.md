@@ -1,6 +1,6 @@
 # Retained-scan backlog retry — branch-local handoff
 
-- **Status:** blocked; partial intent fixes and tests checkpointed, required browser suite failed (including timeout); not review-ready or integrated
+- **Status:** candidate fixed and isolated browser gates passed; independent parent review required before integration (later evidence below supersedes earlier blocked checkpoints).
 - **Owner / branch:** delegated worker, `fix/board-backlog-retry`
 - **Base:** `9ea3031` (`feat/board-release` at delegation); integration target: parent-owned `feat/board-release`, then parent determines beta propagation. The defect belongs to the combined release candidate, not independently applicable to beta without its autosave backend.
 - **Last updated:** 2026-11-21
@@ -60,3 +60,63 @@ Only HTTP 503 plus exact `retained_scan_backlog` permits three bounded automatic
 ## Earlier resume at eaf10a0
 
 Implement and independently review a durable resolution queue or equivalent, then run the checked-in race regression green plus deterministic poll/save contention, stale-head, multiple-click, storage-failure, newer-edit, reload/unknown-outcome and exact 503 retry cases. Run the history tests repeatedly and check browser/server cleanup even on forced browser-close failure. Container harness is `/home/ryushe/.hermes/cache/scratch/diagboard-JyPLPG/run_test.py`; mount this checkout at `/work` instead of its diagnostic copy. No push, merge, live source, fixture publisher, remote, or service activation authorized.
+
+
+## Collaborative intent follow-up — candidate for parent review
+
+- Source checkpoint before this follow-up: `257fc72940b180919694da1f61261c294eee17fc`; intended target remains `feat/board-release`. Parent owns independent review, integration and subsequent topology. This section supersedes older blocked status and earlier resume instructions, while preserving their receipts. No `app.py` changes, real Shared, external service, remote, push, merge or activation.
+- The ordinary in-flight save now disables both conflict-resolution affordances with a wait/inspect explanation and rerenders on completion. A browser barrier test failed on the old enabled button and passed after the change. A held-poll resolution still queues its exact reviewed payload once, preserving later edits.
+- Autosave 409 keeps the exact request and later text; a rejection applies to the last attempt, not proof about any earlier unknown attempt. After inspection returns 404, explicit review can retain the original request with an unconfirmed marker and submit the later editor text as a new edit based on the original request base, without a conflict ID. It may create a new conflict; it does not resolve the old conflict or prove the earlier request cannot still commit. The unconfirmed warning remains visible. Network-only unknown without a 409 does not offer this continuation; a recovered committed receipt takes its existing receipt path. Persistence failure restores the pending request and sends nothing. Real stale/already-resolved 409 regression failed on the absent continuation before the change and passes with reload, exact retry and causal-base assertions.
+- **Exact caveat for review:** this continuation is explicitly user-authorized despite the possibility of an earlier in-flight request. It uses the earlier reviewed base for server three-way conflict detection, retains the original, and warns that the old outcome remains unknown; it is not a proof of non-commit or an automatic retry. Parent should review whether this interaction meets release safety requirements. No synthetic test proves every uncoordinated external writer or power-loss scenario.
+- Diagnostic: the unchanged three save/recovery files run directly against the mounted Git worktree reproduced 11/16, including four `retained_reconciliation_unavailable` responses. A scratch-only instrumented copy with the same inaccessible `.git` worktree pointer reproduced `git merge-file` exit 128, `fatal: not a git repository: /home/ryushe/projects/bounty-board/.git/worktrees/bounty-board-backlog-retry`, through `RuntimeError: merge failed`. Removing that broken pointer passed the same targeted test. The test fixtures now start the synthetic backend in their own disposable tmpfs cwd with explicit checkout-first `PYTHONPATH`; no source or assertion was weakened. The fifth original timeout also passed after this fixture change, but its independent causal chain was not instrumented, so no cause is claimed for it. This does not prove the cause of earlier disk-backed failures.
+- An initial long combined run without an init reaper was incomplete after Chromium `pthread_create: Resource temporarily unavailable` and a server `can't start new thread`; outer wall timeout cleaned the container. The final run used `/usr/bin/docker-init` as PID 1 and finished. All containers removed. This is synthetic tmpfs testing, not ext4 durability or power-loss evidence.
+- Final exact selection: `node --test --test-concurrency=1 static/tests/collaboration-frontend-fixes.synthetic.test.cjs static/tests/report-save-ui.synthetic.test.cjs static/tests/merged-ack-race.synthetic.test.cjs static/tests/merged-ack-recovery.synthetic.test.cjs static/tests/board-65-real.synthetic.test.cjs static/tests/backlog-retry.synthetic.test.cjs static/tests/backlog-reload.synthetic.test.cjs` — 44/44 passed, zero skipped/cancelled, 161.05s. Node sorted the file order in TAP as enumerated below. Synthetic browser tests run in a nonroot Docker container, `--network none`, read-only source and dependency mounts, `--memory 2g --cpus 2`, task-owned `/runboard` tmpfs for `HOME`, `HERMES_HOME`, XDG and `TMPDIR`, no host `/dev/shm` or `/tmp` mount. Complete ephemeral receipt and runner are under `/home/ryushe/.hermes/cache/scratch/board-intent-all-final.log` and `board-intent-runner.py`. No full repository suite or independent review is claimed. The 65-publication fixture controls its poll interval; the 100-event fixture disables the native timeout for one intentionally held poll, as documented above.
+
+### Final browser test IDs (all passed)
+
+1. reload during backlog backoff retains request without promising a retry
+2. injected repeated backlog is bounded and retains original request and later text
+3. manual inspection cancels a scheduled automatic backlog retry
+4. inspection during a held poll cancels the backlog retry and inspects the original
+5. a lost acknowledgement after a backlog retry stops automatic replay
+6. injected 503 retained_reconciliation_unavailable remains an unconfirmed outcome
+7. injected 409 retained_scan_backlog remains an unconfirmed outcome
+8. 65 real browser publications with polls leave the next editor save able to reach Markdown
+9. recovery quota failure keeps copyable text and never sends an undurable request
+10. recovery cas failure keeps copyable text and never sends an undurable request
+11. recovery silent failure keeps copyable text and never sends an undurable request
+12. recovered conflict updates preview and status immediately and after a poll
+13. a newly created shared request is not sent when its persistence fails
+14. history bridges a 100-submission burst after older history is loaded
+15. history fixture releases held requests and propagates failures
+16. old conflict resolved in another tab cannot remain actionable
+17. conflict resolution waits visibly for an ordinary in-flight save
+18. autosave stale resolution inspects and explicitly continues without losing its causal base
+19. resolution recovery distinguishes network-unknown from an unobserved rejection
+20. resolution recovery distinguishes committed-409 from an unobserved rejection
+21. resolution continuation storage denial retains original and sends nothing new
+22. resolution survives a successful held poll, repeat clicks and later edits
+23. resolution survives a failed held poll, repeat clicks and later edits
+24. resolution storage failure preserves copyable text and never sends
+25. stale held-poll resolution preserves both the reviewed submission and later editor text
+26. reopen discovers orphan and replays the exact pending request before newer text
+27. multiple saved drafts and live tab survive navigation and lockless copy fallback
+28. a cloned reload cannot claim a live lockless namespace
+29. newer local edit while merged store receipt is in flight preserves remote text
+30. overlapping newer edits remain local until explicit three-way resolution
+31. reviewing a publication conflict cannot treat unseen merged text as the editor base
+32. lost store-only acknowledgement recovers merged content
+33. published receipt is presented as point-in-time Markdown save
+34. lost acknowledgment retains exact request and newer edit until original is inspected
+35. mocked pending publication never claims the Markdown saved or discards edits
+36. mocked outcome_uncertain publication never claims the Markdown saved or discards edits
+37. mocked future_state publication never claims the Markdown saved or discards edits
+38. two clients and an external edit report conflict without claiming an untouched file
+39. delayed acknowledgment belongs to the original selection
+40. not-observed recovery permits only exact original retry before newer edit
+41. a saved notice is invalidated when reload observes a later external change
+42. backend editability disables collaborative editor and source writes only for denied reports
+43. mocked published receipt without incoming revision retains newer edit and request
+44. storage failure during in-flight acknowledgement retains unsent text and prevents another write
+
+**Next:** parent review exact branch tip against `9ea3031..fix/board-backlog-retry`, especially the explicit unknown-outcome continuation and storage/reload invariants; then parent decides merge, broader gates and activation.
