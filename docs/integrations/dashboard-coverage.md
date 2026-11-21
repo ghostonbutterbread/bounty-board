@@ -1,6 +1,7 @@
 # Dashboard and coverage integration dossier
 
 - **Status:** awaiting parent review; no integration or activation authorized.
+- **Implementation / recovery checkpoint:** `8e7c5a35e0088adee97938fd98b5e87630764294`; the branch tip contains a subsequent dossier-only handoff commit.
 - **Owner / branch:** delegated feature worker, `feat/board-dashboard-coverage`.
 - **Worktree:** `/home/ryushe/projects/bounty-board-dashboard-coverage`.
 - **Feature base:** `68d30e413bad1c2d5871a54fbff1983405062532` (collaboration feature tip supplied by parent).
