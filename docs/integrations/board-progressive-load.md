@@ -1,7 +1,7 @@
 # Progressive Bounty Board loading — blocked prototype handoff
 
 - **Branch / base / target:** `fix/board-progressive-load` in `/home/ryushe/projects/bounty-board-progressive-load`, based on `2461f5fc0bdd8c65dca17433f15e4f8473ea7b09`, intended for reviewed integration into `beta`.
-- **Status:** incomplete, not integration-ready. No production code changed. This checkpoint contains a browser regression test and a *test-only*, single-thread phase experiment, not a dashboard fix. Do not enable or ship the experiment as production code.
+- **Status:** incomplete, not integration-ready. No production code changed. Prototype and regression checkpoint: `6eab3d3` on `fix/board-progressive-load`; the branch tip also contains this later dossier-only handoff. This checkpoint contains a browser regression test and a *test-only*, single-thread phase experiment, not a dashboard fix. Do not enable or ship the experiment as production code.
 - **Intent:** get useful non-report portfolio data on screen before a slow report read completes, while honestly representing pending/unavailable report counts and retaining editor and write safety. No assumptions about the dominant real-world phase are justified by the synthetic timings.
 
 ## Evidence
