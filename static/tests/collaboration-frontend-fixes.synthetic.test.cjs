@@ -1,0 +1,221 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const {spawn}=require('node:child_process');
+const {once}=require('node:events');
+const {chromium}=require('playwright');
+
+async function fixture(run) {
+  const tmp=fs.mkdtempSync(path.join(process.env.TMPDIR,'front-fixes-'));
+  const root=path.join(tmp,'root'), report=path.join(root,'web_bounty/example/web/reports/example.md');
+  fs.mkdirSync(path.dirname(report),{recursive:true});fs.writeFileSync(report,'original\n');
+  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:path.resolve(__dirname,'../..'),env:process.env,stdio:['ignore','pipe','pipe']});
+  proc.stderr.resume(); // Drain request logs so a large synthetic burst cannot block the server.
+  let browser;
+  try {
+    const [chunk]=await once(proc.stdout,'data');const base='http://127.0.0.1:'+Number(chunk.toString().trim());
+    browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
+    await run({browser,base,report});
+  } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
+}
+async function open(page,base){page.setDefaultTimeout(10000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+
+for(const failure of ['quota','cas','silent']) test(`recovery ${failure} failure keeps copyable text and never sends an undurable request`, {timeout:60000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),source=await context.newPage();await open(source,base);
+  await source.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
+  await source.locator('.CodeMirror textarea').focus();await source.keyboard.press('Control+A');await source.keyboard.insertText('recovered text');
+  await source.getByText(/Shared save failed/).waitFor();
+  const sourceEntry=await source.evaluate(()=>Object.entries(localStorage).find(([k,v])=>k.startsWith('bounty-board-report-draft-v2:')&&JSON.parse(v).text==='recovered text'));
+  assert.ok(JSON.parse(sourceEntry[1]).pendingShared);
+  await source.close();
+  const page=await context.newPage(),posts=[];await page.route('**/api/collaboration?*',route=>{if(route.request().method()==='POST')posts.push(route.request().postDataJSON());return route.continue();});
+  await open(page,base);await page.getByRole('button',{name:'Find saved drafts'}).click();
+  const card=page.locator('[data-recovery-candidate]').filter({hasText:'recovered text'});
+  const destination=await page.evaluate(()=>Object.keys(localStorage).find(k=>k.startsWith('bounty-board-report-draft-v2:')&&k.endsWith(window.name.slice('bounty-board-tab:'.length))));
+  const before=await page.evaluate(k=>localStorage.getItem(k),destination);
+  assert.equal(JSON.parse(before).text,'original\n');
+  await page.evaluate(({failure,destination})=>{
+    const get=Storage.prototype.getItem,set=Storage.prototype.setItem;let reads=0;
+    Storage.prototype.getItem=function(k){if(k===destination&&failure==='cas'&&++reads===2){set.call(this,k,'concurrent destination');}return get.call(this,k);};
+    Storage.prototype.setItem=function(k,v){if(k===destination&&failure==='quota')throw new DOMException('quota','QuotaExceededError');if(k===destination&&failure==='silent')return;return set.call(this,k,v);};
+  },{failure,destination});
+  await card.getByRole('button',{name:'Recover this draft'}).click();
+  await page.locator('#draft-recovery').waitFor({state:'visible'});
+  assert.equal(await page.getByLabel('Recover draft text').inputValue(),'recovered text');
+  assert.doesNotMatch(await card.getByRole('status').innerText(),/Recovered into this tab/);
+  assert.equal(await page.evaluate(k=>localStorage.getItem(k),sourceEntry[0]),sourceEntry[1]);
+  assert.equal(await page.evaluate(k=>localStorage.getItem(k),destination),failure==='cas'?'concurrent destination':before);
+  await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('new editor text');
+  assert.equal(await page.getByLabel('Recover draft text').inputValue(),'new editor text');
+  assert.equal(await card.getByLabel('Saved draft (select and copy if recovery is unavailable)').inputValue(),'recovered text');
+  assert.equal(await page.evaluate(k=>localStorage.getItem(k),sourceEntry[0]),sourceEntry[1]);
+  await page.waitForTimeout(3000);
+  assert.deepEqual(posts,[],'no shared request may be sent without durable pending payload');
+}));
+
+test('recovered conflict updates preview and status immediately and after a poll', {timeout:60000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),source=await context.newPage();await open(source,base);
+  await source.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
+  await source.locator('.CodeMirror textarea').focus();await source.keyboard.press('Control+A');await source.keyboard.insertText('# Recovered conflict');
+  await source.getByText(/Shared save failed/).waitFor();
+  const key=await source.evaluate(()=>Object.keys(localStorage).find(k=>k.startsWith('bounty-board-report-draft-v2:')&&JSON.parse(localStorage.getItem(k)).text==='# Recovered conflict'));
+  await source.evaluate(k=>{const saved=JSON.parse(localStorage.getItem(k));saved.conflict=true;saved.pendingShared=null;localStorage.setItem(k,JSON.stringify(saved));},key);
+  await source.close();
+  const page=await context.newPage(),posts=[];await page.route('**/api/collaboration?*',route=>{if(route.request().method()==='POST')posts.push(route.request().postDataJSON());return route.continue();});
+  await open(page,base);await page.getByRole('button',{name:'Find saved drafts'}).click();
+  const card=page.locator('[data-recovery-candidate]').filter({hasText:'Recovered conflict'});
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);let held=false;
+  await page.route('**/api/collaboration?*',async route=>{if(route.request().method()!=='GET'||held)return route.continue();held=true;arrive();await gate;await route.continue();});
+  await started;
+  const response=page.waitForResponse(response=>response.url().includes('/api/collaboration?')&&response.request().method()==='GET',{timeout:30000}).catch(()=>null);
+  try {
+    await card.getByRole('button',{name:'Recover this draft'}).click();
+    await card.getByText('Recovered into this tab; original saved draft retained.').waitFor();
+    assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'# Recovered conflict');
+    assert.equal(await page.locator('#report-preview h1').innerText(),'Recovered conflict');
+    assert.match(await page.locator('#report-status').innerText(),/conflict/i);
+    assert.doesNotMatch(await page.locator('#report-status').innerText(),/saving shared/i);
+    await page.evaluate(()=>{window.beforePollHistory=document.querySelector('#collaboration-history summary');});
+  } finally {release();await response;}
+  assert.equal(await page.waitForFunction(()=>window.beforePollHistory && !window.beforePollHistory.isConnected).then(()=>true),true);
+  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('Conflict:'));
+  assert.equal(await page.locator('#report-preview h1').innerText(),'Recovered conflict');
+  assert.match(await page.locator('#report-status').innerText(),/conflict/i);
+  assert.doesNotMatch(await page.locator('#report-status').innerText(),/saving shared/i);
+  assert.deepEqual(posts,[]);
+}));
+
+test('a newly created shared request is not sent when its persistence fails', {timeout:60000},()=>fixture(async({browser,base})=>{
+ const context=await browser.newContext(),page=await context.newPage(),posts=[];
+ await page.route('**/api/collaboration?*',route=>{if(route.request().method()==='POST')posts.push(route.request().postDataJSON());return route.continue();});
+ await open(page,base);
+ await page.evaluate(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('bounty-board-report-draft-v2:')&&JSON.parse(v).pendingShared)throw new DOMException('quota','QuotaExceededError');return set.call(this,k,v);};});
+ await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('locally persisted edit');
+ await page.locator('#draft-recovery').waitFor({state:'visible'});
+ assert.equal(await page.getByLabel('Recover draft text').inputValue(),'locally persisted edit');
+ const saved=await page.evaluate(()=>Object.entries(localStorage).filter(([k])=>k.startsWith('bounty-board-report-draft-v2:')).map(([,v])=>JSON.parse(v)));
+ assert.ok(saved.some(d=>d.text==='locally persisted edit'&&!d.pendingShared));
+ await page.waitForTimeout(3000);assert.deepEqual(posts,[]);
+}));
+
+test('history bridges a 100-submission burst after older history is loaded', {timeout:120000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),page=await context.newPage();
+  const root=(await (await context.request.get(base+'/api/data')).json()).root_identity;
+  const query=new URLSearchParams({family:'web_bounty',program:'example',lane:'web',path:'example.md',root_identity:root});
+  const endpoint=base+'/api/collaboration?'+query;
+  let head=await (await context.request.get(endpoint)).json();
+  const post=async (content,id)=>{const r=await context.request.post(endpoint,{headers:{Origin:base,'X-Requested-With':'Bounty-Board'},data:{base:head.revision,content,request_id:id}});assert.equal(r.status(),200,await r.text());head=await r.json();};
+  for(let i=0;i<52;i++) await post(`initial ${i}\n`,`initial-${i}`);
+  await open(page,base);await page.getByText('Shared history and conflicts').click();
+  await page.getByRole('button',{name:'Load older history'}).click();
+  await page.getByText('source:initial',{exact:true}).waitFor();
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);
+  let held=false;const hold=async route=>{if(route.request().method()!=='GET'||held)return route.continue();held=true;arrive();await gate;await route.continue();};
+  await page.route('**/api/collaboration?*',hold);await started;
+  for(let i=0;i<100;i++) await post(`burst ${i}\n`,`burst-${i}`);
+  const latest=await (await context.request.get(endpoint)).json();
+  const expected=[];let before;
+  do {const q=new URLSearchParams(query);if(before)q.set('before',before);const result=await (await context.request.get(base+'/api/collaboration/history?'+q)).json();expected.push(...result.history.map(x=>x.id));before=result.next_before;} while(before);
+  let releaseBridge,arriveBridge;const bridgeGate=new Promise(r=>releaseBridge=r),bridgeStarted=new Promise(r=>arriveBridge=r);
+  let bridgeHeld=false;await page.route('**/api/collaboration/history?*',async route=>{if(bridgeHeld)return route.continue();bridgeHeld=true;arriveBridge();await bridgeGate;await route.continue();});
+  release();
+  await bridgeStarted;
+  try {assert.match(await page.locator('#report-status').innerText(),/history is incomplete/i);}
+  finally {releaseBridge();}
+  await page.waitForFunction(revision=>document.querySelector('#report-status')?.textContent.includes('Shared draft ready')&&document.querySelector('.CodeMirror')?.CodeMirror.getValue()==='burst 99\n',latest.revision);
+  await page.waitForFunction(count=>document.querySelectorAll('#collaboration-history [data-version]').length>=count,expected.length,{timeout:12000});
+  const ids=await page.locator('#collaboration-history [data-version]').evaluateAll(nodes=>nodes.map(n=>Number(n.dataset.version)));
+  assert.deepEqual(ids,expected);
+}));
+
+
+test('old conflict resolved in another tab cannot remain actionable', {timeout:120000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),a=await context.newPage(),b=await context.newPage();
+  const root=(await (await context.request.get(base+'/api/data')).json()).root_identity;
+  const query=new URLSearchParams({family:'web_bounty',program:'example',lane:'web',path:'example.md',root_identity:root});
+  const endpoint=base+'/api/collaboration?'+query;
+  const initial=await (await context.request.get(endpoint)).json();
+  const post=async payload=>{const r=await context.request.post(endpoint,{headers:{Origin:base,'X-Requested-With':'Bounty-Board'},data:payload});assert.equal(r.status(),200,await r.text());return r.json();};
+  let head=await post({base:initial.revision,content:'head\n',request_id:'head'});
+  const conflict=await post({base:initial.revision,content:'conflicting\n',request_id:'conflict'});
+  assert.equal(conflict.status,'conflict');
+  for(let i=0;i<52;i++)head=await post({base:head.revision,content:`edit ${i}\n`,request_id:`edit-${i}`});
+  await Promise.all([open(a,base),open(b,base)]);
+  for(const page of [a,b]) {await page.getByText('Shared history and conflicts').evaluate(el=>el.click());await page.getByRole('button',{name:'Load older history'}).click({force:true});await page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).waitFor();}
+  await b.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).click();
+  await b.getByText(/Shared draft ready/).waitFor();
+  const cached=a.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});
+  await a.waitForFunction(id=>document.querySelector(`[data-conflict="${id}"]`)?.disabled,conflict.conflict_id,{timeout:10000});
+  assert.equal(await cached.isDisabled(),true);
+  await a.getByRole('button',{name:`Refresh conflict ${conflict.conflict_id} status`}).click({force:true});
+  const row=a.locator('.record').filter({has:a.locator(`[data-version="${conflict.conflict_id}"]`)});
+  await a.waitForFunction(id=>{const row=document.querySelector(`[data-version="${id}"]`)?.closest('.record');return row?.textContent.includes('(resolved)');},conflict.conflict_id);
+  assert.equal(await a.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).count(),0);
+}));
+
+
+test('reopen discovers orphan and replays the exact pending request before newer text', {timeout:60000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),a=await context.newPage();await open(a,base);
+  let first,notify;const committed=new Promise(r=>notify=r);
+  await a.route('**/api/collaboration?*',async route=>{if(route.request().method()!=='POST')return route.continue();first=route.request().postDataJSON();await route.fetch();notify();await route.abort();});
+  await a.locator('.CodeMirror textarea').focus();await a.keyboard.press('Control+A');await a.keyboard.insertText('pending exact');await committed;
+  await a.getByText(/Shared save failed/).waitFor();
+  await a.locator('.CodeMirror textarea').focus();await a.keyboard.press('Control+A');await a.keyboard.insertText('newer unsent');
+  await a.close();
+  const b=await context.newPage(),replay=[];
+  await b.route('**/api/collaboration?*',route=>{if(route.request().method()==='POST')replay.push(route.request().postDataJSON());return route.continue();});
+  await open(b,base);
+  await b.getByRole('button',{name:'Find saved drafts'}).click();
+  const candidate=b.locator('[data-recovery-candidate]').filter({hasText:'newer unsent'});
+  await candidate.getByRole('button',{name:'Recover this draft'}).click();
+  await b.waitForFunction(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()==='newer unsent');
+  await b.getByText(/Shared draft ready/).waitFor({timeout:12000});
+  assert.deepEqual(replay[0],first);
+  assert.equal((await b.evaluate(()=>Object.values(localStorage).map(x=>{try{return JSON.parse(x).text}catch{return null}}))).includes('newer unsent'),true);
+}));
+
+
+test('multiple saved drafts and live tab survive navigation and lockless copy fallback', {timeout:90000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),a=await context.newPage(),b=await context.newPage(),live=await context.newPage();
+  for(const page of [a,b,live]) {await open(page,base);await page.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());}
+  async function edit(page,text){await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(text);await page.getByText(/Shared save failed/).waitFor();}
+  await edit(a,'orphan one');await edit(b,'orphan two');await edit(live,'active draft');
+  const saved=await live.evaluate(()=>Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('bounty-board-report-draft-v2:'))));
+  await a.goto(base);await b.close();
+  await a.getByRole('button',{name:'Programs',exact:true}).click();await a.getByRole('button',{name:'Reports',exact:true}).click();await a.getByText(/Shared draft ready/).waitFor();
+  await a.getByRole('button',{name:'Find saved drafts'}).click();
+  for(const text of ['orphan one','orphan two','active draft'])await a.locator('[data-recovery-candidate]').filter({hasText:text}).waitFor();
+  const liveCard=a.locator('[data-recovery-candidate]').filter({hasText:'active draft'});
+  await liveCard.getByRole('button',{name:'Recover this draft'}).click();await liveCard.getByText(/belongs to a live tab/).waitFor();
+  assert.equal(await live.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'active draft');
+  for(const [key,value] of Object.entries(saved))assert.equal(await live.evaluate(k=>localStorage.getItem(k),key),value);
+  const lockless=await context.newPage();await lockless.addInitScript(()=>Object.defineProperty(navigator,'locks',{value:undefined}));await open(lockless,base);
+  await lockless.getByRole('button',{name:'Find saved drafts'}).click();
+  const fallback=lockless.locator('[data-recovery-candidate]').filter({hasText:'orphan two'});
+  await fallback.getByRole('button',{name:'Recover this draft'}).click();await fallback.getByText(/Select and copy the draft text/).waitFor();
+  assert.equal(await fallback.getByLabel('Saved draft (select and copy if recovery is unavailable)').inputValue(),'orphan two');
+  assert.ok(JSON.parse(await fallback.getByLabel('Pending request (copy for manual recovery if needed)').inputValue()).request_id);
+  for(const [key,value] of Object.entries(saved))assert.equal(await live.evaluate(k=>localStorage.getItem(k),key),value);
+  await lockless.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
+  await edit(lockless,'active without locks');
+  await a.getByRole('button',{name:'Find saved drafts'}).click();
+  const locklessLive=a.locator('[data-recovery-candidate]').filter({hasText:'active without locks'});
+  await locklessLive.getByRole('button',{name:'Recover this draft'}).click();
+  await locklessLive.getByText(/older or lockless draft cannot be safely claimed/).waitFor();
+  assert.equal(await lockless.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'active without locks');
+}));
+
+test('a cloned reload cannot claim a live lockless namespace', {timeout:60000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),a=await context.newPage();
+  await a.addInitScript(()=>Object.defineProperty(navigator,'locks',{value:undefined}));await open(a,base);
+  await a.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
+  await a.locator('.CodeMirror textarea').focus();await a.keyboard.press('Control+A');await a.keyboard.insertText('live lockless');
+  await a.getByText(/Shared save failed/).waitFor();
+  const inherited=await a.evaluate(()=>window.name);
+  const b=await context.newPage();await b.addInitScript(name=>{window.name=name;const original=performance.getEntriesByType.bind(performance);performance.getEntriesByType=type=>type==='navigation'?[{type:'reload'}]:original(type);},inherited);
+  await b.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
+  await b.goto(base);await b.getByRole('button',{name:'Programs',exact:true}).click();await b.getByRole('button',{name:'Reports',exact:true}).click();await b.locator('.CodeMirror').waitFor();
+  assert.notEqual(await b.evaluate(()=>window.name),inherited,'live lockless namespace must not be reused by a cloned reload');
+  assert.equal(await a.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'live lockless');
+}));

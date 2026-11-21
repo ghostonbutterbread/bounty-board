@@ -19,15 +19,16 @@
   let unidentifiedSequence=0;
   const rootIdentity = () => /^[a-f0-9]{64}$/.test(state.data?.root_identity || '') ? state.data.root_identity : null;
   const draftKey = (program,lane,id) => JSON.stringify([rootIdentity() || state.unidentifiedRoot,program,lane,String(id)]);
-  let tabId, tabReloadRecovery=true;
+  let tabId, tabReloadRecovery=true, tabLockHeld=false;
   // Cloned sessions may inherit both window.name and sessionStorage, including
   // a reload navigation. An origin-scoped Web Lock arbitrates live ownership.
   // Without Web Locks use a fresh namespace, preferring no overwrite over reload
   // recovery; the browser-local (non-collaboration) namespace is unaffected.
   async function claimTab() {
     const prefix='bounty-board-tab:';
-    let candidate;
-    try {const nav=performance.getEntriesByType('navigation')[0];candidate=nav?.type==='reload' && window.name.startsWith(prefix) ? window.name.slice(prefix.length) : crypto.randomUUID();}
+    let candidate, locked=false;
+    try {const nav=performance.getEntriesByType('navigation')[0], inherited=nav?.type==='reload' && window.name.startsWith(prefix) ? window.name.slice(prefix.length) : '';
+      candidate=inherited && localStorage.getItem('bounty-board-lock-owner:'+inherited)==='locked' ? inherited : crypto.randomUUID();}
     catch {candidate=crypto.randomUUID();}
     if(navigator.locks) {
       for(;;) {
@@ -38,11 +39,11 @@
             resolve(true);await new Promise(()=>{});
           }).catch(()=>resolve(null));
         });
-        if(acquired===true)break;
+        if(acquired===true){locked=true;break;}
         candidate=crypto.randomUUID();if(acquired===null){tabReloadRecovery=false;break;}
       }
     } else {candidate=crypto.randomUUID();tabReloadRecovery=false;}
-    tabId=candidate;try {window.name=prefix+tabId;} catch {}
+    tabId=candidate;tabLockHeld=locked;try {window.name=prefix+tabId;} catch {}
   }
   const storageKey = key => `bounty-board-report-draft-v2:${key}${state.data?.capabilities?.collaboration ? ':'+tabId : ''}`;
   // This panel lives outside #app so navigation and editor rerenders cannot
@@ -57,15 +58,17 @@
   const recoveryCards=new Map();
   let editor = null;
   function persistDraft(draft) {
-    if (draft.storageBlocked || draft.storageUnreadable) return;
+    if (draft.storageBlocked || draft.storageUnreadable) return false;
     try {
       const current=localStorage.getItem(storageKey(draft.key));
-      if(current!==draft.storageSnapshot){draft.storageBlocked=true;return;}
+      if(current!==draft.storageSnapshot){draft.storageBlocked=true;return false;}
       const next=JSON.stringify({version:1,text:draft.text,original:draft.original,revision:draft.revision ?? null,conflict:draft.status==='conflict',conflictId:draft.conflictId ?? null,conflictBase:draft.conflictBase ?? null,staleResolution:!!draft.staleResolution,hasDraft:draft.hasDraft,pendingShared:draft.pendingShared ?? null});
       localStorage.setItem(storageKey(draft.key),next);
+      if(localStorage.getItem(storageKey(draft.key))!==next){draft.storageBlocked=true;return false;}
       draft.storageSnapshot=next;
       draft.storageError=false;
-    } catch { draft.storageError=true; }
+      return true;
+    } catch { draft.storageError=true;return false; }
   }
   function reconcileReport(draft,report) {
     const content=report.content == null ? null : String(report.content), revision=report.revision ?? null;
@@ -78,6 +81,7 @@
     draft.source=report;draft.observedContent=content;draft.observedRevision=revision;
   }
   const draftFor = report => {
+    if(state.data?.capabilities?.collaboration && tabLockHeld){try{localStorage.setItem('bounty-board-lock-owner:'+tabId,'locked');}catch{}}
     const key = draftKey(state.program,state.lane,report.id);
     if (!state.drafts.has(key)) {
       const original=String(report.content ?? '');
@@ -276,20 +280,70 @@
     }
     const draft=draftFor(report);
     if(state.data?.capabilities?.collaboration && !draft.collabStarted) startCollaboration(draft, currentProgram(), report.path);
-    const status=reportStatus(draft)+(draft.undoNotice ? ` ${draft.undoNotice}` : '');
+    const status=reportStatus(draft)+(draft.historyGaps?.length ? ' History is incomplete; fetching missing pages.' : '')+(draft.undoNotice ? ` ${draft.undoNotice}` : '');
     const unavailableSource=report.loadState==='error' ? '<div class="message warning">Report could not be loaded. Source is unavailable; your draft is shown below. Refresh the workspace to retry.</div>' : '';
-    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}${unavailableSource}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><p class="hint">Drafts are stored in this browser and can be lost if browser data is cleared. They are not saved to the report. Older unscoped drafts are retained but not automatically imported.</p><button class="button" disabled title="Report writing is disabled to protect source files">Save to report unavailable</button>${state.data?.capabilities?.collaboration ? '<div id="collaboration-history"></div>' : ''}<div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
+    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}${unavailableSource}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><p class="hint">Drafts are stored in this browser and can be lost if browser data is cleared. They are not saved to the report. Older unscoped drafts are retained but not automatically imported.</p><button class="button" disabled title="Report writing is disabled to protect source files">Save to report unavailable</button>${state.data?.capabilities?.collaboration ? '<div id="orphan-drafts"><button type="button" class="button" data-find-drafts>Find saved drafts</button><div data-draft-candidates></div></div><div id="collaboration-history"></div>' : ''}<div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
+  }
+  function findSavedDrafts(draft) {
+    const box=app.querySelector('[data-draft-candidates]');if(!box || !rootIdentity())return;
+    box.replaceChildren();
+    const note=document.createElement('p');note.textContent='Saved drafts for this report are retained. A live tab cannot be recovered; copy its text instead. Recovery leaves the original untouched.';box.append(note);
+    const prefix=`bounty-board-report-draft-v2:${draft.key}:`;
+    try {
+      for(let i=0;i<localStorage.length;i++){
+        const key=localStorage.key(i);if(!key?.startsWith(prefix) || key===storageKey(draft.key))continue;
+        const namespace=key.slice(prefix.length);if(!/^[0-9a-f-]{36}$/i.test(namespace))continue;
+        const raw=localStorage.getItem(key);let saved;try {saved=JSON.parse(raw);}catch{continue;}
+        if(!saved || saved.version!==1 || typeof saved.text!=='string' || typeof saved.original!=='string' || !(saved.revision===null || typeof saved.revision==='string') || (!saved.hasDraft && !saved.pendingShared))continue;
+        const card=document.createElement('section');card.dataset.recoveryCandidate='';
+        const label=document.createElement('label');label.textContent='Saved draft (select and copy if recovery is unavailable)';
+        const text=document.createElement('textarea');text.readOnly=true;text.rows=4;text.textContent=saved.text;label.append(text);card.append(label);
+        if(saved.pendingShared){const pendingLabel=document.createElement('label');pendingLabel.textContent='Pending request (copy for manual recovery if needed)';const pendingText=document.createElement('textarea');pendingText.readOnly=true;pendingText.rows=3;pendingText.textContent=JSON.stringify(saved.pendingShared);pendingLabel.append(pendingText);card.append(pendingLabel);}
+        const status=document.createElement('p');status.setAttribute('role','status');card.append(status);
+        const button=document.createElement('button');button.type='button';button.className='button';button.textContent='Recover this draft';card.append(button);box.append(card);
+        button.addEventListener('click',async()=>{
+          if(!navigator.locks || !tabReloadRecovery){status.textContent='Safe recovery is unavailable in this browser. Select and copy the draft text.';return;}
+          try {
+            await navigator.locks.request('bounty-board-tab:'+namespace,{ifAvailable:true},async lock=>{
+              if(!lock){status.textContent='This draft belongs to a live tab. Copy the text instead; no data was changed.';return;}
+              if(localStorage.getItem('bounty-board-lock-owner:'+namespace)!=='locked'){status.textContent='This older or lockless draft cannot be safely claimed. Select and copy its text.';return;}
+              if(localStorage.getItem(key)!==raw){status.textContent='The saved draft changed. Find saved drafts again.';return;}
+              if(draft.hasDraft || draft.pendingShared || draft.storageBlocked || draft.storageUnreadable || draft.storageError || localStorage.getItem(storageKey(draft.key))!==draft.storageSnapshot){status.textContent='This tab already has unsaved or changed data. Copy the draft instead.';return;}
+              if(saved.pendingShared && (typeof saved.pendingShared!=='object' || typeof saved.pendingShared.content!=='string' || typeof saved.pendingShared.request_id!=='string' || typeof saved.pendingShared.base!=='string')){status.textContent='Pending request cannot be safely replayed. Copy the text instead.';return;}
+              Object.assign(draft,{text:saved.text,original:saved.original,revision:saved.revision,hasDraft:saved.hasDraft!==false,conflictId:saved.conflictId,conflictBase:saved.conflictBase,staleResolution:!!saved.staleResolution,pendingShared:saved.pendingShared||null,status:saved.conflict?'conflict':'unsaved'});
+              const persisted=persistDraft(draft);
+              if(draftKey(state.program,state.lane,state.report)===draft.key){
+                draft.applyingRemote=true;try {if(editor)editor.value(draft.text);}finally{draft.applyingRemote=false;}
+                const preview=document.querySelector('#report-preview');if(preview)preview.innerHTML=markdown(draft.text);
+              }
+              if(!persisted){status.textContent='Recovery could not be saved in this tab. Copy the draft before leaving; the original remains unchanged.';refreshStatus(draft);renderRecovery();return;}
+              status.textContent='Recovered into this tab; original saved draft retained.';
+              draft.collabMessage=draft.status==='conflict' ? 'Conflict: your draft is preserved. Compare history and submit a resolution.' : 'Recovered local draft; saving shared draft…';
+              showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);
+              if(draft.status!=='conflict')scheduleSharedSave(draft,0);
+            });
+          }catch{status.textContent='Safe recovery failed. Select and copy the draft text.';}
+        });
+      }
+    } catch {note.textContent='Saved drafts could not be read from browser storage.';}
   }
   function startCollaboration(draft, program, path) {
     draft.collabStarted=true; draft.collabProgram={family:program.family,name:program.name}; draft.collabPath=path; draft.collabRoot=rootIdentity();
     pollShared(draft);
   }
+  function conflictFresh(draft,item) {
+    return (draft.historyRecent||[]).some(row=>row.id===item.id) || draft.conflictFreshness?.get(item.id)===draft.historyToken;
+  }
+  function rememberConflictPage(draft,items,token) {
+    draft.conflictFreshness ||= new Map();
+    for(const item of items)if(item.kind.endsWith(':conflict'))draft.conflictFreshness.set(item.id,token);
+  }
   function showSharedHistory(draft, history) {
     const box=document.querySelector('#collaboration-history');
     if(!box || draftKey(state.program,state.lane,state.report)!==draft.key) return;
     const wasOpen=box.querySelector('details')?.open;
-    box.innerHTML=`<details ${wasOpen?'open':''}><summary>Shared history and conflicts</summary>`+history.map(item=>
-      `<div class="record"><strong><span>Event #${esc(item.id)}</span> · <span>${esc(item.kind)}</span>${item.kind.endsWith(':conflict') ? (item.resolved_revision ? ' (resolved)' : ' (unresolved)') : ''}</strong> <span>Revision ${esc(item.revision.slice(0,12))}${item.head!==item.revision ? ` · result ${esc(item.head.slice(0,12))}` : ''}</span><button type="button" class="button" data-version="${esc(item.id)}">Preview this version</button>${item.head!==item.revision ? `<button type="button" class="button" data-result="${esc(item.id)}">Preview resulting revision</button>` : ''}${item.kind.endsWith(':conflict') && !item.resolved_revision ? `<button type="button" class="button" data-conflict="${esc(item.id)}">Resolve conflict ${esc(item.id)} with editor</button>` : ''}</div>`).join('')+(draft.historyBefore ? '<button type="button" class="button" data-older>Load older history</button>' : '')+
+    box.innerHTML=`<details ${wasOpen?'open':''}><summary>Shared history and conflicts</summary>`+(draft.historyGaps?.length ? '<p role="status">History is incomplete; fetching missing pages. Keep this page open.</p>' : '')+history.map(item=>
+      `<div class="record"><strong><span>Event #${esc(item.id)}</span> · <span>${esc(item.kind)}</span>${item.kind.endsWith(':conflict') ? (item.resolved_revision ? ' (resolved)' : ' (unresolved)') : ''}</strong> <span>Revision ${esc(item.revision.slice(0,12))}${item.head!==item.revision ? ` · result ${esc(item.head.slice(0,12))}` : ''}</span><button type="button" class="button" data-version="${esc(item.id)}">Preview this version</button>${item.head!==item.revision ? `<button type="button" class="button" data-result="${esc(item.id)}">Preview resulting revision</button>` : ''}${item.kind.endsWith(':conflict') && !item.resolved_revision ? `<button type="button" class="button" data-conflict="${esc(item.id)}" ${conflictFresh(draft,item)?'':'disabled'}>Resolve conflict ${esc(item.id)} with editor</button>${conflictFresh(draft,item)?'':` <span>Conflict status may be stale.</span> <button type="button" class="button" data-refresh-conflict="${esc(item.id)}">Refresh conflict ${esc(item.id)} status</button>`}` : ''}</div>`).join('')+(draft.historyBefore ? '<button type="button" class="button" data-older>Load older history</button>' : '')+
       (draft.versionPreview ? `<section class="panel-pad"><h3>Preview event #${esc(draft.versionPreview.id)} · revision ${esc(draft.versionPreview.revision)}</h3><label>Version preview<textarea readonly aria-label="Version preview">${esc(draft.versionPreview.value)}</textarea></label><button type="button" class="button" data-confirm-version>Confirm restore version</button><button type="button" class="button" data-cancel-version>Cancel preview</button></section>` : '')+'</details>' +
       (draft.retryExhausted ? '<button type="button" class="button" data-retry>Retry shared save</button>' : '') +
       (draft.staleResolution && draft.conflictBase ? '<button type="button" class="button" data-reopen>Retry as a new edit</button>' : '') +
@@ -316,7 +370,7 @@
     box.querySelectorAll('[data-version]').forEach(button=>button.addEventListener('click',()=>useVersion(button.dataset.version,false)));
     box.querySelectorAll('[data-result]').forEach(button=>button.addEventListener('click',()=>useVersion(button.dataset.result,true)));
     box.querySelector('[data-older]')?.addEventListener('click',async()=>{
-      const before=draft.historyBefore; if(draft.historyLoading)return;draft.historyLoading=true;
+      const before=draft.historyBefore, token=draft.historyToken; if(draft.historyLoading)return;draft.historyLoading=true;
       // Preserve the boundary before awaiting: a poll can slide the recent page
       // while the older-page request is in flight.
       draft.historyPaged=true;
@@ -324,6 +378,7 @@
       for(const item of draft.historyRecent||[])retained.set(item.id,item);
       draft.historyOlder=[...retained.values()];
       try {const page=await BoardAPI.collaborationRead(draft.collabProgram,draft.lane,draft.collabPath,draft.collabRoot,'history',{before});
+        rememberConflictPage(draft,page.history,token);
         const entries=new Map((draft.historyOlder||[]).map(item=>[item.id,item]));for(const item of page.history)entries.set(item.id,item);
         draft.historyOlder=[...entries.values()];draft.historyPaged=true;
         const all=new Map(draft.historyOlder.map(item=>[item.id,item]));for(const item of draft.historyRecent||[])all.set(item.id,item);
@@ -333,6 +388,17 @@
     });
     box.querySelector('[data-retry]')?.addEventListener('click',()=>{draft.retryExhausted=false;draft.retryAttempts=0;draft.pollAttempts=0;draft.pollRetryAt=0;showSharedHistory(draft,draft.sharedHistory || []);if(draft.collabReady && draft.hasDraft)scheduleSharedSave(draft,0);else pollShared(draft);});
     box.querySelector('[data-reopen]')?.addEventListener('click',()=>{draft.revision=draft.conflictBase;draft.conflictId=null;draft.staleResolution=false;draft.status='unsaved';draft.collabMessage='Retrying as a new edit against the original base…';persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);scheduleSharedSave(draft,0);});
+    box.querySelectorAll('[data-refresh-conflict]').forEach(button=>button.addEventListener('click',async()=>{
+      const id=Number(button.dataset.refreshConflict),token=draft.historyToken;
+      button.disabled=true;
+      try {
+        const page=await BoardAPI.collaborationRead(draft.collabProgram,draft.lane,draft.collabPath,draft.collabRoot,'history',{before:id+1});
+        const row=page.history.find(item=>item.id===id);
+        if(!row)throw new Error('Conflict missing');
+        for(const list of [draft.historyOlder,draft.historyRecent,draft.sharedHistory])for(let i=0;i<(list||[]).length;i++)if(list[i].id===id)list[i]=row;
+        rememberConflictPage(draft,[row],token);showSharedHistory(draft,draft.sharedHistory||[]);
+      } catch {draft.collabMessage='Conflict status could not be refreshed. Retry before resolving.';showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);}
+    }));
     const resolve=(id)=>{
       if(!draft.sharedRevision)return;
       draft.conflictId=id; draft.revision=draft.sharedRevision; draft.status='unsaved'; draft.collabMessage='Submitting resolution…';
@@ -386,10 +452,27 @@
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,null,draft.collabRoot);
       draft.sharedRevision=result.revision;draft.pollAttempts=0;draft.pollRetryAt=0;
       const recent=result.history || [];
-      // Once browsing older pages, retain the previously visible boundary so a
-      // sliding recent page cannot silently skip events between the two ranges.
-      if(draft.historyPaged){const older=new Map((draft.historyOlder||[]).map(item=>[item.id,item]));for(const item of draft.historyRecent||[])older.set(item.id,item);draft.historyOlder=[...older.values()];}
+      const previous=draft.historyRecent||[];
+      const priorHead=previous.length ? Math.max(...previous.map(item=>item.id)) : null;
+      const missed=priorHead!==null && recent.length && !recent.some(item=>previous.some(old=>old.id===item.id)) && Math.min(...recent.map(item=>item.id))>priorHead;
+      if(draft.historyToken===undefined)draft.historyToken=0;
+      else if((result.unresolved_count!=null && draft.unresolvedCount!=null && result.unresolved_count!==draft.unresolvedCount) || missed || recent.some(item=>item.id>priorHead && item.kind.startsWith('resolution:')))draft.historyToken++;
+      // A full recent page without an overlap may have skipped events. Keep
+      // each missing interval until a cursor page reaches its old boundary.
+      if(draft.historyPaged && previous.length && recent.length && !recent.some(item=>previous.some(old=>old.id===item.id)) && Math.min(...recent.map(item=>item.id))>Math.max(...previous.map(item=>item.id))){
+        (draft.historyGaps ||= []).push({before:Math.min(...recent.map(item=>item.id)),anchor:Math.max(...previous.map(item=>item.id))});
+      }
+      if(draft.historyPaged){const older=new Map((draft.historyOlder||[]).map(item=>[item.id,item]));for(const item of previous)older.set(item.id,item);draft.historyOlder=[...older.values()];}
       draft.historyRecent=recent;
+      if(draft.historyGaps?.length){
+        showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);
+        const gap=draft.historyGaps[0];
+        // One bounded page per poll; a failure leaves the cursor intact.
+        const page=await BoardAPI.collaborationRead(draft.collabProgram,draft.lane,draft.collabPath,draft.collabRoot,'history',{before:gap.before});
+        const older=new Map((draft.historyOlder||[]).map(item=>[item.id,item]));for(const item of page.history)older.set(item.id,item);draft.historyOlder=[...older.values()];
+        if(!page.next_before || page.history.some(item=>item.id<=gap.anchor))draft.historyGaps.shift();
+        else gap.before=page.next_before;
+      }
       const entries=new Map((draft.historyOlder||[]).map(item=>[item.id,item]));for(const item of recent)entries.set(item.id,item);
       draft.sharedHistory=[...entries.values()].sort((a,b)=>b.id-a.id);
       if(!draft.historyPaged)draft.historyBefore=recent.length===50 ? Math.min(...recent.map(item=>item.id)) : null;
@@ -419,8 +502,9 @@
     }
   }
   function scheduleSharedSave(draft, delay=500) {
-    if(draft.retryExhausted)return;
-    clearTimeout(draft.saveTimer); draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
+    clearTimeout(draft.saveTimer);
+    if(draft.retryExhausted || draft.storageBlocked || draft.storageUnreadable || draft.storageError)return;
+    draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
   }
   async function saveShared(draft) {
     if(draft.collabBusy || !draft.collabReady || draft.status==='conflict') return;
@@ -429,7 +513,7 @@
     if(draft.conflictId && !draft.pendingShared)pending.conflict_id=draft.conflictId;
     draft.pendingShared=pending;
     // Persist the exact idempotency payload before it can reach the server.
-    persistDraft(draft);
+    if(!persistDraft(draft)){draft.collabBusy=false;refreshStatus(draft);renderRecovery();return;}
     try {
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,pending,draft.collabRoot);
       draft.pendingShared=null; draft.sharedRevision=result.revision; draft.retryAttempts=0;
@@ -497,7 +581,8 @@
   }
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
-    if(target.hasAttribute('data-go-program')){state.view='program';render();}
+    if(target.hasAttribute('data-find-drafts')){const report=reportById(state.report);if(report)findSavedDrafts(draftFor(report));}
+    else if(target.hasAttribute('data-go-program')){state.view='program';render();}
     else if(target.hasAttribute('data-open-program')){state.program=target.dataset.openProgram;state.lane='';normalizeSelection();state.view='program';state.section='findings';render();}
     else if(target.dataset.section){state.section=target.dataset.section;render();}
     else if(target.hasAttribute('data-rationale-edit')){
@@ -546,7 +631,7 @@
     refreshStatus(draft);
     renderRecovery();
   }
-  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && draftKey(state.program,state.lane,state.report)===draft.key)status.textContent=reportStatus(draft)+(draft.undoNotice ? ` ${draft.undoNotice}` : '');}
+  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && draftKey(state.program,state.lane,state.report)===draft.key)status.textContent=reportStatus(draft)+(draft.historyGaps?.length ? ' History is incomplete; fetching missing pages.' : '')+(draft.undoNotice ? ` ${draft.undoNotice}` : '');}
   window.addEventListener('storage',event=>{
     for(const draft of state.drafts.values()) if(event.key===storageKey(draft.key) || event.key===null){
       draft.storageBlocked=true;refreshStatus(draft);
