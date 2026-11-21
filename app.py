@@ -292,6 +292,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     collaboration_lock = threading.RLock()
     # Progress is per server: an incomplete sweep never permits a new exchange.
     retained_cursors = {}
+    # A completed multi-request sweep can authorize one immediately following
+    # explicit reconciliation, provided no publication operation was added.
+    retained_ready = {}
     retained_scan_limit = 64
 
     def reconcile_retained(key):
@@ -300,6 +303,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         from report_publisher import retained_snapshot
         assert collaboration is not None
         cursor, uncertain = retained_cursors.get(key, (0, False))
+        retained_ready.pop(key, None)
         rows = collaboration.publication_page(key, cursor, retained_scan_limit + 1)
         for _, operation, state in rows[:retained_scan_limit]:
             uncertain |= state in ('pending', 'outcome_uncertain')
@@ -322,6 +326,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             retained_cursors[key] = (rows[retained_scan_limit - 1][0], uncertain)
         else:
             retained_cursors.pop(key, None)
+            if cursor and not uncertain:
+                retained_ready[key] = rows[-1][0] if rows else cursor
         state = 'backlog' if incomplete else ('uncertain' if uncertain else 'complete')
         return {'state': state, 'scanned': min(len(rows), retained_scan_limit)}
 
@@ -418,11 +424,18 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 30_050_000:
                         raise ValueError('invalid length')
                     payload = json.loads(self.rfile.read(int(lengths[0])))
-                    if not isinstance(payload, dict) or set(payload) not in ({'base', 'content', 'request_id'}, {'base', 'content', 'request_id', 'conflict_id'}, {'action', 'revision'}):
+                    if not isinstance(payload, dict) or set(payload) not in ({'base', 'content', 'request_id'}, {'base', 'content', 'request_id', 'conflict_id'}, {'action', 'revision'}, {'action', 'base', 'content', 'source_snapshot', 'request_id'}):
                         raise ValueError('invalid payload')
-                    if 'action' in payload and (payload['action'] != 'publish' or not isinstance(payload['revision'], str)):
-                        raise ValueError('invalid action')
-                    if 'action' not in payload and not all(isinstance(payload[k], str) and payload[k] for k in ('base', 'request_id')):
+                    if 'action' in payload:
+                        if payload['action'] == 'publish':
+                            if set(payload) != {'action', 'revision'} or not isinstance(payload['revision'], str):
+                                raise ValueError('invalid action')
+                        elif payload['action'] == 'reconcile':
+                            if set(payload) != {'action', 'base', 'content', 'source_snapshot', 'request_id'} or not all(isinstance(payload[k], str) for k in ('base', 'content', 'source_snapshot', 'request_id')) or not payload['base'] or not payload['request_id']:
+                                raise ValueError('invalid action')
+                        else:
+                            raise ValueError('invalid action')
+                    elif not all(isinstance(payload[k], str) and payload[k] for k in ('base', 'request_id')):
                         raise ValueError('invalid payload')
                 with collaboration_lock, collaboration.observation():
                     collaboration.bind_source(root)
@@ -438,7 +451,11 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         if scan_source is not None:
                             collaboration.observe_source(key, scan_source)
                         try:
-                            reconciliation = reconcile_retained(key)
+                            ready = retained_ready.pop(key, None) if write and payload.get('action') == 'reconcile' else None
+                            if ready is not None and not collaboration.publication_page(key, ready, 1):
+                                reconciliation = {'state': 'complete', 'scanned': 0}
+                            else:
+                                reconciliation = reconcile_retained(key)
                         except (OSError, UnicodeError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError):
                             return self.reply(503, {'error': 'retained_reconciliation_unavailable',
                                                     'message': 'Retain your local draft and retry; retained history could not be checked.'})
@@ -483,9 +500,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         if current is None:
                             return self.reply(404, {'error': 'source_unavailable'})
                         if write:
-                            if 'action' not in payload:
+                            if payload.get('action') != 'publish':
                                 receipt = collaboration.receipt(key, payload['base'], payload['content'],
-                                                                payload['request_id'], payload.get('conflict_id'))
+                                                                payload['request_id'], payload.get('conflict_id'), payload.get('source_snapshot'))
                                 if receipt is not None:
                                     if report_autosave:
                                         from report_publisher import operation_id
@@ -541,13 +558,23 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                             return self.reply(409, {'error': 'publication_changed'})
                         result = {'status': 'published', 'revision': current['revision']}
                     elif write:
+                        explicit_reconcile = payload.get('action') == 'reconcile'
+                        if explicit_reconcile and not report_autosave:
+                            return self.reply(403, {'error': 'publication_disabled'})
                         before_submit = collaboration.current(key)
                         needs_reconciliation = (report_autosave and before_submit is not None and
-                                                before_submit['content'] != content)
+                                                (before_submit['content'] != content or payload.get('conflict_id') is not None))
                         previous_receipt = (collaboration.receipt(key, payload['base'], payload['content'],
-                                                                  payload['request_id'], payload.get('conflict_id'))
+                                                                  payload['request_id'], payload.get('conflict_id'), payload.get('source_snapshot'))
                                             if report_autosave else None)
-                        result = collaboration.submit(key, payload['base'], payload['content'], payload['request_id'], payload.get('conflict_id'))
+                        if explicit_reconcile and previous_receipt is None:
+                            assert reconciliation is not None
+                            if (reconciliation['state'] != 'complete' or before_submit is None or
+                                    before_submit['revision'] != payload['base'] or before_submit['content'] != payload['content'] or
+                                    payload['source_snapshot'] != content or content != scan_source or collaboration.unresolved_count(key)):
+                                return self.reply(409, {'error': 'reconciliation_changed', 'message': 'Review the current shared draft and Markdown before trying again.'})
+                            needs_reconciliation = False
+                        result = collaboration.submit(key, payload['base'], payload['content'], payload['request_id'], payload.get('conflict_id'), payload.get('source_snapshot'))
                         if report_autosave:
                             assert reconciliation is not None
                             from report_publisher import inspect, operation_id, publish, retained_snapshot
@@ -618,6 +645,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         page = collaboration.history_page(key)
                         result['history'] = page['history']
                         result['unresolved_count'] = page['unresolved_count']
+                        if report_autosave:
+                            result['source_snapshot'] = content
                 if reconciliation is not None:
                     result['reconciliation'] = reconciliation
                 return self.reply(200, result)
