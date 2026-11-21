@@ -29,7 +29,12 @@ inside the root. An unavailable root uses the normal full response. If the
 full request fails, the browser retains the summary and offers Refresh.
 Refresh itself follows the existing full-load path. A focused control or draft
 defers application until the user chooses it; the source identity is checked
-again then. The projection still reads ledger, map and coverage synchronously,
+again then. A newer Apply attempt supersedes earlier checks; navigation or
+Refresh prevents an outstanding check from applying its snapshot. A failed
+completion leaves report totals unknown, including for an empty summary.
+Summary-scoped lazy MapStore and gadget observations include the root instance
+and fail visibly on a changed root, without replacing the retained summary.
+The projection still reads ledger, map and coverage synchronously,
 so those sources can delay it; no production latency improvement is implied.
 
 JSON shape (all collections are lane-scoped):
@@ -55,7 +60,7 @@ SQLite kind values are grouped under their JSON object-name spelling in `mapped_
 
 ## `GET /api/map-observation?family=web_bounty&program=example&lane=web&path=_app%2Fexample%2Findex.md`
 
-This read-only endpoint re-reads the selected lane's current `recon/maps/map.jsonl` and requires exactly one entry with an exact relative `path` match. All four query selectors must occur once. The selected index and body are opened componentwise without following symlinks, bounded at 5 MB each, and must be regular files containing UTF-8. The body path must end in `index.md` and cannot contain empty, dot, traversal or absolute components. An invalid, unavailable or ambiguous index, unindexed or unsafe path, missing body, wrong lane, bad UTF-8 or oversized file returns `404 {"error":"observation_not_found_or_unavailable"}` with no filesystem path. Success returns `200 {"content":"<exact UTF-8 text>"}`. The current index and body are not an atomic snapshot against concurrent writers. The interface displays body text inertly, not as rendered HTML or links; it makes no inference about free-form capability fields or whether a gadget is confirmed.
+This read-only endpoint re-reads the selected lane's current `recon/maps/map.jsonl` and requires exactly one entry with an exact relative `path` match. All four query selectors must occur once. An optional `root_instance` may occur once; when supplied, the server checks the current root instance before and after the index/body read and returns `409 {"error":"root_changed"}` on a mismatch. A request without this optional parameter retains the ordinary full/writer-mode behavior. These checks are not an atomic filesystem snapshot, do not detect every same-inode internal change or ABA replacement, and cannot prevent a swap after the final check. The selected index and body are opened componentwise without following symlinks, bounded at 5 MB each, and must be regular files containing UTF-8. The body path must end in `index.md` and cannot contain empty, dot, traversal or absolute components. An invalid, unavailable or ambiguous index, unindexed or unsafe path, missing body, wrong lane, bad UTF-8 or oversized file returns `404 {"error":"observation_not_found_or_unavailable"}` with no filesystem path. Success returns `200 {"content":"<exact UTF-8 text>"}`. The current index and body are not an atomic snapshot against concurrent writers. The interface displays body text inertly, not as rendered HTML or links; it makes no inference about free-form capability fields or whether a gadget is confirmed.
 
 ## `PATCH /api/finding`
 

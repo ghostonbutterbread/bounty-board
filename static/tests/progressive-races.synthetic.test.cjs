@@ -107,6 +107,108 @@ test('deferred report result is rejected if root changes before apply', async()=
   assert.equal(await page.getByRole('button',{name:'Apply loaded reports'}).count(),0);
 }));
 
+for (const order of ['newer-first','older-first']) test(`concurrent apply checks invalidate older result (${order})`, async()=>fixture(async({root,page,url})=>{
+  let checks=0, releaseOld, releaseNew, oldReady, newReady;
+  const oldGate=new Promise(r=>releaseOld=r), newGate=new Promise(r=>releaseNew=r);
+  const oldArrived=new Promise(r=>oldReady=r), newArrived=new Promise(r=>newReady=r);
+  let oldDone, newDone;
+  const oldFinished=new Promise(r=>oldDone=r), newFinished=new Promise(r=>newDone=r);
+  await page.addInitScript(()=>{
+    const fetchOriginal=window.fetch;
+    window.__identityReads=0;
+    window.fetch=async (...args)=>{
+      const response=await fetchOriginal(...args);
+      if(String(args[0]).includes('/api/data?phase=identity')){
+        const json=response.json.bind(response);
+        response.json=async()=>{const value=await json();window.__identityReads++;return value;};
+      }
+      return response;
+    };
+  });
+  await page.route('**/api/data?phase=identity',async route=>{
+    const n=++checks, response=await route.fetch();
+    if(n===1){oldReady();await oldGate;await route.fulfill({response});oldDone();}
+    else {newReady();await newGate;await route.fulfill({response});newDone();}
+  });
+  try {
+    await page.goto(url);await held(root);await page.locator('#dashboard-program').focus();
+    fs.writeFileSync(path.join(root,'release'),'release');
+    const apply=page.getByRole('button',{name:'Apply loaded reports'});await apply.waitFor();
+    await apply.click();await oldArrived;
+    fs.renameSync(path.join(root,'source'),path.join(root,'old-source'));fs.mkdirSync(path.join(root,'source'));
+    await apply.click();await newArrived;
+    if(order==='newer-first') {
+      releaseNew();await newFinished;await page.getByText(/source changed.*Refresh to retry/).waitFor();
+      releaseOld();await oldFinished;
+    } else {
+      releaseOld();await oldFinished;await page.waitForFunction(()=>window.__identityReads===1);
+      assert.notEqual(await page.locator('.stat').filter({hasText:'Report records'}).locator('strong').innerText(),'1');
+      releaseNew();await newFinished;
+    }
+    await page.waitForFunction(()=>window.__identityReads===2);
+    await page.getByText(/source changed.*Refresh to retry/).waitFor();
+    assert.equal(await page.getByText(/source changed.*Refresh to retry/).count(),1);
+    assert.notEqual(await page.locator('.stat').filter({hasText:'Report records'}).locator('strong').innerText(),'1');
+  } finally {releaseOld();releaseNew();}
+}));
+
+for (const section of ['MapStore','Gadgets']) test(`partial ${section} refuses a replacement root observation`, async()=>fixture(async({root,page,url})=>{
+  const source=path.join(root,'source');
+  function put(title,body) {
+    const maps=path.join(source,'web_bounty/alpha/web/recon/maps');
+    fs.mkdirSync(path.join(maps,'x'),{recursive:true});
+    fs.writeFileSync(path.join(maps,'map.jsonl'),JSON.stringify({title,path:'x/index.md',tags:['gadget']})+'\n');
+    fs.writeFileSync(path.join(maps,'x/index.md'),body);
+  }
+  put('Old observation','OLD BODY');
+  const summary=page.waitForResponse(r=>r.request().headers()['x-bounty-board-phase']==='summary');
+  await page.goto(url);const token=(await (await summary).json()).root_instance;await held(root);
+  await page.getByRole('button',{name:'Open workspace'}).click();
+  await page.getByRole('button',{name:section,exact:true}).click();
+  await page.getByText('Old observation').waitFor();
+  const good=page.waitForResponse(r=>r.url().includes('/api/map-observation?'));
+  await page.getByRole('button',{name:'Open observation'}).click();
+  const goodResponse=await good;assert.equal(goodResponse.status(),200);
+  assert.equal(new URL(goodResponse.url()).searchParams.get('root_instance'),token);
+  await page.getByText('OLD BODY').waitFor();
+  fs.renameSync(source,path.join(root,'old-source'));put('New observation','REPLACEMENT BODY');
+  const rejected=page.waitForResponse(r=>r.url().includes('/api/map-observation?'));
+  await page.getByRole('button',{name:'Open observation'}).click();
+  assert.equal((await rejected).status(),409);
+  await page.getByText(/Observation unavailable/).waitFor({timeout:5000});
+  assert.equal(await page.getByText('REPLACEMENT BODY').count(),0);
+  assert.equal(await page.getByText('Old observation').count(),1);
+}));
+
+test('refresh cancels an outstanding apply check without overwriting the new snapshot', async()=>fixture(async({root,page,url})=>{
+  let release, reached, finished;const gate=new Promise(r=>release=r), ready=new Promise(r=>reached=r), done=new Promise(r=>finished=r);
+  let checks=0;
+  await page.route('**/api/data?phase=identity',async route=>{const response=await route.fetch();if(++checks===1){reached();await gate;}await route.fulfill({response});finished();});
+  try {
+    await page.goto(url);await held(root);await page.locator('#dashboard-program').focus();fs.writeFileSync(path.join(root,'release'),'release');
+    await page.getByRole('button',{name:'Apply loaded reports'}).click();await ready;
+    fs.writeFileSync(path.join(root,'source/web_bounty/alpha/web/ledgers/ledger.json'),JSON.stringify({findings:[{fid:'B',title:'After refresh'}]}));
+    await page.locator('#refresh').click();await page.getByRole('button',{name:'Open workspace'}).click();await page.getByText('After refresh').waitFor();
+    release();await done;await page.evaluate(()=>new Promise(r=>setTimeout(r,100)));
+    assert.equal(await page.getByText('After refresh').count(),1);
+    assert.equal(await page.getByText('Known synthetic finding').count(),0);
+  } finally {release();}
+}));
+
+test('navigation invalidates an automatic apply check but allows explicit retry', async()=>fixture(async({root,page,url})=>{
+  let release, reached;const gate=new Promise(r=>release=r), ready=new Promise(r=>reached=r);
+  await page.route('**/api/data?phase=identity',async route=>{const response=await route.fetch();reached();await gate;await route.fulfill({response});});
+  try {
+    await page.goto(url);await held(root);fs.writeFileSync(path.join(root,'release'),'release');await ready;
+    await page.getByRole('button',{name:'Open workspace'}).click();
+    const response=page.waitForResponse(r=>r.url().includes('phase=identity'));release();await response;
+    await page.getByRole('button',{name:'Apply loaded reports'}).waitFor({timeout:5000});
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('button',{name:'Apply loaded reports'}).focus();await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(e=>e.textContent.includes('Report records') && e.querySelector('strong')?.textContent==='1'));
+  } finally {release();}
+}));
+
 test('failed complete request retains summary and refresh retries', async()=>fixture(async({root,page,url})=>{
   let failed=false;
   await page.route('**/api/data?phase=complete**',async route=>{failed=true;await route.fulfill({status:500,contentType:'application/json',body:'{}'});});
@@ -117,6 +219,19 @@ test('failed complete request retains summary and refresh retries', async()=>fix
   fs.writeFileSync(path.join(root,'release'),'release');
   await page.locator('#refresh').click();
   await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(e=>e.textContent.includes('Report records') && e.querySelector('strong')?.textContent==='1'));
+}));
+
+test('empty summary stays unknown after complete failure and retry establishes zero', async()=>fixture(async({root,page,url})=>{
+  fs.rmSync(path.join(root,'source/web_bounty'),{recursive:true,force:true});
+  let fail=true;
+  await page.route('**/api/data?phase=complete**',route=>fail ? route.fulfill({status:500,contentType:'application/json',body:'{}'}) : route.continue());
+  await page.goto(url);
+  await page.getByText(/could not be loaded.*Refresh to retry/).waitFor();
+  const count=page.locator('.stat').filter({hasText:'Report records'}).locator('strong');
+  assert.equal(await count.innerText(),'Unknown');
+  fail=false;
+  await page.locator('#refresh').click();
+  await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(e=>e.textContent.includes('Report records') && e.querySelector('strong')?.textContent==='0'));
 }));
 
 test('a delayed summary does not begin the full read early', async()=>fixture(async({root,page,url})=>{

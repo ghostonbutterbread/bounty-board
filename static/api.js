@@ -48,8 +48,8 @@ window.BoardAPI = (() => {
     const query = new URLSearchParams({family:program.family,program:program.name,lane,path});
     return request(`/api/report?${query}`, {cache:'no-store'});
   }
-  function observation(program, lane, path) {
-    const query = new URLSearchParams({family:program.family,program:program.name,lane,path});
+  function observation(program, lane, path, rootInstance) {
+    const query = new URLSearchParams({family:program.family,program:program.name,lane,path,...(rootInstance ? {root_instance:rootInstance} : {})});
     return request(`/api/map-observation?${query}`, {cache:'no-store'});
   }
   function rootInstance() { return request('/api/data?phase=identity', {cache:'no-store'}); }

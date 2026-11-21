@@ -121,7 +121,7 @@
     if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
   }
   let pendingReportRefresh=null;
-  let loadGeneration=0;
+  let loadGeneration=0, applyGeneration=0, renderGeneration=0;
   const phaseStatus=document.createElement('div');
   phaseStatus.className='message';phaseStatus.setAttribute('role','status');phaseStatus.hidden=true;app.before(phaseStatus);
   function phaseMessage(text, apply) {
@@ -136,13 +136,19 @@
       if(!full || !Array.isArray(full.programs) || full.reports_loading!==false || full.root_identity!==summary.root_identity || full.root_instance!==summary.root_instance)throw new Error('Stale report snapshot');
       const apply=async()=>{
         if(generation!==loadGeneration || state.data!==summary)return;
+        const check=++applyGeneration, view=renderGeneration;
+        const stale=()=>{
+          if(check!==applyGeneration || generation!==loadGeneration || state.data!==summary)return true;
+          if(view!==renderGeneration){phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);return true;}
+          return false;
+        };
         if(hasUnrecoverableDraft()){phaseMessage('Reports loaded, but a draft needs recovery before applying them.');return;}
         try {
           const current=await BoardAPI.rootInstance();
-          if(generation!==loadGeneration || state.data!==summary)return;
+          if(stale())return;
           if(current.root_instance!==summary.root_instance)throw new Error('Root changed');
         } catch {
-          if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+          if(!stale()){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
           return;
         }
         if(hasUnrecoverableDraft()){phaseMessage('Reports loaded, but a draft needs recovery before applying them.');return;}
@@ -152,7 +158,7 @@
       if(app.contains(document.activeElement) || hasUnsaved())phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);
       else await apply();
     } catch {
-      if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+      if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
     }
   }
   const hasUnrecoverableDraft = () => [...state.drafts.values()].some(d=>d.hasDraft && (d.storageError || d.storageUnreadable || d.storageBlocked));
@@ -248,7 +254,7 @@
     const discovered=!discoveryIncomplete();
     const complete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.findings));
     const stat=(v,label)=>`<div class="stat"><strong>${esc(v)}</strong><span>${esc(label)}</span></div>`;
-    const reportsComplete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports) && !(reportsIncomplete(l)));
+    const reportsComplete=discovered && !state.data?.reports_unavailable && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports) && !(reportsIncomplete(l)));
     const submissionValues=field=>{
       const counts=new Map();for(const finding of all){const nested=finding.submission?.[field];const value=nested != null && nested !== '' ? nested : finding[field==='state'?'submission_status':'platform_outcome'];if(value!=null && value!=='')counts.set(String(value),(counts.get(String(value))||0)+1);}
       return [...counts].map(([value,count])=>`<div class="record"><span>${esc(value)}</span> <strong>${count}</strong></div>`).join('') || '<p class="hint">No recorded values available.</p>';
@@ -842,6 +848,7 @@
   }
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
   function render() {
+    ++renderGeneration;
     if(editor){editor.toTextArea();editor=null;}
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
@@ -871,7 +878,8 @@
       if(!item || !box || !program || typeof item.path!=='string')return;
       target.disabled=true;box.textContent='Loading observation…';
       try {
-        const result=await BoardAPI.observation(program,lane,item.path);
+        const partial=state.data?.reports_loading===true || state.data?.reports_unavailable===true;
+        const result=await BoardAPI.observation(program,lane,item.path,partial ? state.data.root_instance : undefined);
         if(!box.isConnected || currentProgram()!==program || state.lane!==lane || state.section!==section)return;
         if(typeof result.content!=='string')throw new Error('Invalid response');
         const pre=document.createElement('pre');pre.className='observation-body';pre.textContent=result.content;box.replaceChildren(pre);
