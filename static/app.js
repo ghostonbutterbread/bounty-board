@@ -2,7 +2,7 @@
   'use strict';
   const app = document.querySelector('#app');
   const theme = document.querySelector('#theme');
-  const state = {data:null, view:'dashboard', section:'findings', program:'', lane:'', filters:{severity:'',class:'',status:'',query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], rationaleDrafts:new Map()};
+  const state = {data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:'',class:'',status:'',query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], rationaleDrafts:new Map()};
   const sections = [['findings','Findings'],['coverage','Coverage'],['reports','Reports'],['map','MapStore'],['gadgets','Gadgets']];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const display = value => value == null || value === '' ? 'Unknown' : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -109,6 +109,7 @@
   document.querySelector('#refresh').addEventListener('click', load);
   function normalizeSelection() {
     const ps=programs();
+    if (state.dashboardProgram && !ps.some(p=>String(p.id)===state.dashboardProgram)) state.dashboardProgram='';
     if (!ps.some(p=>String(p.id)===state.program)) state.program=ps.length ? String(ps[0].id) : '';
     const lanes=list(currentProgram()?.lanes)||[];
     if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
@@ -162,8 +163,8 @@
     state.loading=false;try{render();}finally{pendingReportRefresh=null;finishRefresh();}
   }
   const opt = (value,label,selected) => `<option value="${esc(value)}"${selected?' selected':''}>${esc(label)}</option>`;
-  function warnings() {
-    const values=[...(list(state.data?.warnings)||[]),...(list(currentLane()?.warnings)||[])];
+  function warnings(lanes=[currentLane()]) {
+    const values=[...(list(state.data?.warnings)||[]),...lanes.flatMap(l=>list(l?.warnings)||[])];
     return values.map(w=>`<div class="message warning">${esc(typeof w==='object' ? (w.message ?? JSON.stringify(w)) : w)}</div>`).join('');
   }
   function selectors() {
@@ -173,13 +174,14 @@
   function title(title, subtitle, controls='') {return `<div class="titlebar"><div><h1>${esc(title)}</h1><p class="subtitle">${esc(subtitle)}</p></div>${controls}</div>`;}
   const discoveryIncomplete = () => state.data?.root_unavailable === true || state.data?.discovery_incomplete === true || (list(state.data?.warnings)||[]).some(w=>w==='root_unavailable'||w==='discovery_incomplete');
   function dashboard() {
-    const ps=programs(), lanes=ps.flatMap(p=>list(p.lanes)||[]), all=lanes.flatMap(l=>list(l.findings)||[]);
+    const options=programs(), ps=state.dashboardProgram ? options.filter(p=>String(p.id)===state.dashboardProgram) : options;
+    const lanes=ps.flatMap(p=>list(p.lanes)||[]), all=lanes.flatMap(l=>list(l.findings)||[]);
     const discovered=!discoveryIncomplete();
     const complete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.findings));
     const stat=(v,label)=>`<div class="stat"><strong>${esc(v)}</strong><span>${esc(label)}</span></div>`;
     const reportsComplete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports) && !(list(l.warnings)||[]).some(w=>typeof w==='string' && w.startsWith('reports_')));
     const submissionValues=field=>{
-      const counts=new Map();for(const finding of all){const value=finding.submission?.[field];if(value!=null && value!=='')counts.set(String(value),(counts.get(String(value))||0)+1);}
+      const counts=new Map();for(const finding of all){const nested=finding.submission?.[field];const value=nested != null && nested !== '' ? nested : finding[field==='state'?'submission_status':'platform_outcome'];if(value!=null && value!=='')counts.set(String(value),(counts.get(String(value))||0)+1);}
       return [...counts].map(([value,count])=>`<div class="record"><span>${esc(value)}</span> <strong>${count}</strong></div>`).join('') || '<p class="hint">No recorded values available.</p>';
     };
     const classes=new Map(); all.forEach(f=>{if(f.class) classes.set(String(f.class),(classes.get(String(f.class))||0)+1);});
@@ -188,8 +190,8 @@
     const severityRows=[...severity].sort((a,b)=>a[0].localeCompare(b[0])).map(([name,n])=>`<div class="record"><span>${esc(name)}</span> <strong>${n}</strong></div>`).join('')+(noSeverity?`<div class="record"><span>Not recorded</span> <strong>${noSeverity}</strong></div>`:'');
     const max=Math.max(1,...classes.values());
     const bars=[...classes].sort((a,b)=>b[1]-a[1]).map(([name,n])=>`<div class="chart-row"><span>${esc(name)}</span><span class="bar"><i style="width:${n/max*100}%"></i></span><strong>${n}</strong></div>`).join('');
-    return `${title('Dashboard','A portfolio view of the records currently loaded.')}
-      <div class="stack">${warnings()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
+    return `${title('Dashboard','A portfolio view of the records currently loaded.',`<div class="toolbar"><label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.name||p.id,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`)}
+      <div class="stack">${warnings(lanes)}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
       <div class="dashboard-grid"><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded finding records; not coverage.</p>${bars||'<div class="state">No classified findings available.</div>'}</section><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?'Counts from all loaded finding records.':'Incomplete data: counts include loaded finding records only, not portfolio totals.'}</p>${severityRows||'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad"><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p>${ps.length?ps.map(p=>`<div class="record"><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><p class="hint">${esc(p.family||'Family not provided')} · ${Array.isArray(p.lanes)?`${p.lanes.length} lanes`:'Lanes unavailable'}</p></div>`).join(''):discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for loaded findings only.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
   function workspace() {
@@ -224,12 +226,13 @@
     return `<section class="panel"><div class="panel-pad"><h2>Findings ledger</h2><p class="hint">Filter the findings in this lane.</p>${cap?'<div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div>':''}</div><div class="filters">${filterControl('severity','severities',all)}${filterControl('class','classes',all)}${filterControl('status','statuses',all)}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}"><span class="muted">${filtered.length} of ${all.length}</span></div>${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr><th>Finding</th><th>Severity</th><th>Class</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></div>`:'<div class="state">No findings match these filters.</div>'}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
   }
   function unavailable(name){return `<section class="panel panel-pad"><h2>${esc(name)}</h2><div class="state">This collection was not provided by the backend.</div></section>`;}
-  function records(key,label,description) {
-    const items=rows(key); if(!items) return unavailable(label);
+  function records(key,label,description) {return recordList(rows(key),label,description);}
+  function recordList(items,label,description) {
+    if(!items) return unavailable(label);
     if(!items.length) return `<section class="panel panel-pad"><h2>${esc(label)}</h2><p class="hint">${esc(description)}</p><div class="state">No ${esc(label.toLowerCase())} records in this lane.</div></section>`;
     const content=items.map(item=>{
       if (typeof item !== 'object' || item===null) return `<div class="record record-value">${esc(item)}</div>`;
-      const entries=Object.entries(item); const titleKey=['surface','title','name','id','url'].find(k=>item[k]!=null) || entries[0]?.[0];
+      const entries=Object.entries(item); const titleKey=['surface','surface_key','title','name','id','url'].find(k=>item[k]!=null) || entries[0]?.[0];
       return `<div class="record"><strong>${esc(display(item[titleKey]))}</strong>${entries.filter(([k])=>k!==titleKey).map(([k,v])=>`<p class="hint record-value"><b>${esc(k)}:</b> ${esc(display(v))}</p>`).join('')}</div>`;
     }).join('');
     return `<section class="panel panel-pad"><h2>${esc(label)}</h2><p class="hint">${esc(description)}</p>${content}</section>`;
@@ -245,7 +248,8 @@
     const items=rows('coverage');
     const counts=value.counts && typeof value.counts==='object' && !Array.isArray(value.counts) ? `<section class="panel panel-pad"><h2>Assessment counts</h2><p class="hint">Recorded assessment questions${value.total == null ? '' : `: ${esc(display(value.total))} total`}.</p>${Object.entries(value.counts).map(([status,count])=>`<div class="record"><strong>${esc(status)}</strong>: ${esc(display(count))}</div>`).join('') || '<p class="hint">No assessment counts reported.</p>'}</section>` : '';
     const assessments=items ? (items.length ? records('coverage','Assessment questions','Recorded questions and boundaries, not proof of complete testing.') : '<section class="panel panel-pad"><h2>Assessment questions</h2><div class="state">No assessment questions recorded in this lane.</div></section>') : unavailable('Assessment questions');
-    return `<div class="stack"><section class="panel panel-pad"><h2>Mapped inventory</h2><p class="hint">Mapped surfaces are inventory, not assessed coverage.</p>${mapped}<p class="hint">${esc(unclassified)}</p></section>${counts}${assessments}</div>`;
+    const unassessed=recordList(list(value.unassessed_surfaces),'Surfaces without assessment questions','Mapped inventory only; no assessment question recorded for these surfaces.');
+    return `<div class="stack"><section class="panel panel-pad"><h2>Mapped inventory</h2><p class="hint">Mapped surfaces are inventory, not assessed coverage.</p>${mapped}<p class="hint">${esc(unclassified)}</p></section>${unassessed}${counts}${assessments}</div>`;
   }
   // Deliberately small Markdown subset; all source is escaped before formatting.
   // Links/images remain text. No HTML, navigation, external images or scripts.
@@ -622,8 +626,8 @@
       findSavedDrafts(draftFor(report),box,true);
     }
     else if(target.hasAttribute('data-find-drafts')){const report=reportById(state.report);if(report)findSavedDrafts(draftFor(report));}
-    else if(target.hasAttribute('data-go-program')){state.view='program';render();}
-    else if(target.hasAttribute('data-open-program')){state.program=target.dataset.openProgram;state.lane='';normalizeSelection();state.view='program';state.section='findings';render();}
+    else if(target.hasAttribute('data-go-program')){if(state.dashboardProgram && state.program!==state.dashboardProgram){state.program=state.dashboardProgram;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();}state.view='program';render();}
+    else if(target.hasAttribute('data-open-program')){if(state.program!==target.dataset.openProgram)state.filters={severity:'',class:'',status:'',query:''};state.program=target.dataset.openProgram;state.lane='';state.report='';normalizeSelection();state.view='program';state.section='findings';render();}
     else if(target.dataset.section){state.section=target.dataset.section;render();}
     else if(target.hasAttribute('data-rationale-edit')){
       const row=(rows('findings')||[]).find(r=>String(r.id)===target.dataset.rationaleEdit);
@@ -643,7 +647,8 @@
   });
   app.addEventListener('change',async event=>{
     const el=event.target;
-    if(el.id==='program-select'){state.program=el.value;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();render();}
+    if(el.id==='dashboard-program'){state.dashboardProgram=el.value;render();}
+    else if(el.id==='program-select'){state.program=el.value;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();render();}
     else if(el.id==='lane-select'){state.lane=el.value;state.report='';state.filters={severity:'',class:'',status:'',query:''};render();}
     else if(el.id==='report-select'){state.report=el.value;render();}
     else if(el.dataset.filter){state.filters[el.dataset.filter]=el.value;render();}

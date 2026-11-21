@@ -97,7 +97,10 @@ def coverage(lane, warnings):
                 a.reason, a.boundary, a.axes_json, a.evidence_json, a.reopen_when,
                 a.assessed_fingerprint FROM assessments a JOIN surfaces s ON s.id=a.surface_id''').fetchall()
             kinds = {row['kind']: row['n'] for row in db.execute('SELECT kind, COUNT(*) AS n FROM surfaces GROUP BY kind')}
-            unclassified = db.execute('SELECT COUNT(*) FROM surfaces s WHERE NOT EXISTS (SELECT 1 FROM assessments a WHERE a.surface_id=s.id)').fetchone()[0]
+            unassessed = [dict(row) for row in db.execute('''SELECT s.id AS surface_id, s.kind, s.host,
+                s.surface_key, s.input_key, s.consumer, s.fingerprint, s.run_id FROM surfaces s
+                WHERE NOT EXISTS (SELECT 1 FROM assessments a WHERE a.surface_id=s.id)''')]
+            unclassified = len(unassessed)
         finally:
             db.close()
         counts = {}
@@ -105,18 +108,25 @@ def coverage(lane, warnings):
         for row in rows:
             item = dict(row)
             item['surface_id'] = item.pop('id')
-            item['axes'] = json.loads(item.pop('axes_json'))
-            item['evidence_refs'] = json.loads(item.pop('evidence_json'))
+            axes_json, evidence_json = item.pop('axes_json'), item.pop('evidence_json')
+            if not isinstance(axes_json, (str, bytes, bytearray)) or not isinstance(evidence_json, (str, bytes, bytearray)):
+                raise ValueError('invalid assessment JSON')
+            item['axes'] = json.loads(axes_json)
+            item['evidence_refs'] = json.loads(evidence_json)
             status = {'untested': 'no_assessment', 'exhausted': 'bounded_review'}.get(item['status'], item['status'])
-            baseline = item['fingerprint'] or '@mapper-run:' + item['run_id']
-            if status != 'no_assessment' and item['assessed_fingerprint'] and item['assessed_fingerprint'] != baseline:
+            baseline = item['fingerprint'] or ('@mapper-run:' + item['run_id'] if item['run_id'] else None)
+            item['freshness'] = ('not_applicable' if status == 'no_assessment' else
+                                 'unknown' if not baseline or not item['assessed_fingerprint'] else
+                                 'current' if item['assessed_fingerprint'] == baseline else 'stale')
+            if item['freshness'] == 'stale':
                 item['prior_status'] = status
                 status = 'stale'
             item['status'] = status
             counts[status] = counts.get(status, 0) + 1
             items.append(item)
         return {'counts': counts, 'items': items, 'total': len(items),
-                'mapped_kinds': kinds, 'unclassified_surfaces': unclassified}
+                'mapped_kinds': kinds, 'unclassified_surfaces': unclassified,
+                'unassessed_surfaces': unassessed}
     except FileNotFoundError:
         warnings.append('coverage_missing')
     except (OSError, ValueError, UnicodeError, sqlite3.Error):

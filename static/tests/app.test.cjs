@@ -198,6 +198,7 @@ test('dashboard uses explicit submission and outcome fields, not finding status'
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.goto(base);
   const panel=page.getByRole('region',{name:'Submission records'});
+  await panel.waitFor();
   assert.ok(await panel.getByText('submitted',{exact:true}).count());
   assert.ok(await panel.getByText('accepted',{exact:true}).count());
   assert.equal(await panel.getByText('Duplicate',{exact:true}).count(),0);
