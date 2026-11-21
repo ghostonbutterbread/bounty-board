@@ -250,6 +250,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         if root.is_symlink() or not root.resolve(strict=True).is_relative_to(Path(tempfile.gettempdir()).resolve(strict=True)):
             raise ValueError('fixture root must be inside TMPDIR')
     collaboration = CollaborationStore(collaboration_dir) if collaboration_dir else None
+    if collaboration:
+        with collaboration.observation():
+            collaboration.bind_source(root)
     collaboration_lock = threading.RLock()
     class Handler(BaseHTTPRequestHandler):
         def trusted_request(self, require_origin=False):
@@ -323,7 +326,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         raise ValueError('invalid action')
                     if 'action' not in payload and not all(isinstance(payload[k], str) and payload[k] for k in ('base', 'request_id')):
                         raise ValueError('invalid payload')
-                with collaboration_lock:
+                with collaboration_lock, collaboration.observation():
+                    collaboration.bind_source(root)
                     content = read_file(root, relative).decode('utf-8')
                     collaboration.observe_source(key, content)
                     if write and payload.get('action') == 'publish':

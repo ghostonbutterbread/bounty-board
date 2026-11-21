@@ -51,7 +51,9 @@
     const content=report.content == null ? null : String(report.content), revision=report.revision ?? null;
     if(draft.source===report && draft.observedContent===content && draft.observedRevision===revision)return;
     const changed = (draft.revision != null && revision != null && draft.revision!==revision) || (content!==null && content!==draft.original);
-    if(draft.hasDraft && changed && draft.status!=='conflict') {draft.status='conflict';persistDraft(draft);}
+    // Collaborative revisions describe the shared draft, not the source report.
+    // The server observes source changes and determines conflicts when saving.
+    if(draft.hasDraft && changed && !state.data?.capabilities?.collaboration && draft.status!=='conflict') {draft.status='conflict';persistDraft(draft);}
     else if(!draft.hasDraft && content!==null){draft.text=content;draft.original=draft.text;draft.revision=report.revision;}
     draft.source=report;draft.observedContent=content;draft.observedRevision=revision;
   }
@@ -301,7 +303,18 @@
     draft.text=content; draft.original=content; draft.revision=revision; draft.hasDraft=false; draft.status='saved';
     persistDraft(draft);
     if(editor && draftKey(state.program,state.lane,state.report)===draft.key) {
-      draft.applyingRemote=true; editor.value(content); draft.applyingRemote=false;
+      const previous=editor.value();
+      if(previous!==content) {
+        // Limit the replacement to the changed span so CodeMirror can map
+        // selections through the edit and retain the existing undo stack.
+        let start=0, oldEnd=previous.length, newEnd=content.length;
+        while(start<oldEnd && start<newEnd && previous[start]===content[start]) start++;
+        while(oldEnd>start && newEnd>start && previous[oldEnd-1]===content[newEnd-1]) {oldEnd--;newEnd--;}
+        const cm=editor.codemirror;
+        draft.applyingRemote=true;
+        try {cm.replaceRange(content.slice(start,newEnd),cm.posFromIndex(start),cm.posFromIndex(oldEnd),'+remote');}
+        finally {draft.applyingRemote=false;}
+      }
       const preview=document.querySelector('#report-preview'); if(preview)preview.innerHTML=markdown(content);
     }
   }

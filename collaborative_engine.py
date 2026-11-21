@@ -4,6 +4,7 @@ The caller supplies each observed source snapshot. SQLite serializes clients tha
 share this one database, not independent databases or arbitrary file writers.
 The application owns source observation and publication.
 """
+import fcntl
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ class CollaborationStore:
             os.close(fd)
         with self._connect() as db:
             db.executescript('''
+                CREATE TABLE IF NOT EXISTS source_roots (path TEXT PRIMARY KEY, device INTEGER NOT NULL, inode INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS documents (key TEXT PRIMARY KEY, head TEXT NOT NULL, source TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS versions (key TEXT NOT NULL, revision TEXT NOT NULL, content TEXT NOT NULL,
                     PRIMARY KEY (key, revision));
@@ -50,6 +52,37 @@ class CollaborationStore:
                 CREATE TABLE IF NOT EXISTS resolutions (key TEXT NOT NULL, conflict_id INTEGER NOT NULL,
                     revision TEXT NOT NULL, PRIMARY KEY (key, conflict_id));
             ''')
+
+    def bind_source(self, root):
+        path = Path(root).resolve(strict=True)
+        info = path.stat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError('source root must be a directory')
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT device,inode FROM source_roots WHERE path=?', (str(path),)).fetchone()
+            if row is None:
+                # Existing pre-binding stores cannot prove which directory
+                # generated their histories; retain them, but do not guess.
+                if db.execute('SELECT 1 FROM documents LIMIT 1').fetchone() and not db.execute('SELECT 1 FROM source_roots LIMIT 1').fetchone():
+                    raise ValueError('legacy history has no source identity; use a new private store and retain the old one')
+                db.execute('INSERT INTO source_roots VALUES (?,?,?)', (str(path), info.st_dev, info.st_ino))
+            elif row != (info.st_dev, info.st_ino):
+                raise ValueError('source directory changed; retain history and use a new private store')
+
+    @contextmanager
+    def observation(self):
+        # All server processes sharing this store must hold the same lock from
+        # before the source read through the subsequent database operation.
+        fd = os.open(self.root / 'observation.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+                raise PermissionError('observation lock must be owner-only')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     @contextmanager
     def _connect(self):
