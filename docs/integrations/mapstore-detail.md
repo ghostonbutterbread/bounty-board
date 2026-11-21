@@ -5,7 +5,7 @@
 - **Worktree:** `/home/ryushe/projects/bounty-board-mapstore-detail`.
 - **Feature base:** `085c58717bc430018a56e39416b94ab4fbd86ea8` (parent-supplied dashboard feature tip).
 - **Intended target:** `beta`; parent owns combined exact-tree review and integration. No remote fetch under the explicit no-remote boundary.
-- **Recovery checkpoint / implementation commits:** pending implementation commit; subsequent handoff will name it.
+- **Recovery checkpoint / implementation commit:** `d55c07c58907abe8658c7ac70f09b309f7c41d30`; the branch tip includes a subsequent dossier-only handoff commit.
 - **References:** MapStore skill and producer contract supplied by parent: `recon/maps/map.jsonl`, relative indexed Markdown paths, `gadget`/`residual` tags and recorded lifecycle status.
 
 ## Intent and contract
