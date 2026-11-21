@@ -16,6 +16,10 @@ async function fixture(run) {
   try {
     const [chunk]=await once(proc.stdout,'data');const base='http://127.0.0.1:'+Number(chunk.toString().trim());
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
+    // The baseline backend predates the sibling's editable=true policy for real
+    // Markdown. Adapt only this response; collaboration and publication stay real.
+    const newPage=browser.newPage.bind(browser);
+    browser.newPage=async (...args)=>{const page=await newPage(...args);await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=true;await route.fulfill({response,json:body});});return page;};
     await run({browser,base,report});
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 }
@@ -130,4 +134,44 @@ test('a saved notice is invalidated when reload observes a later external change
   await page.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue()==='later external\n');
   await page.waitForTimeout(300);
   assert.doesNotMatch(await page.locator('#report-status').innerText(),/Markdown file saved/);
+}));
+
+// Adapter injects the policy that the sibling backend will advertise.
+test('backend editability disables collaborative editor and source writes only for denied reports', {timeout:30000},()=>fixture(async({browser,base,report})=>{
+  const page=await browser.newPage();page.setDefaultTimeout(6000);let posts=0;
+  await page.route('**/api/data',async route=>{const response=await route.fetch(),body=await response.json();for(const item of body.programs[0].lanes[0].reports)item.kind=item.path==='example.md'?'generated_navigation':'generated_evidence';await route.fulfill({response,json:body});});
+  await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=!route.request().url().includes('example.md');await route.fulfill({response,json:body});});
+  page.on('request',req=>{if(req.method()==='POST'&&req.url().includes('/api/collaboration?'))posts++;});
+  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByText(/read.only/i).waitFor({timeout:3000});
+  assert.match(await page.locator('#app').innerText(),/Generated navigation/);
+  assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror')?.CodeMirror.getOption('readOnly') ?? document.querySelector('#report-source')?.readOnly),true);
+  assert.equal(await page.locator('.editor-toolbar').count(),0,'read-only editor must not expose write commands');
+  assert.equal(await page.getByRole('button',{name:'Save merged report'}).count(),0);assert.equal(posts,0);assert.equal(fs.readFileSync(report,'utf8'),'original\n');
+  await page.locator('#report-select').selectOption('second.md');await page.getByText(/Shared draft ready/).waitFor();assert.match(await page.locator('#app').innerText(),/Generated evidence/);await edit(page,'editable report\n');
+  await page.getByText(/Markdown file saved/).waitFor();assert.equal(fs.readFileSync(path.join(path.dirname(report),'second.md'),'utf8'),'editable report\n');
+}));
+
+test('mocked published receipt without incoming revision retains newer edit and request', {timeout:30000},()=>fixture(async({browser,base})=>{
+  const page=await browser.newPage();await open(page,base);let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);
+  const handler=async route=>{if(route.request().method()!=='POST')return route.continue();const response=await route.fetch(),body=await response.json();delete body.incoming_revision;arrive();await gate;await route.fulfill({response,json:body});};
+  try {await page.route('**/api/collaboration?*',handler);await edit(page,'earlier\n');await started;await edit(page,'newer\n');release();
+    await page.getByText(/outcome is uncertain or unrecognized/i).waitFor({timeout:3000});
+    await page.getByRole('button',{name:'Inspect original save'}).waitFor();
+    const saved=await page.evaluate(()=>Object.values(localStorage).map(v=>{try{return JSON.parse(v);}catch{return null;}}).find(v=>v?.pendingShared));
+    assert.equal(saved.text,'newer\n');assert.equal(saved.pendingShared.content,'earlier\n');
+  } finally {release();}
+}));
+
+test('storage failure during in-flight acknowledgement retains unsent text and prevents another write', {timeout:30000},()=>fixture(async({browser,base})=>{
+  const page=await browser.newPage();await open(page,base);let release,arrive,posts=0;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);
+  const handler=async route=>{if(route.request().method()!=='POST')return route.continue();posts++;const response=await route.fetch();arrive();await gate;return route.fulfill({response});};
+  try {await page.route('**/api/collaboration?*',handler);await edit(page,'submitted\n');await started;
+    await page.evaluate(()=>{const put=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('bounty-board-report-draft-v2:'))throw new DOMException('quota','QuotaExceededError');return put.call(this,k,v);};});
+    await edit(page,'only in memory\n');release();await page.getByText(/storage unavailable/i).first().waitFor();
+    await page.waitForTimeout(1000);assert.equal(posts,1);assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'only in memory\n');
+    assert.equal(await page.getByLabel('Recover draft text').inputValue(),'only in memory\n');
+    const stored=await page.evaluate(()=>Object.values(localStorage).map(v=>{try{return JSON.parse(v);}catch{return null;}}).find(v=>v?.pendingShared));
+    assert.equal(stored.pendingShared.content,'submitted\n');
+  }finally{release();}
 }));

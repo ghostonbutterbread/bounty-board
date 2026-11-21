@@ -10,11 +10,15 @@ async function fixture(run) {
   const tmp=fs.mkdtempSync(path.join(process.env.TMPDIR,'board-undo-'));
   const root=path.join(tmp,'root'), report=path.join(root,'web_bounty/example/web/reports/example.md');
   fs.mkdirSync(path.dirname(report),{recursive:true});fs.writeFileSync(report,'one\ntwo\nthree\n');
-  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:path.resolve(__dirname,'../..'),env:process.env,stdio:['ignore','pipe','pipe']});
+  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:path.resolve(__dirname,'../..'),env:process.env,stdio:['ignore','pipe','ignore']});
   let browser;
   try {
     const [chunk]=await once(proc.stdout,'data');const base='http://127.0.0.1:'+Number(chunk.toString().trim());
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
+    // Baseline backend advertises every report read-only; model the sibling's
+    // editable policy for this real synthetic Markdown fixture.
+    const newPage=browser.newPage.bind(browser);
+    browser.newPage=async (...args)=>{const page=await newPage(...args);await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=true;await route.fulfill({response,json:body});});return page;};
     await run({browser,base,report});
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 }
