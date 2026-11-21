@@ -3,6 +3,7 @@
 - **Status:** candidate checkpoint; not independently reviewed, integrated, published or activated.
 - **Branch/worktree:** `feat/collaboration-recovery`, `/home/ryushe/projects/bounty-board-collab-recovery`.
 - **Base:** `0104c390fb8417f0870750cdd839455e0525e46f`; **target:** `feat/collaborative-reports`. Parent owns independent review and integration. This repair is intentionally isolated from the sibling backend/history work; do not modify the shared collaborative-reports dossier here.
+- **Implementation checkpoint:** `86b9ed4147005de223889c1a237a3321691cd7e8`; this dossier update is a later handoff-only commit.
 - **Intent:** preserve edits and idempotent requests across transient failures, expose safe conflict recovery, and consume bounded history metadata without displaying full snapshots in poll responses.
 
 ## Contract
