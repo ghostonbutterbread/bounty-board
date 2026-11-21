@@ -233,6 +233,40 @@ class RetentionCapacityTests(unittest.TestCase):
             finally:
                 server.shutdown(); thread.join(); server.server_close()
 
+    def test_capacity_inspection_detects_changed_shared_head_without_source_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'root'; private = Path(tmp) / 'private'
+            source = root / 'web_bounty/example/web/reports/report.md'
+            source.parent.mkdir(parents=True); source.write_text('original\n')
+            server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True,
+                                     retention_max_operations=1, retention_min_free_bytes=0)
+            thread = threading.Thread(target=server.serve_forever); thread.start()
+            query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md',
+                                   root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest()))
+            def request(method, payload=None, endpoint='', extra=''):
+                host = f'127.0.0.1:{server.server_port}'
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+                try:
+                    conn.request(method, '/api/collaboration' + endpoint + '?' + query + extra,
+                                 json.dumps(payload) if payload else None,
+                                 {'Host': host, 'Origin': 'http://' + host, 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'})
+                    response = conn.getresponse(); self.assertEqual(response.status, 200); return json.loads(response.read())
+                finally: conn.close()
+            try:
+                initial = request('GET')
+                first = request('POST', {'base': initial['revision'], 'content': 'first\n', 'request_id': 'one'})
+                blocked = request('POST', {'base': first['revision'], 'content': 'blocked\n', 'request_id': 'blocked'})
+                self.assertEqual(blocked['publication']['state'], 'capacity')
+                later = request('POST', {'base': blocked['revision'], 'content': 'different shared head\n', 'request_id': 'other'})
+                self.assertEqual(later['publication']['state'], 'conflict')
+                self.assertEqual(source.read_text(), 'first\n')
+                inspected = request('GET', endpoint='/recovery', extra='&request_id=blocked')
+                self.assertEqual(inspected['publication']['state'], 'conflict')
+                self.assertIn('capacity_retry_changed', inspected['publication']['reasons'])
+                self.assertEqual(inspected['content'], 'different shared head\n')
+            finally:
+                server.shutdown(); thread.join(); server.server_close()
+
     def test_http_capacity_and_exact_retry_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'root'; private = Path(tmp) / 'private'
