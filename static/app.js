@@ -379,7 +379,20 @@
       (draft.retryExhausted ? '<button type="button" class="button" data-retry>Retry shared save</button>' : '') +
       (draft.staleResolution && draft.conflictBase ? '<button type="button" class="button" data-reopen>Retry as a new edit</button>' : '') +
       (draft.status==='conflict' && !draft.staleResolution ? '<button type="button" class="button" data-resolve>Submit editor as resolution</button>' : '') +
+      (state.data?.capabilities?.report_autosave && !draft.pendingShared && !draft.hasDraft && !draft.sourceUnavailable && !draft.unresolvedCount && draft.reconciliationState==='complete' && typeof draft.sourceSnapshot==='string' && draft.sourceSnapshot!==draft.text ? `<section aria-label="Reconcile report"><p>Shared draft differs from Markdown. Review both before publishing; uncoordinated writers may race.</p><button type="button" class="button" data-preview-merge>Preview merged report</button>${draft.mergePreview ? `<label>Current Markdown<textarea readonly aria-label="Current Markdown">${esc(draft.mergePreview.source_snapshot)}</textarea></label><label>Merged shared report<textarea readonly aria-label="Merged shared report">${esc(draft.mergePreview.content)}</textarea></label><button type="button" class="button" data-save-merge>Save merged report</button>` : ''}</section>` : '') +
       (state.data?.capabilities?.fixture_publish ? '<p class="warning">Experimental fixture publishing can overwrite uncoordinated edits. Never use with real reports or sync.</p><button type="button" class="button" data-publish>Publish fixture report</button>' : '');
+    box.querySelector('[data-preview-merge]')?.addEventListener('click',()=>{
+      draft.mergePreview={base:draft.sharedRevision,content:draft.text,source_snapshot:draft.sourceSnapshot};
+      showSharedHistory(draft,draft.sharedHistory||[]);
+    });
+    box.querySelector('[data-save-merge]')?.addEventListener('click',()=>{
+      const p=draft.mergePreview;
+      if(!p || draft.collabBusy || draft.hasDraft || draft.pendingShared || draft.unresolvedCount || draft.reconciliationState!=='complete' || p.base!==draft.sharedRevision || p.content!==draft.text || p.source_snapshot!==draft.sourceSnapshot){
+        draft.mergePreview=null;draft.collabMessage='The preview is stale. Review the current shared draft and Markdown again.';showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);return;
+      }
+      draft.mergePreview=null;draft.pendingShared={action:'reconcile',...p,request_id:crypto.randomUUID()};
+      saveShared(draft,true);
+    });
     box.querySelector('[data-inspect-save]')?.addEventListener('click',()=>inspectSave(draft));
     box.querySelector('[data-inspect-markdown]')?.addEventListener('click',async()=>{
       try {
@@ -502,6 +515,9 @@
       if(state.data?.capabilities?.report_autosave && draft.sharedRevision && draft.sharedRevision!==result.revision && !draft.pendingShared){draft.publicationNotice=null;persistDraft(draft);}
       draft.sharedRevision=result.revision;draft.pollAttempts=0;draft.pollRetryAt=0;
       draft.sourceUnavailable=result.source_status==='source_unavailable';
+      draft.sourceSnapshot=typeof result.source_snapshot==='string' ? result.source_snapshot : null;
+      draft.reconciliationState=result.reconciliation?.state || null;
+      if(draft.mergePreview && (draft.mergePreview.base!==result.revision || draft.mergePreview.source_snapshot!==draft.sourceSnapshot || draft.reconciliationState!=='complete' || result.unresolved_count))draft.mergePreview=null;
       const recent=result.history || [];
       const previous=draft.historyRecent||[];
       const priorHead=previous.length ? Math.max(...previous.map(item=>item.id)) : null;
@@ -570,6 +586,15 @@
   function handleAutosaveReceipt(draft,pending,receipt,publication,inspected=false) {
     const stateName=publication?.state;
     draft.publicationDetail=publication ?? null;
+    // This response is emitted before any exchange, so a successful shared
+    // edit is safe to acknowledge separately from Markdown publication.
+    if(publication?.state==='conflict' && !publication.operation && publication.reasons?.includes('store_needs_reconciliation') && ['saved','merged','unchanged'].includes(receipt.status) && typeof receipt.revision==='string' && typeof receipt.content==='string'){
+      draft.pendingShared=null;draft.conflictId=null;draft.publicationConflict=false;draft.sharedRevision=receipt.revision;
+      draft.publicationNotice='Saved to shared draft only. Review the merged report before saving Markdown.';
+      if(draft.text===pending.content)applyShared(draft,receipt.content,receipt.revision);
+      else {draft.revision=receipt.revision;draft.original=pending.content;persistDraft(draft);}
+      return true;
+    }
     if(stateName!=='published' || !['saved','merged','unchanged'].includes(receipt.status) || typeof receipt.revision!=='string' || typeof receipt.content!=='string') {
       draft.hasDraft=true;draft.publicationConflict=inspected && stateName==='conflict';
       if(receipt.status==='conflict'){draft.conflictId=receipt.conflict_id;draft.conflictBase=pending.base;}
@@ -578,6 +603,8 @@
       persistDraft(draft);return false;
     }
     draft.pendingShared=null;draft.publicationConflict=false;draft.recoveryNotFound=false;draft.retryAttempts=0;draft.sharedRevision=receipt.revision;
+    // A pre-save poll is no longer a valid source snapshot for a new preview.
+    draft.sourceSnapshot=null;draft.reconciliationState=null;draft.mergePreview=null;
     draft.publicationNotice='Shared draft saved. Markdown file saved and inspected at that moment; external changes may occur afterward.';
     if(draft.text===pending.content){draft.conflictId=null;applyShared(draft,receipt.content,receipt.revision);}
     else {draft.conflictId=null;draft.revision=receipt.incoming_revision || receipt.revision;draft.original=pending.content;draft.publicationNotice='Earlier shared draft and Markdown were saved at that moment. Newer editor changes are not yet saved.';persistDraft(draft);}
@@ -623,7 +650,12 @@
         draft.revision=result.incoming_revision; draft.original=pending.content; persistDraft(draft); scheduleSharedSave(draft);
       }
     } catch (error) {
-      if(autosave){draft.hasDraft=true;draft.publicationNotice='Save outcome unconfirmed: shared draft and Markdown may or may not have been saved. Inspect the original save before submitting another edit.';persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);}
+      if(autosave && pending.action==='reconcile' && error.code==='reconciliation_changed'){
+        draft.pendingShared=null;draft.mergePreview=null;draft.reconciliationState=null;
+        draft.publicationNotice='The merged preview is stale; Markdown was not saved. Review the changed shared draft and Markdown again.';
+        persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);
+      }
+      else if(autosave){draft.hasDraft=true;draft.publicationNotice='Save outcome unconfirmed: shared draft and Markdown may or may not have been saved. Inspect the original save before submitting another edit.';persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);}
       else if(error.code==='source_unavailable'){
         draft.sourceUnavailable=true;draft.retryExhausted=true;
         draft.collabMessage='Source unavailable; pending request and local draft are retained. Restore the source before retrying.';

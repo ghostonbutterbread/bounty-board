@@ -296,13 +296,14 @@ class CollaborationStore:
             row = db.execute('SELECT result FROM requests WHERE key=? AND request_id=?', (key, request_id)).fetchone()
             return None if row is None else json.loads(row[0])
 
-    def receipt(self, key, base, content, request_id, conflict_id=None):
+    def receipt(self, key, base, content, request_id, conflict_id=None, publication_source=None):
         """Return only an exact previously committed request; never create work."""
         key = self._key(key)
         _revision(content)
         if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
             raise ValueError('invalid request id')
-        payload = json.dumps([base, content, conflict_id], ensure_ascii=False)
+        payload = json.dumps([base, content, conflict_id] if publication_source is None else
+                             [base, content, conflict_id, publication_source], ensure_ascii=False)
         with self._connect() as db:
             row = db.execute('SELECT payload,result FROM requests WHERE key=? AND request_id=?',
                              (key, request_id)).fetchone()
@@ -312,7 +313,7 @@ class CollaborationStore:
                 raise ValueError('request id reused')
             return json.loads(row[1])
 
-    def submit(self, key, base, content, request_id=None, conflict_id=None):
+    def submit(self, key, base, content, request_id=None, conflict_id=None, publication_source=None):
         key = self._key(key)
         _revision(content)
         with self._connect() as db:
@@ -320,7 +321,8 @@ class CollaborationStore:
             if request_id is not None:
                 if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
                     raise ValueError('invalid request id')
-                payload = json.dumps([base, content, conflict_id], ensure_ascii=False)
+                payload = json.dumps([base, content, conflict_id] if publication_source is None else
+                                     [base, content, conflict_id, publication_source], ensure_ascii=False)
                 previous = db.execute('SELECT payload,result FROM requests WHERE key=? AND request_id=?',
                                       (key, request_id)).fetchone()
                 if previous:

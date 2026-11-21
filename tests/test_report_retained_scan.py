@@ -87,6 +87,155 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(result['publication']['state'], 'outcome_uncertain')
         self.assertEqual(self.report.read_text(), self.text)
 
+    def test_new_operation_invalidates_completed_large_sweep(self):
+        base = self.request()[1]
+        store = CollaborationStore(self.private)
+        for n in range(65):
+            op = f'failed-{n:03}'
+            store.begin_publication(self.key, op); store.complete_publication(self.key, op, 'conflict')
+        self.assertEqual(self.request()[1]['reconciliation']['state'], 'backlog')
+        state = self.request()[1]
+        self.assertEqual(state['reconciliation']['state'], 'complete')
+        store.begin_publication(self.key, 'late-operation')
+        payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'], 'source_snapshot': self.text, 'request_id': 'merge'}
+        status, result = self.request('POST', payload)
+        self.assertEqual((status, result['error']), (503, 'retained_scan_backlog'))
+        self.assertEqual(self.report.read_text(), self.text)
+        self.assertIsNone(store.request_result(self.key, 'merge'))
+
+    def test_completed_large_sweep_allows_user_to_publish_merged_report(self):
+        base = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': base['revision'], 'content': self.text.replace('one', 'ONE'), 'request_id': 'one'})[1]
+            old.seek(0); old.write(self.text.replace('seven', 'SEVEN')); old.truncate(); old.flush()
+            store = CollaborationStore(self.private)
+            for n in range(64):
+                op = f'failed-{n:03}'
+                store.begin_publication(self.key, op); store.complete_publication(self.key, op, 'conflict')
+            self.assertEqual(self.request()[1]['reconciliation']['state'], 'backlog')
+            state = self.request()[1]
+            self.assertEqual(state['reconciliation']['state'], 'complete')
+            payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'], 'source_snapshot': first['content'], 'request_id': 'merge'}
+            status, result = self.request('POST', payload)
+            self.assertEqual(status, 200, result)
+            self.assertEqual(result['publication']['state'], 'published')
+            self.assertEqual(self.report.read_text(), state['content'])
+
+    def test_reconcile_missing_source_and_capacity_do_not_publish(self):
+        base = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': base['revision'], 'content': self.text.replace('one', 'ONE'), 'request_id': 'one'})[1]
+            old.seek(0); old.write(self.text.replace('seven', 'SEVEN')); old.truncate(); old.flush()
+            state = self.request()[1]
+            payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'], 'source_snapshot': first['content'], 'request_id': 'merge'}
+            self.report.unlink()
+            self.assertEqual(self.request('POST', payload)[0], 409)
+            self.assertFalse(self.report.exists())
+            self.assertIsNone(CollaborationStore(self.private).request_result(self.key, 'merge'))
+            self.report.write_text(first['content'])
+            err = sqlite3.OperationalError('database full'); err.sqlite_errorcode = sqlite3.SQLITE_FULL
+            with mock.patch.object(CollaborationStore, 'submit', side_effect=err):
+                status, result = self.request('POST', payload)
+            self.assertEqual((status, result['error']), (503, 'collaboration_capacity'))
+            self.assertEqual(self.report.read_text(), first['content'])
+            self.assertIsNone(CollaborationStore(self.private).request_result(self.key, 'merge'))
+            self.assertEqual(self.request('POST', payload)[1]['publication']['state'], 'published')
+
+    def test_reconcile_retry_after_restart_never_reexchanges(self):
+        base = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': base['revision'], 'content': self.text.replace('one', 'ONE'), 'request_id': 'one'})[1]
+            old.seek(0); old.write(self.text.replace('seven', 'SEVEN')); old.truncate(); old.flush()
+            state = self.request()[1]
+            payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'], 'source_snapshot': first['content'], 'request_id': 'merge'}
+            self.assertEqual(self.request('POST', payload)[1]['publication']['state'], 'published')
+            self.server.shutdown(); self.thread.join(20); self.server.server_close()
+            self.server = app.make_server(self.root, 0, collaboration_dir=self.private, report_autosave=True)
+            self.thread = threading.Thread(target=self.server.serve_forever); self.thread.start()
+            self.host = f'127.0.0.1:{self.server.server_port}'
+            with mock.patch.object(report_publisher, '_exchange', side_effect=AssertionError('retry exchanged')):
+                status, result = self.request('POST', payload)
+            self.assertEqual(status, 200)
+            self.assertEqual(result['publication']['state'], 'published')
+            self.assertEqual(self.report.read_text(), state['content'])
+            altered = dict(payload, source_snapshot='other')
+            self.assertEqual(self.request('POST', altered)[0], 409)
+
+    def test_reconcile_late_exchange_edit_is_retained_and_requires_review(self):
+        base = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': base['revision'], 'content': self.text.replace('one', 'ONE'), 'request_id': 'one'})[1]
+            old.seek(0); old.write(self.text.replace('seven', 'SEVEN')); old.truncate(); old.flush()
+            state = self.request()[1]
+            payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'], 'source_snapshot': first['content'], 'request_id': 'merge'}
+            external = first['content'].replace('four', 'FOUR')
+            exchange = report_publisher._exchange
+            def race(*args):
+                self.report.write_text(external)
+                return exchange(*args)
+            with mock.patch.object(report_publisher, '_exchange', side_effect=race):
+                status, result = self.request('POST', payload)
+            self.assertEqual(status, 200)
+            self.assertNotEqual(result['publication']['state'], 'published')
+            current = self.request()[1]
+            self.assertIn('FOUR', current['content'])
+            events = [e for e in current['history'] if e['kind'].startswith('retained:')]
+            self.assertTrue(any(self.request(endpoint='/version', extra='&revision='+e['revision'])[1]['content'] == external for e in events))
+
+    def test_reconcile_blocks_conflict_until_explicit_resolution(self):
+        base = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': base['revision'], 'content': self.text.replace('one', 'BOARD'), 'request_id': 'one'})[1]
+            late = self.text.replace('one', 'OUTSIDE')
+            old.seek(0); old.write(late); old.truncate(); old.flush()
+            state = self.request()[1]
+            conflict = next(e for e in state['history'] if e['kind'] == 'retained:conflict')
+            payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'], 'source_snapshot': first['content'], 'request_id': 'blocked'}
+            self.assertEqual(self.request('POST', payload)[0], 409)
+            self.assertEqual(self.report.read_text(), first['content'])
+            resolution = state['content'].replace('BOARD', 'BOARD AND OUTSIDE')
+            result = self.request('POST', {'base': state['revision'], 'content': resolution, 'request_id': 'resolve', 'conflict_id': conflict['id']})[1]
+            self.assertEqual(result['publication']['state'], 'conflict')
+            state = self.request()[1]
+            self.assertEqual(state['unresolved_count'], 0)
+            payload.update(base=state['revision'], content=state['content'], request_id='publish-resolution')
+            self.assertEqual(self.request('POST', payload)[1]['publication']['state'], 'published')
+            self.assertEqual(self.report.read_text(), resolution)
+            version = self.request(endpoint='/version', extra='&revision=' + conflict['revision'])[1]
+            self.assertEqual(version['content'], late)
+
+    def test_reconcile_rejects_stale_source_and_retains_new_source(self):
+        initial = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': initial['revision'], 'content': self.text.replace('one', 'ONE'), 'request_id': 'one'})[1]
+            old.seek(0); old.write(self.text.replace('seven', 'SEVEN')); old.truncate(); old.flush()
+            state = self.request()[1]
+            payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'],
+                       'source_snapshot': first['content'], 'request_id': 'merge'}
+            newer = first['content'].replace('four', 'FOUR')
+            self.report.write_text(newer)
+            status, result = self.request('POST', payload)
+            self.assertEqual((status, result['error']), (409, 'reconciliation_changed'))
+            self.assertEqual(self.report.read_text(), newer)
+            self.assertIsNone(CollaborationStore(self.private).request_result(self.key, 'merge'))
+            self.assertIn('FOUR', self.request()[1]['content'])
+
+    def test_explicit_reconcile_publishes_retained_merge(self):
+        base = self.request()[1]
+        with self.report.open('r+') as old:
+            first = self.request('POST', {'base': base['revision'], 'content': self.text.replace('one', 'ONE'), 'request_id': 'one'})[1]
+            old.seek(0); old.write(self.text.replace('seven', 'SEVEN')); old.truncate(); old.flush()
+            state = self.request()[1]
+            self.assertEqual(state['reconciliation']['state'], 'complete')
+            self.assertEqual(self.report.read_text(), first['content'])
+            payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'],
+                       'source_snapshot': first['content'], 'request_id': 'merged-one'}
+            status, result = self.request('POST', payload)
+            self.assertEqual(status, 200, result)
+            self.assertEqual(result['publication']['state'], 'published')
+            self.assertEqual(self.report.read_text(), state['content'])
+            self.assertEqual(self.request('POST', payload)[1]['publication']['state'], 'published')
+
     def test_retry_of_unpublished_merged_store_save_never_exchanges(self):
         base = self.request()[1]
         with self.report.open('r+') as old:

@@ -80,6 +80,116 @@ test('real clients, retained fd, history and restart retry preserve source and v
   } finally {fs.closeSync(fd);}
 }));
 
+test('two real clients preview and publish a retained merge', {timeout:90000},()=>fixture(async({browser,base,report,initial})=>{
+  const a=await browser.newPage(), b=await browser.newPage();
+  await Promise.all([open(a,base),open(b,base)]);
+  const fd=fs.openSync(report,'r+');
+  try {
+    const response=a.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+    await edit(a,initial.replace('one','board'));
+    assert.equal((await (await response).json()).publication.state,'published');
+    const late=initial.replace('seven','outside');
+    fs.writeSync(fd,late,0,'utf8');fs.ftruncateSync(fd,Buffer.byteLength(late));fs.fsyncSync(fd);
+    await b.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue().includes('outside'));
+    await b.getByRole('button',{name:'Preview merged report'}).click();
+    await b.getByRole('button',{name:'Save merged report'}).click();
+    await b.getByText(/Markdown file saved/).waitFor();
+    assert.equal(fs.readFileSync(report,'utf8'),initial.replace('one','board').replace('seven','outside'));
+  } finally {fs.closeSync(fd);}
+}));
+
+test('a later store-only edit can be previewed and published', {timeout:90000},()=>fixture(async({browser,base,report,initial})=>{
+  const page=await browser.newPage();await open(page,base);const fd=fs.openSync(report,'r+');
+  try {
+    const first=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+    await edit(page,initial.replace('one','board'));await first;
+    const late=initial.replace('seven','outside');fs.writeSync(fd,late,0,'utf8');fs.ftruncateSync(fd,Buffer.byteLength(late));fs.fsyncSync(fd);
+    await page.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue().includes('outside'));
+    const second=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+    const merged=initial.replace('one','board').replace('three','third').replace('seven','outside');
+    await edit(page,merged);assert.equal((await (await second).json()).publication.state,'conflict');
+    await page.getByRole('button',{name:'Preview merged report'}).click();
+    await page.getByRole('button',{name:'Save merged report'}).click();
+    await page.getByText(/Markdown file saved/).waitFor();assert.equal(fs.readFileSync(report,'utf8'),merged);
+  } finally {fs.closeSync(fd);}
+}));
+
+test('overlapping retained edit requires resolution and merged publication', {timeout:90000},()=>fixture(async({browser,base,report,initial})=>{
+  const a=await browser.newPage(), b=await browser.newPage();await Promise.all([open(a,base),open(b,base)]);
+  const fd=fs.openSync(report,'r+');
+  try {
+    const response=a.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+    await edit(a,initial.replace('one','board'));assert.equal((await (await response).json()).publication.state,'published');
+    const late=initial.replace('one','outside');fs.writeSync(fd,late,0,'utf8');fs.ftruncateSync(fd,Buffer.byteLength(late));fs.fsyncSync(fd);
+    await b.getByText('Shared history and conflicts').click();
+    const resolve=b.getByRole('button',{name:/Resolve conflict .* with editor/});await resolve.waitFor();
+    await edit(b,initial.replace('one','board and outside'));await resolve.click();
+    await b.getByRole('button',{name:'Preview merged report'}).waitFor();
+    assert.equal(fs.readFileSync(report,'utf8'),initial.replace('one','board'));
+    await b.getByRole('button',{name:'Preview merged report'}).click();await b.getByRole('button',{name:'Save merged report'}).click();
+    await b.getByText(/Markdown file saved/).waitFor();
+    assert.equal(fs.readFileSync(report,'utf8'),initial.replace('one','board and outside'));
+  } finally {fs.closeSync(fd);}
+}));
+
+test('stale merged preview is rejected and can be reviewed again', {timeout:90000},()=>fixture(async({browser,base,report,initial})=>{
+  const page=await browser.newPage();await open(page,base);
+  const fd=fs.openSync(report,'r+');
+  try {
+    const first=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+    await edit(page,initial.replace('one','board'));await first;
+    const late=initial.replace('seven','outside');fs.writeSync(fd,late,0,'utf8');fs.ftruncateSync(fd,Buffer.byteLength(late));fs.fsyncSync(fd);
+    await page.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue().includes('outside'));
+    await page.getByRole('button',{name:'Preview merged report'}).click();
+    const changed=initial.replace('one','board').replace('four','newer');
+    await page.route('**/api/collaboration?*',async route=>{
+      if(route.request().method()==='POST' && route.request().postDataJSON()?.action==='reconcile')fs.writeFileSync(report,changed);
+      await route.continue();
+    });
+    const rejected=page.waitForResponse(r=>r.request().method()==='POST' && r.request().postDataJSON()?.action==='reconcile');
+    await page.getByRole('button',{name:'Save merged report'}).click();assert.equal((await rejected).status(),409);
+    await page.locator('#report-status').getByText(/preview is stale/i).waitFor();
+    await page.getByRole('button',{name:'Preview merged report'}).waitFor();
+    assert.equal(fs.readFileSync(report,'utf8'),changed);
+  } finally {fs.closeSync(fd);}
+}));
+
+test('lost reconcile acknowledgment survives restart and exact retry', {timeout:90000},()=>fixture(async({browser,base,report,initial,restart})=>{
+  const page=await browser.newPage();await open(page,base);const fd=fs.openSync(report,'r+');
+  try {
+    const first=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+    await edit(page,initial.replace('one','board'));await first;
+    const late=initial.replace('seven','outside');fs.writeSync(fd,late,0,'utf8');fs.ftruncateSync(fd,Buffer.byteLength(late));fs.fsyncSync(fd);
+    await page.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue().includes('outside'));
+    await page.getByRole('button',{name:'Preview merged report'}).click();
+    let saved, done;const reached=new Promise(resolve=>done=resolve);
+    const intercept=async route=>{
+      if(route.request().method()==='POST' && route.request().postDataJSON()?.action==='reconcile'){
+        saved={url:route.request().url(),payload:route.request().postDataJSON()};
+        const response=await route.fetch();saved.interceptStatus=response.status();saved.interceptBody=await response.json();await route.abort();done();
+      } else await route.continue();
+    };
+    await page.route('**/api/collaboration?*',intercept);
+    await page.getByRole('button',{name:'Save merged report'}).click();await reached;
+    assert.equal(saved.interceptStatus,200,JSON.stringify({saved,source:fs.readFileSync(report,'utf8')}));
+    await page.getByText(/Save outcome unconfirmed/).waitFor();
+    await page.unroute('**/api/collaboration?*',intercept);await restart(true);
+    await page.getByRole('button',{name:'Inspect original save'}).click();
+    await page.getByText(/Markdown file saved/).waitFor();
+    const retry=await page.evaluate(async({url,payload})=>{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify(payload)});return {status:r.status,body:await r.json()};},saved);
+    assert.equal(retry.status,200);assert.equal(retry.body.publication.state,'published');
+    assert.equal(fs.readFileSync(report,'utf8'),initial.replace('one','board').replace('seven','outside'));
+  } finally {fs.closeSync(fd);}
+}));
+
+test('successful normal save does not offer a stale merge preview', {timeout:50000},()=>fixture(async({browser,base,initial})=>{
+  const page=await browser.newPage();await open(page,base);
+  const response=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
+  await edit(page,initial.replace('one','board'));assert.equal((await (await response).json()).publication.state,'published');
+  await page.getByText(/Markdown file saved/).waitFor();
+  await assert.rejects(page.getByRole('button',{name:'Preview merged report'}).waitFor({state:'visible',timeout:300}));
+}));
+
 test('default disabled keeps shared edits out of synthetic Markdown', {timeout:50000},()=>fixture(async({browser,base,report,initial})=>{
   const page=await browser.newPage();await open(page,base);
   const response=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
