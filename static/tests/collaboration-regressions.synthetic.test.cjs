@@ -47,7 +47,7 @@ test('save acknowledgment and unchanged poll preserve cursor and undo', {timeout
   assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'one\ntwo\nthree\n');
 }));
 
-test('remote change outside cursor preserves the cursor and edit history', {timeout:30000}, async()=>fixture(async({browser,base})=>{
+test('remote change preserves cursor and warns when local undo overlaps', {timeout:30000}, async()=>fixture(async({browser,base})=>{
   const a=await browser.newPage(), b=await browser.newPage();await Promise.all([open(a,base),open(b,base)]);
   await a.locator('.CodeMirror textarea').focus();await a.keyboard.press('Control+End');await a.keyboard.insertText(' local');
   await a.getByText(/Shared draft ready/).waitFor();
@@ -57,7 +57,8 @@ test('remote change outside cursor preserves the cursor and edit history', {time
   await b.locator('.CodeMirror textarea').focus();await b.keyboard.press('Control+End');await b.keyboard.insertText(' remote');
   await a.waitForFunction(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()==='one\ntwo\nthree\n local remote');
   const actual=await a.evaluate(()=>{const cm=document.querySelector('.CodeMirror').CodeMirror;const p=cm.getCursor();return {line:p.line,ch:p.ch,undo:cm.historySize().undo};});
-  assert.equal(actual.line,0);assert.equal(actual.ch,2);assert.ok(actual.undo>=before);
+  assert.equal(actual.line,0);assert.equal(actual.ch,2);assert.ok(actual.undo<before);
+  await a.getByText(/Some local undo history was discarded/).waitFor();
 }));
 
 test('failed unsent shared edit is restored and retried after reload', {timeout:30000}, async()=>fixture(async({browser,base})=>{

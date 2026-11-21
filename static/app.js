@@ -276,7 +276,7 @@
     }
     const draft=draftFor(report);
     if(state.data?.capabilities?.collaboration && !draft.collabStarted) startCollaboration(draft, currentProgram(), report.path);
-    const status=reportStatus(draft);
+    const status=reportStatus(draft)+(draft.undoNotice ? ` ${draft.undoNotice}` : '');
     const unavailableSource=report.loadState==='error' ? '<div class="message warning">Report could not be loaded. Source is unavailable; your draft is shown below. Refresh the workspace to retry.</div>' : '';
     return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}${unavailableSource}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><p class="hint">Drafts are stored in this browser and can be lost if browser data is cleared. They are not saved to the report. Older unscoped drafts are retained but not automatically imported.</p><button class="button" disabled title="Report writing is disabled to protect source files">Save to report unavailable</button>${state.data?.capabilities?.collaboration ? '<div id="collaboration-history"></div>' : ''}<div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
   }
@@ -289,7 +289,8 @@
     if(!box || draftKey(state.program,state.lane,state.report)!==draft.key) return;
     const wasOpen=box.querySelector('details')?.open;
     box.innerHTML=`<details ${wasOpen?'open':''}><summary>Shared history and conflicts</summary>`+history.map(item=>
-      `<div class="record"><strong>${esc(item.kind)}${item.kind.endsWith(':conflict') ? (item.resolved_revision ? ' (resolved)' : ' (unresolved)') : ''}</strong><button type="button" class="button" data-version="${esc(item.id)}">Use this version</button>${item.head!==item.revision ? `<button type="button" class="button" data-result="${esc(item.id)}">Use resulting revision</button>` : ''}${item.kind.endsWith(':conflict') && !item.resolved_revision ? `<button type="button" class="button" data-conflict="${esc(item.id)}">Resolve conflict ${esc(item.id)} with editor</button>` : ''}</div>`).join('')+(draft.historyBefore ? '<button type="button" class="button" data-older>Load older history</button>' : '')+'</details>' +
+      `<div class="record"><strong><span>Event #${esc(item.id)}</span> · <span>${esc(item.kind)}</span>${item.kind.endsWith(':conflict') ? (item.resolved_revision ? ' (resolved)' : ' (unresolved)') : ''}</strong> <span>Revision ${esc(item.revision.slice(0,12))}${item.head!==item.revision ? ` · result ${esc(item.head.slice(0,12))}` : ''}</span><button type="button" class="button" data-version="${esc(item.id)}">Preview this version</button>${item.head!==item.revision ? `<button type="button" class="button" data-result="${esc(item.id)}">Preview resulting revision</button>` : ''}${item.kind.endsWith(':conflict') && !item.resolved_revision ? `<button type="button" class="button" data-conflict="${esc(item.id)}">Resolve conflict ${esc(item.id)} with editor</button>` : ''}</div>`).join('')+(draft.historyBefore ? '<button type="button" class="button" data-older>Load older history</button>' : '')+
+      (draft.versionPreview ? `<section class="panel-pad"><h3>Preview event #${esc(draft.versionPreview.id)} · revision ${esc(draft.versionPreview.revision)}</h3><label>Version preview<textarea readonly aria-label="Version preview">${esc(draft.versionPreview.value)}</textarea></label><button type="button" class="button" data-confirm-version>Confirm restore version</button><button type="button" class="button" data-cancel-version>Cancel preview</button></section>` : '')+'</details>' +
       (draft.retryExhausted ? '<button type="button" class="button" data-retry>Retry shared save</button>' : '') +
       (draft.staleResolution && draft.conflictBase ? '<button type="button" class="button" data-reopen>Retry as a new edit</button>' : '') +
       (draft.status==='conflict' && !draft.staleResolution ? '<button type="button" class="button" data-resolve>Submit editor as resolution</button>' : '') +
@@ -300,11 +301,18 @@
       try {
         const legacy=resultVersion ? entry.head_content : entry.content;
         const value=typeof legacy==='string' ? legacy : (await BoardAPI.collaborationRead(draft.collabProgram,draft.lane,draft.collabPath,draft.collabRoot,'version',{revision})).content;
-        if(typeof value!=='string' || draft.text!==before){draft.collabMessage='Version was not applied because the editor changed. Select it again.';refreshStatus(draft);return;}
-        draft.applyingRemote=true;try {if(editor && draftKey(state.program,state.lane,state.report)===draft.key)editor.value(value);} finally {draft.applyingRemote=false;}
-        updateDraft(draft,value);
+        if(typeof value!=='string' || draft.text!==before){draft.collabMessage='Version was not loaded because the editor changed. Select it again.';refreshStatus(draft);return;}
+        draft.versionPreview={id,revision,value,before};showSharedHistory(draft,draft.sharedHistory||history);
       } catch {draft.collabMessage='Version could not be loaded. Your draft is retained.';refreshStatus(draft);}
     };
+    box.querySelector('[data-confirm-version]')?.addEventListener('click',()=>{
+      const preview=draft.versionPreview;if(!preview)return;
+      if(draft.text!==preview.before){draft.versionPreview=null;draft.collabMessage='Version was not restored because the editor changed. Select it again.';showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);return;}
+      draft.versionPreview=null;
+      draft.applyingRemote=true;try {if(editor && draftKey(state.program,state.lane,state.report)===draft.key)editor.value(preview.value);} finally {draft.applyingRemote=false;}
+      updateDraft(draft,preview.value);showSharedHistory(draft,draft.sharedHistory||[]);
+    });
+    box.querySelector('[data-cancel-version]')?.addEventListener('click',()=>{draft.versionPreview=null;showSharedHistory(draft,draft.sharedHistory||[]);});
     box.querySelectorAll('[data-version]').forEach(button=>button.addEventListener('click',()=>useVersion(button.dataset.version,false)));
     box.querySelectorAll('[data-result]').forEach(button=>button.addEventListener('click',()=>useVersion(button.dataset.result,true)));
     box.querySelector('[data-older]')?.addEventListener('click',async()=>{
@@ -356,15 +364,17 @@
     if(editor && draftKey(state.program,state.lane,state.report)===draft.key) {
       const previous=editor.value();
       if(previous!==content) {
-        // Limit the replacement to the changed span so CodeMirror can map
-        // selections through the edit and retain the existing undo stack.
+        // A linked document with a separate history makes CodeMirror rebase
+        // local undo over the remote change without recording it as local undo.
         let start=0, oldEnd=previous.length, newEnd=content.length;
         while(start<oldEnd && start<newEnd && previous[start]===content[start]) start++;
         while(oldEnd>start && newEnd>start && previous[oldEnd-1]===content[newEnd-1]) {oldEnd--;newEnd--;}
-        const cm=editor.codemirror;
+        const cm=editor.codemirror, doc=cm.getDoc(), undoBefore=doc.historySize().undo;
+        const remote=doc.linkedDoc({sharedHist:false});
         draft.applyingRemote=true;
-        try {cm.replaceRange(content.slice(start,newEnd),cm.posFromIndex(start),cm.posFromIndex(oldEnd),'+remote');}
-        finally {draft.applyingRemote=false;}
+        try {remote.replaceRange(content.slice(start,newEnd),remote.posFromIndex(start),remote.posFromIndex(oldEnd),'+remote');}
+        finally {doc.unlinkDoc(remote);draft.applyingRemote=false;}
+        if(doc.historySize().undo<undoBefore) draft.undoNotice='Some local undo history was discarded because it overlaps or shares lines with a collaborator’s edit. Review the shared history before changing it.';
       }
       const preview=document.querySelector('#report-preview'); if(preview)preview.innerHTML=markdown(content);
     }
@@ -536,7 +546,7 @@
     refreshStatus(draft);
     renderRecovery();
   }
-  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && draftKey(state.program,state.lane,state.report)===draft.key)status.textContent=reportStatus(draft);}
+  function refreshStatus(draft){const status=document.querySelector('#report-status');if(status && draftKey(state.program,state.lane,state.report)===draft.key)status.textContent=reportStatus(draft)+(draft.undoNotice ? ` ${draft.undoNotice}` : '');}
   window.addEventListener('storage',event=>{
     for(const draft of state.drafts.values()) if(event.key===storageKey(draft.key) || event.key===null){
       draft.storageBlocked=true;refreshStatus(draft);

@@ -50,10 +50,19 @@ test('real backend history stays continuous during paging and recovers an old co
   const oldPage=await get('/history?'+new URLSearchParams({...Object.fromEntries(query),before:String(boundary)}));
   const old=oldPage.history.find(e=>e.id===conflict.conflict_id);assert.ok(old);
   assert.equal(versions.length,0);
+  const oldRecord=page.locator('.record').filter({has:page.locator(`[data-version="${old.id}"]`)});
+  await oldRecord.getByText(new RegExp(`Event #${old.id}`)).waitFor();
+  assert.match(await oldRecord.innerText(),new RegExp(old.revision.slice(0,12)));
+  const editorBefore=await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue());
   await page.locator(`[data-result="${old.id}"]`).click();
+  assert.equal(await page.getByLabel('Version preview').inputValue(),'first head\n');
+  assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),editorBefore,'preview must not restore immediately');
+  await page.getByRole('button',{name:'Confirm restore version'}).click();
   await page.waitForFunction(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()==='first head\n');
   await page.getByText(/Shared draft ready/).waitFor();
   await page.locator(`[data-version="${old.id}"]`).click();
+  assert.equal(await page.getByLabel('Version preview').inputValue(),'old conflict input\n');
+  await page.getByRole('button',{name:'Confirm restore version'}).click();
   await page.waitForFunction(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()==='old conflict input\n');
   await page.getByText(/Shared draft ready/).waitFor();
   assert.deepEqual(versions,[old.head,old.revision]);
@@ -65,6 +74,17 @@ test('real backend history stays continuous during paging and recovers an old co
   assert.equal(after.unresolved_count,0);
   await page.waitForFunction(id=>{const r=[...document.querySelectorAll('.record')].find(x=>x.querySelector(`[data-version="${id}"]`));return r?.textContent.includes('(resolved)');},old.id,{timeout:10000});
   assert.equal(fs.readFileSync(report,'utf8'),'original\n');
+}));
+
+test('preview confirmation refuses to overwrite intervening editor changes', {timeout:30000},()=>fixture(async({browser,base})=>{
+  const page=await browser.newPage();await open(page,base);
+  await page.getByText('Shared history and conflicts').click();
+  await page.locator('.record').filter({hasText:'source:initial'}).getByRole('button',{name:'Preview this version'}).click();
+  assert.equal(await page.getByLabel('Version preview').inputValue(),'original\n');
+  await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+End');await page.keyboard.insertText(' local');
+  await page.getByRole('button',{name:'Confirm restore version'}).click();
+  assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'original\n local');
+  await page.getByText(/Version was not restored because the editor changed/).waitFor();
 }));
 
 test('fixture publish is not lost when a poll is in flight', {timeout:30000},()=>fixture(async({browser,base,report})=>{

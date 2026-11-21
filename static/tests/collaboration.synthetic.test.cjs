@@ -58,9 +58,11 @@ test('two browsers share synthetic edits and retain conflicts across restart', {
     await a.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror?.getValue()==='B edit\ntwo\nEXTERNAL\n');
     await a.getByText('Shared history and conflicts').click();
     await a.getByText('client:conflict').waitFor();
-    await a.locator('.record').filter({hasText:'source:initial'}).getByRole('button',{name:'Use this version'}).click();
+    await a.locator('.record').filter({hasText:'source:initial'}).getByRole('button',{name:'Preview this version'}).click();
+    await a.getByRole('button',{name:'Confirm restore version'}).click();
     await b.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror?.getValue()==='one\ntwo\nthree\n');
-    await a.locator('.record').filter({hasText:'source:merged'}).getByRole('button',{name:'Use resulting revision'}).click();
+    await a.locator('.record').filter({hasText:'source:merged'}).getByRole('button',{name:'Preview resulting revision'}).click();
+    await a.getByRole('button',{name:'Confirm restore version'}).click();
     await b.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror?.getValue()==='B edit\ntwo\nEXTERNAL\n');
     const publishTrace=[];
     a.on('request',r=>{if(r.url().includes('/api/collaboration?')&&r.method()==='POST'){const body=r.postDataJSON();if(body?.action==='publish')publishTrace.push({event:'request',revision:body.revision});}});

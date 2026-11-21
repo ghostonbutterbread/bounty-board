@@ -83,7 +83,8 @@ test('bounded metadata history pages old unresolved conflicts and fetches versio
   await page.getByText('client:new',{exact:true}).waitFor();
   assert.equal(await page.getByText('client:edge',{exact:true}).count(),1,'the moving recent page must not create a gap above older pages');
   assert.equal(versions.length,0);
-  await page.locator('.record').filter({hasText:'client:conflict'}).getByRole('button',{name:'Use this version'}).click();
+  await page.locator('.record').filter({hasText:'client:conflict'}).getByRole('button',{name:'Preview this version'}).click();
+  await page.getByRole('button',{name:'Confirm restore version'}).click();
   await page.waitForFunction(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()==='older selected content');
   assert.deepEqual(versions,[hash('input-1')]);assert.ok(calls.includes('/api/collaboration/history'));
 }));
