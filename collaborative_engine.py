@@ -61,6 +61,8 @@ class CollaborationStore:
                 CREATE TABLE IF NOT EXISTS retained_requests (key TEXT NOT NULL, operation TEXT NOT NULL,
                     request_id TEXT NOT NULL, revision TEXT NOT NULL, event_id INTEGER NOT NULL, result TEXT NOT NULL,
                     PRIMARY KEY (key, operation, request_id));
+                CREATE TABLE IF NOT EXISTS publication_attempts (key TEXT NOT NULL, operation TEXT NOT NULL,
+                    state TEXT NOT NULL, PRIMARY KEY (key, operation));
                 CREATE INDEX IF NOT EXISTS events_key_id ON events (key, id DESC);
                 CREATE INDEX IF NOT EXISTS events_conflicts ON events (key, id) WHERE kind LIKE '%:conflict';
             ''')
@@ -252,6 +254,32 @@ class CollaborationStore:
             if row is None:
                 raise ValueError('unknown retained observation')
             return dict(zip(('operation', 'request_id', 'base'), row))
+
+    def publication_state(self, key, operation):
+        with self._connect() as db:
+            row = db.execute('SELECT state FROM publication_attempts WHERE key=? AND operation=?', (self._key(key), operation)).fetchone()
+            return None if row is None else row[0]
+
+    def begin_publication(self, key, operation):
+        with self._connect() as db:
+            db.execute('INSERT INTO publication_attempts VALUES (?,?,?)', (self._key(key), operation, 'pending'))
+
+    def complete_publication(self, key, operation, state):
+        if state not in ('published', 'conflict', 'outcome_uncertain'):
+            raise ValueError('invalid publication state')
+        with self._connect() as db:
+            if db.execute('UPDATE publication_attempts SET state=? WHERE key=? AND operation=? AND state=?',
+                          (state, self._key(key), operation, 'pending')).rowcount != 1:
+                raise ValueError('publication attempt is not pending')
+
+    def request_result(self, key, request_id):
+        """Look up a previously committed request without submitting it again."""
+        key = self._key(key)
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
+            raise ValueError('invalid request id')
+        with self._connect() as db:
+            row = db.execute('SELECT result FROM requests WHERE key=? AND request_id=?', (key, request_id)).fetchone()
+            return None if row is None else json.loads(row[0])
 
     def receipt(self, key, base, content, request_id, conflict_id=None):
         """Return only an exact previously committed request; never create work."""

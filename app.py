@@ -236,11 +236,14 @@ def valid_tailnet_host(host):
 
 
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
-                collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None):
+                collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
+                report_autosave=False):
     import os
     import tempfile
     import threading
     from collaborative_engine import CollaborationStore
+    if report_autosave and (collaboration_dir is None or experimental_fixture_publish):
+        raise ValueError('report autosave requires a collaboration store and excludes fixture publication')
     if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
         raise ValueError('invalid canonical tailnet hostname')
     root = Path(root).absolute()
@@ -323,7 +326,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if collaboration is None:
                 return self.reply(503, {'error': 'collaboration_disabled'})
             try:
-                extra = {'history': ('before',), 'version': ('revision',)}.get(view, ())
+                extra = {'history': ('before',), 'version': ('revision',), 'recovery': ('request_id',)}.get(view, ())
                 key, relative = self.collaboration_identity(extra)
                 params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
                 before = None
@@ -334,6 +337,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     before = int(raw)
                 if view == 'version' and 'revision' not in params:
                     raise ValueError('missing revision')
+                if view == 'recovery' and 'request_id' in params:
+                    request_id = params['request_id'][0]
+                    if not report_autosave or not request_id or len(request_id) > 200:
+                        raise ValueError('invalid recovery request')
                 payload = {}
                 if write:
                     if (not self.trusted_request(require_origin=True) or
@@ -353,6 +360,26 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         raise ValueError('invalid payload')
                 with collaboration_lock, collaboration.observation():
                     collaboration.bind_source(root)
+                    if view == 'recovery' and 'request_id' in params:
+                        from report_publisher import inspect, operation_id
+                        current = collaboration.current(key)
+                        request_receipt = collaboration.request_result(key, params['request_id'][0])
+                        if current is None or request_receipt is None:
+                            return self.reply(404, {'error': 'not_observed'})
+                        current['store_receipt'] = request_receipt
+                        operation = operation_id(key, params['request_id'][0])
+                        state = collaboration.publication_state(key, operation)
+                        current['publication'] = inspect(root, relative, collaboration.root / 'publication' / operation)
+                        if state is None and request_receipt['status'] == 'conflict':
+                            current['publication']['state'] = 'conflict'
+                            current['publication']['reasons'].append('unresolved_store_conflict')
+                        elif state in (None, 'pending', 'outcome_uncertain'):
+                            current['publication']['state'] = 'outcome_uncertain'
+                            current['publication']['reasons'].append('incomplete_attempt')
+                        elif state == 'conflict' and current['publication']['state'] == 'published':
+                            current['publication']['state'] = 'conflict'
+                        current['store_saved'] = True
+                        return self.reply(200, current)
                     try:
                         content = read_file(root, relative).decode('utf-8')
                     except FileNotFoundError:
@@ -365,6 +392,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                 receipt = collaboration.receipt(key, payload['base'], payload['content'],
                                                                 payload['request_id'], payload.get('conflict_id'))
                                 if receipt is not None:
+                                    if report_autosave:
+                                        from report_publisher import operation_id
+                                        receipt['store_saved'] = True
+                                        receipt['publication'] = {'state': 'outcome_uncertain',
+                                                                  'operation': operation_id(key, payload['request_id']),
+                                                                  'reasons': ['source_unavailable']}
                                     return self.reply(200, receipt)
                             return self.reply(409, {'error': 'source_unavailable', 'message': 'Retain your local draft; restore the source before saving.'})
                         if view == 'history':
@@ -411,6 +444,47 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         result = {'status': 'published', 'revision': current['revision']}
                     elif write:
                         result = collaboration.submit(key, payload['base'], payload['content'], payload['request_id'], payload.get('conflict_id'))
+                        if report_autosave:
+                            from report_publisher import inspect, operation_id, publish, retained_snapshot
+                            result['store_saved'] = True
+                            operation = operation_id(key, payload['request_id'])
+                            prior = collaboration.publication_state(key, operation)
+                            if prior is not None:
+                                result['publication'] = inspect(root, relative, collaboration.root / 'publication' / operation)
+                                if prior in ('pending', 'outcome_uncertain'):
+                                    result['publication']['state'] = 'outcome_uncertain'
+                                    result['publication']['reasons'].append('incomplete_attempt')
+                                elif prior == 'conflict' and result['publication']['state'] == 'published':
+                                    result['publication']['state'] = 'conflict'
+                            elif result['status'] == 'conflict' or collaboration.unresolved_count(key):
+                                result['publication'] = {'state': 'conflict', 'reasons': ['unresolved_store_conflict']}
+                            elif collaboration.current(key)['revision'] != result['revision']:
+                                result['publication'] = {'state': 'conflict', 'reasons': ['head_changed']}
+                            else:
+                                try:
+                                    collaboration.begin_publication(key, operation)
+                                    result['publication'] = publish(root, relative, collaboration.root, key,
+                                                                    payload['request_id'], content, result['content'])
+                                    if result['publication']['state'] in ('published', 'conflict'):
+                                        snapshot = retained_snapshot(collaboration.root, result['publication']['operation'])
+                                        if snapshot is not None:
+                                            import hashlib
+                                            import uuid
+                                            actual = read_file(root, relative).decode('utf-8')
+                                            collaboration.observe_source(key, actual)
+                                            base, displaced = snapshot
+                                            if hashlib.sha256(displaced.encode('utf-8')).hexdigest() != base:
+                                                observation = collaboration.observe_retained(key, result['publication']['operation'],
+                                                                                             base, displaced, uuid.uuid4().hex)
+                                                result['publication']['retained_observation'] = observation['status']
+                                            if actual != result['content'] and result['publication']['state'] == 'published':
+                                                result['publication']['state'] = 'conflict'
+                                                result['publication']['reasons'].append('source_changed')
+                                    collaboration.complete_publication(key, operation, result['publication']['state'])
+                                except (OSError, UnicodeError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError):
+                                    result['publication'] = {'state': 'outcome_uncertain',
+                                                             'operation': operation_id(key, payload['request_id']),
+                                                             'reasons': ['publication_or_observation_failed']}
                     else:
                         result = collaboration.current(key)
                         if result is None:
@@ -479,6 +553,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'finding_metadata_warning': METADATA_WRITE_WARNING,
                                           'report_edit': False,
                                           'collaboration': collaboration is not None,
+                                          'report_autosave': report_autosave,
                                           'fixture_publish': experimental_fixture_publish}
                 self.reply(200, result)
                 return
@@ -639,6 +714,7 @@ def parse_config(argv=None):
     parser.add_argument('--collaboration-dir', type=Path, help='opt in to experimental private shared draft storage')
     parser.add_argument('--collaboration-max-bytes', type=int, help='maximum SQLite database size in bytes (default 512 MiB; minimum 65536)')
     parser.add_argument('--experimental-fixture-publish', action='store_true', help='dangerous test-only source writes, restricted to TMPDIR')
+    parser.add_argument('--report-autosave', action='store_true', help='opt in to experimental source publication; external writers and sync can race')
     args = parser.parse_args(argv)
     settings = {}
     if args.config:
@@ -681,6 +757,7 @@ def main():
                 accept_uncoordinated_writes=args.accept_uncoordinated_writes,
                 tailnet_host=args.tailnet_host, collaboration_dir=args.collaboration_dir,
                 experimental_fixture_publish=args.experimental_fixture_publish,
+                **({'report_autosave': True} if args.report_autosave else {}),
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
 
