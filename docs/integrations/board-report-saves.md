@@ -3,7 +3,7 @@
 - **Status:** incomplete; no real report autosave, no activation, no release approval.
 - **Owner / branch:** delegated Hermes implementer, `feat/board-report-saves`, `/home/ryushe/projects/bounty-board-report-saves`.
 - **Assigned base:** `68d30e413bad1c2d5871a54fbff1983405062532`; intended eventual integration target `beta` (local observed tip `553a06cebadd4fe9ded2213466a68510117060d9`, an ancestor of base); parent determines integration/release after independent review. No remote fetch was authorized.
-- **Last updated:** 2026-11-21. **Recovery checkpoint:** this initial implementation/dossier commit; the subsequent handoff-only commit records its exact SHA.
+- **Last updated:** 2026-11-21. **Immutable implementation/recovery checkpoint:** `0fc6e722197307bc2da4dd7f70312fb37ec35a45`. The branch tip includes a subsequent dossier-only handoff commit; verify it separately.
 - **References:** prior standalone `feat/collaboration-exchange` and its `docs/integrations/collaboration-exchange.md`; scratch `exchange_publication_findings.md`. The standalone experiment is not imported or connected to the app.
 
 ## Intent and implementation
