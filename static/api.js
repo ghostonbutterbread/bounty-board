@@ -48,6 +48,10 @@ window.BoardAPI = (() => {
     const query = new URLSearchParams({family:program.family,program:program.name,lane,path});
     return request(`/api/report?${query}`, {cache:'no-store'});
   }
+  function observation(program, lane, path) {
+    const query = new URLSearchParams({family:program.family,program:program.name,lane,path});
+    return request(`/api/map-observation?${query}`, {cache:'no-store'});
+  }
   function collaboration(program, lane, path, payload, rootIdentity) {
     const query = new URLSearchParams({family:program.family,program:program.name,lane,path,root_identity:rootIdentity});
     const options=payload ? {method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify(payload),signal:AbortSignal.timeout(10000)} : {cache:'no-store',signal:AbortSignal.timeout(10000)};
@@ -57,5 +61,5 @@ window.BoardAPI = (() => {
     const query=new URLSearchParams({family:program.family,program:program.name,lane,path,root_identity:rootIdentity,...extra});
     return request(`/api/collaboration/${view}?${query}`,{cache:'no-store',signal:AbortSignal.timeout(10000)});
   }
-  return { load: async () => normalize(await request('/api/data', {cache:'no-store'})), report, collaboration, collaborationRead, capability, write };
+  return { load: async () => normalize(await request('/api/data', {cache:'no-store'})), report, observation, collaboration, collaborationRead, capability, write };
 })();

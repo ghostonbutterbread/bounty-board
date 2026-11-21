@@ -227,6 +227,18 @@
   }
   function unavailable(name){return `<section class="panel panel-pad"><h2>${esc(name)}</h2><div class="state">This collection was not provided by the backend.</div></section>`;}
   function records(key,label,description) {return recordList(rows(key),label,description);}
+  function observations(key, label) {
+    const items=rows(key);
+    if(!items) return unavailable(label);
+    if(!items.length) return `<section class="panel panel-pad"><h2>${esc(label)}</h2><div class="state">No records in this lane.</div></section>`;
+    const fields=['url','surface','scope','status','path','tags','timestamp'];
+    return `<section class="panel panel-pad"><h2>${esc(label)}</h2><p class="hint">Index metadata; archived and residual labels are preserved. Bodies are loaded only when opened.</p>${items.map((item,i)=>{
+      if(!item || typeof item!=='object') return '<div class="record">Invalid index entry</div>';
+      const metadata=fields.map(k=>`<p class="hint record-value"><b>${esc(k)}:</b> ${esc(item[k] == null || item[k] === '' ? 'Not recorded' : display(item[k]))}</p>`).join('');
+      const action=typeof item.path==='string' && item.path ? `<button data-observation="${i}">Open observation</button><div data-observation-body role="status"></div>` : '<p>Observation path not recorded.</p>';
+      return `<div class="record"><strong>${esc(item.title || 'Untitled observation')}</strong>${metadata}${action}</div>`;
+    }).join('')}</section>`;
+  }
   function recordList(items,label,description) {
     if(!items) return unavailable(label);
     if(!items.length) return `<section class="panel panel-pad"><h2>${esc(label)}</h2><p class="hint">${esc(description)}</p><div class="state">No ${esc(label.toLowerCase())} records in this lane.</div></section>`;
@@ -581,7 +593,7 @@
     if(draft.hasDraft) return 'Draft saved in browser, not to the source report.';
     return 'Saving to report unavailable. Edits are saved as browser drafts.';
   }
-  function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return records('map','MapStore','Mapped records from the selected lane.');case 'gadgets':return records('gadgets','Gadgets','Gadget records from the selected lane.');default:return '';}}
+  function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
   function render() {
     if(editor){editor.toTextArea();editor=null;}
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
@@ -605,7 +617,20 @@
   }
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
-    if(target.hasAttribute('data-find-shared')){
+    if(target.hasAttribute('data-observation')){
+      const item=(rows(state.section)||[])[Number(target.dataset.observation)], box=target.parentElement.querySelector('[data-observation-body]');
+      const program=currentProgram(), lane=state.lane, section=state.section;
+      if(!item || !box || !program || typeof item.path!=='string')return;
+      target.disabled=true;box.textContent='Loading observation…';
+      try {
+        const result=await BoardAPI.observation(program,lane,item.path);
+        if(!box.isConnected || currentProgram()!==program || state.lane!==lane || state.section!==section)return;
+        if(typeof result.content!=='string')throw new Error('Invalid response');
+        const pre=document.createElement('pre');pre.className='observation-body';pre.textContent=result.content;box.replaceChildren(pre);
+      } catch {if(box.isConnected)box.textContent='Observation unavailable or no longer indexed.';}
+      finally {if(target.isConnected)target.disabled=false;}
+    }
+    else if(target.hasAttribute('data-find-shared')){
       const box=app.querySelector('[data-shared-recovery]'), input=app.querySelector('#saved-shared-path');
       const program=currentProgram(), lane=state.lane, path=input.value, root=rootIdentity();
       box.replaceChildren();target.disabled=true;

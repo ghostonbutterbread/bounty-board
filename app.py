@@ -492,6 +492,31 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'fixture_publish': experimental_fixture_publish}
                 self.reply(200, result)
                 return
+            if url.path == '/api/map-observation':
+                try:
+                    params = parse_qs(url.query, keep_blank_values=True, strict_parsing=True,
+                                      encoding='utf-8', errors='strict', max_num_fields=4)
+                    if set(params) != {'family', 'program', 'lane', 'path'} or any(len(v) != 1 for v in params.values()):
+                        raise ValueError('invalid selector')
+                    family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
+                    if (family not in FAMILIES or lane not in FAMILIES[family] or
+                            not program or program.startswith('_') or program in ('.', '..') or
+                            '/' in program or '\0' in program or '\0' in path or
+                            any(part in ('', '.', '..') for part in path.split('/')) or
+                            path.split('/')[-1] != 'index.md'):
+                        raise ValueError('invalid selector')
+                    prefix = f'{family}/{program}/{lane}/recon/maps/'
+                    raw = read_file(root, prefix + 'map.jsonl').decode('utf-8')
+                    entries = [json.loads(line) for line in raw.splitlines() if line.strip()]
+                    if any(not isinstance(item, dict) or not isinstance(item.get('tags', []), list) for item in entries):
+                        raise ValueError('invalid index')
+                    if sum(item.get('path') == path for item in entries) != 1:
+                        raise ValueError('unindexed or ambiguous')
+                    content = read_file(root, prefix + path).decode('utf-8')
+                    self.reply(200, {'content': content})
+                except (OSError, ValueError, UnicodeError):
+                    self.reply(404, {'error': 'observation_not_found_or_unavailable'})
+                return
             if url.path == '/api/report':
                 params = parse_qs(url.query, keep_blank_values=True)
                 try:
