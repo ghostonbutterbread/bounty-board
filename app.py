@@ -177,6 +177,18 @@ def reports(lane, warnings, findings=None):
         warnings.append('reports_unavailable_or_invalid')
         return None
     items = []
+    ownership = {}
+    for finding in findings or []:
+        for field in ('report_path', 'evidence_path'):
+            recorded = finding.get(field)
+            if not isinstance(recorded, str) or not recorded:
+                continue
+            candidate = Path(recorded)
+            if not candidate.is_absolute():
+                candidate = lane / candidate
+            fid = finding.get('fid')
+            if fid:
+                ownership.setdefault(candidate, {'report_path': [], 'evidence_path': []})[field].append(fid)
     def onerror(_error):
         warnings.append('reports_unavailable_or_invalid')
     for directory, dirs, files in os.walk(base, followlinks=False, onerror=onerror):
@@ -185,17 +197,7 @@ def reports(lane, warnings, findings=None):
             file = Path(directory) / name
             if file.suffix.lower() == '.md' and not file.is_symlink():
                 rel = file.relative_to(base).as_posix()
-                owners = {'report_path': [], 'evidence_path': []}
-                for finding in findings or []:
-                    for field in owners:
-                        recorded = finding.get(field)
-                        if not isinstance(recorded, str) or not recorded:
-                            continue
-                        candidate = Path(recorded)
-                        if not candidate.is_absolute():
-                            candidate = lane / candidate
-                        if candidate == file.absolute() and finding.get('fid'):
-                            owners[field].append(finding['fid'])
+                owners = ownership.get(file.absolute(), {'report_path': [], 'evidence_path': []})
                 try:
                     text = read_file(lane, 'reports/' + rel).decode('utf-8')
                 except (OSError, ValueError, UnicodeError):

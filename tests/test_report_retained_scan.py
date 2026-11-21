@@ -69,6 +69,37 @@ class ScanTests(unittest.TestCase):
                 self.assertNotEqual(recovery['publication']['state'], 'published')
                 self.assertEqual(self.report.read_text(), two['content'])
 
+    def test_generated_navigation_is_never_editable_or_publishable(self):
+        original = '<!-- generated: bounty-core-report-navigation -->\n# Navigation\n'
+        self.report.write_text(original)
+        status, state = self.request()
+        self.assertEqual(status, 200)
+        payload = {'base': state['revision'], 'content': 'overwrite\n', 'request_id': 'navigation-edit'}
+        status, result = self.request('POST', payload)
+        self.assertEqual(status, 403, result)
+        self.assertEqual(self.report.read_text(), original)
+        payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'],
+                   'source_snapshot': original, 'request_id': 'navigation-reconcile'}
+        status, result = self.request('POST', payload)
+        self.assertEqual(status, 403, result)
+        self.assertEqual(self.report.read_text(), original)
+
+    def test_poll_interleaving_does_not_starve_real_publication_after_65_saves(self):
+        state = self.request()[1]
+        for n in range(65):
+            payload = {'base': state['revision'], 'content': f'version {n}\n', 'request_id': f'published-{n}'}
+            status, state = self.request('POST', payload)
+            self.assertEqual(status, 200, (n, state))
+            self.assertEqual(state['publication']['state'], 'published', (n, state))
+        self.assertEqual(self.request()[1]['reconciliation']['state'], 'backlog')
+        state = self.request()[1]
+        self.assertEqual(state['reconciliation']['state'], 'complete')
+        payload = {'base': state['revision'], 'content': 'the next edit\n', 'request_id': 'next'}
+        status, result = self.request('POST', payload)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['publication']['state'], 'published')
+        self.assertEqual(self.report.read_text(), payload['content'])
+
     def test_scan_backlog_is_bounded_and_blocks_post_until_sweep_finishes(self):
         base = self.request()[1]
         store = CollaborationStore(self.private)
