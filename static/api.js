@@ -49,5 +49,9 @@ window.BoardAPI = (() => {
     const options=payload ? {method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify(payload),signal:AbortSignal.timeout(10000)} : {cache:'no-store',signal:AbortSignal.timeout(10000)};
     return request(`/api/collaboration?${query}`,options);
   }
-  return { load: async () => normalize(await request('/api/data', {cache:'no-store'})), report, collaboration, capability, write };
+  function collaborationRead(program,lane,path,rootIdentity,view,extra) {
+    const query=new URLSearchParams({family:program.family,program:program.name,lane,path,root_identity:rootIdentity,...extra});
+    return request(`/api/collaboration/${view}?${query}`,{cache:'no-store',signal:AbortSignal.timeout(10000)});
+  }
+  return { load: async () => normalize(await request('/api/data', {cache:'no-store'})), report, collaboration, collaborationRead, capability, write };
 })();
