@@ -3,6 +3,7 @@
 - **Status:** experimental backend vertical slice implemented and synthetic-tested; **not reviewed, integrated, activated, or approved for real deployment**. Parent owns independent review, integration, UI, and activation decisions.
 - **Owner / ref / checkout:** delegated Hermes worker; `feat/board-report-saves`; `/home/ryushe/projects/bounty-board-report-saves`.
 - **Assigned base:** `21a2244ab5ee93be5667c2d3deda2276472b6345`; prior source-observation primitive `0fc6e722197307bc2da4dd7f70312fb37ec35a45`; eventual target `beta`. `git fetch origin beta` succeeded. No merge, push, service change, real source write, or frontend change.
+- **Implementation / recovery checkpoint:** `06a714f8cb3f34db25eab6f4fd7f4c5fa7bf1cca`; the branch tip includes a subsequent dossier-only handoff commit. Verify that tip separately.
 - **Inspiration:** separate synthetic `feat/collaboration-exchange` experiment (`exchange_experiment.py`, dossier); its TMPDIR/marker fixture guard is not repurposed as a real-use guard.
 
 ## Implemented contract
