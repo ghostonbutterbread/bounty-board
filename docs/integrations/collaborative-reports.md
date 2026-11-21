@@ -5,7 +5,7 @@
 - **Branch:** `feat/collaborative-reports`
 - **Base:** `a7d90d08f3df10816f4afdb41dee0f1884e1cdfb`
 - **Integration target:** `feat/tailnet-access`
-- **Original engine checkpoint:** `35081436f5dd5e5ea7b2dfa31d2a99eedc4b2d80`. The later branch tip contains the app slice; the final dossier-only handoff identifies its implementation commit.
+- **Implementation / immutable recovery checkpoint:** `01a1dc9eec5ac343ca742733f2cd049037fff1f9`; the branch tip also contains a later dossier-only handoff. The original offline engine checkpoint is `35081436f5dd5e5ea7b2dfa31d2a99eedc4b2d80`.
 - **Intent:** Google-Docs-like cross-device Markdown draft editing, retaining conflicting and external versions rather than hiding them.
 
 ## Contract and operation
