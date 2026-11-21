@@ -94,6 +94,7 @@
           let saved;try {saved=JSON.parse(raw);} catch {}
           if(!saved || saved.version!==1 || typeof saved.text!=='string' || typeof saved.original!=='string' || !(saved.revision===null || typeof saved.revision==='string') || (saved.conflict!==undefined && typeof saved.conflict!=='boolean')) draft.storageBlocked=true;
           else {draft.text=saved.text;draft.original=saved.original;draft.revision=saved.revision;draft.hasDraft=saved.hasDraft!==false;draft.conflictId=saved.conflictId;draft.conflictBase=saved.conflictBase;draft.staleResolution=!!saved.staleResolution;draft.pendingShared=saved.pendingShared || null;draft.publicationNotice=typeof saved.publicationNotice==='string'?saved.publicationNotice:null;draft.publicationDetail=saved.publicationDetail || null;draft.reviewedPublications=Array.isArray(saved.reviewedPublications)?saved.reviewedPublications:[];draft.status=saved.conflict?'conflict':draft.hasDraft?'unsaved':'saved';}
+          if(draft.pendingShared && draft.publicationNotice?.includes('Retrying the exact request'))draft.publicationNotice='Automatic retry stopped on reload. The outcome may be unconfirmed; inspect the original save and retain your draft.';
         }
       } catch {draft.storageError=true;draft.storageUnreadable=true;}
       state.drafts.set(key,draft);
@@ -406,7 +407,7 @@
         draft.markdownInspection=report.content;showSharedHistory(draft,draft.sharedHistory||[]);
       } catch {draft.publicationNotice='Current Markdown could not be inspected. The file may have changed; retain the request and draft.';refreshStatus(draft);}
     });
-    box.querySelector('[data-retry-original]')?.addEventListener('click',()=>{draft.recoveryNotFound=false;draft.retryExhausted=false;saveShared(draft,true);});
+    box.querySelector('[data-retry-original]')?.addEventListener('click',()=>{clearTimeout(draft.backlogRetryTimer);draft.backlogRetries=0;draft.recoveryNotFound=false;draft.retryExhausted=false;saveShared(draft,true);});
     box.querySelector('[data-review-conflict]')?.addEventListener('click',()=>{
       const pending=draft.pendingShared, reviewed=draft.reviewedPublications || [];
       draft.reviewedPublications=[...reviewed,{request:pending,publication:draft.publicationDetail}];
@@ -579,6 +580,7 @@
   async function inspectSave(draft) {
     const pending=draft.pendingShared;
     if(!pending || draft.collabBusy)return;
+    clearTimeout(draft.backlogRetryTimer);
     draft.collabBusy=true;draft.recoveryNotFound=false;
     try {
       const result=await BoardAPI.collaborationRead(draft.collabProgram,draft.lane,draft.collabPath,draft.collabRoot,'recovery',{request_id:pending.request_id});
@@ -631,6 +633,15 @@
     if(reportReadOnly(draft) || draft.retryExhausted || (state.data?.capabilities?.report_autosave && draft.pendingShared) || draft.storageBlocked || draft.storageUnreadable || draft.storageError || (draft.sourceUnavailable && !draft.pendingShared))return;
     draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
   }
+  // Only an explicit pre-submit backlog response permits automatic replay.
+  function scheduleBacklogRetry(draft,pending,delay) {
+    clearTimeout(draft.backlogRetryTimer);
+    draft.backlogRetryTimer=setTimeout(()=>{
+      if(draft.pendingShared!==pending || draft.storageBlocked || draft.storageUnreadable || draft.storageError || reportReadOnly(draft))return;
+      if(draft.collabBusy){scheduleBacklogRetry(draft,pending,100);return;}
+      saveShared(draft,true);
+    },delay);
+  }
   async function saveShared(draft, retryOriginal=false) {
     const autosave=state.data?.capabilities?.report_autosave===true;
     if(reportReadOnly(draft) || draft.collabBusy || !draft.collabReady || (draft.status==='conflict' && !retryOriginal) || (autosave && draft.pendingShared && !retryOriginal)) return;
@@ -643,6 +654,7 @@
     if(autosave){draft.publicationNotice='Saving shared draft; Markdown publication is pending and unconfirmed.';showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);}
     try {
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,pending,draft.collabRoot);
+      draft.backlogRetries=0;
       if(autosave){
         if(result.store_saved!==true)throw new Error('Missing store receipt');
         handleAutosaveReceipt(draft,pending,result,result.publication);
@@ -666,7 +678,20 @@
         draft.revision=result.incoming_revision; draft.original=pending.content; persistDraft(draft); scheduleSharedSave(draft);
       }
     } catch (error) {
-      if(autosave && pending.action==='reconcile' && error.code==='reconciliation_changed'){
+      if(autosave && error.status===503 && error.code==='retained_scan_backlog'){
+        draft.hasDraft=true;
+        const retries=draft.backlogRetries||0, limit=3;
+        if(retries<limit){
+          draft.backlogRetries=retries+1;
+          draft.publicationNotice=`Retained history scan is backlogged; this attempt was not submitted. Retrying the exact request (${retries+1}/${limit}); newer edits are retained.`;
+          if(persistDraft(draft))scheduleBacklogRetry(draft,pending,500 * 2 ** retries);
+        } else {
+          draft.publicationNotice='Retained history scan is still backlogged. Automatic retries exhausted; the request and newer edits are retained. Inspect the original save before retrying.';
+          persistDraft(draft);
+        }
+        showSharedHistory(draft,draft.sharedHistory||[]);
+      }
+      else if(autosave && pending.action==='reconcile' && error.code==='reconciliation_changed'){
         draft.pendingShared=null;draft.mergePreview=null;draft.reconciliationState=null;
         draft.publicationNotice='The merged preview is stale; Markdown was not saved. Review the changed shared draft and Markdown again.';
         persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);
