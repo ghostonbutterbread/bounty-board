@@ -53,12 +53,19 @@ def ledger(lane, warnings):
         fields = ('fid', 'type', 'title', 'class_name', 'severity', 'status',
                   'review_tier', 'submission', 'submission_status', 'platform_outcome', 'file',
                   'severity_rationale', 'report_path', 'evidence_path', 'report_dir', 'current')
-        return [{**{field: entry.get(field) for field in fields},
-                 'status': entry.get('status') or (entry['current'].get('status') if isinstance(entry.get('current'), dict) else None),
-                 'title': entry.get('title') or entry.get('type')} for entry in raw['findings']]
+        # Reject unsafe JSON anywhere in this ledger, including fields that are
+        # not currently projected, without exposing its contents in a warning.
+        json.dumps(raw, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        result = [{**{field: entry.get(field) for field in fields},
+                   'status': entry.get('status') or (entry['current'].get('status') if isinstance(entry.get('current'), dict) else None),
+                   'title': entry.get('title') or entry.get('type')} for entry in raw['findings']]
+        # Account for the actual portfolio nesting at the response boundary.
+        json.dumps({'programs': [{'lanes': [{'findings': result}]}]},
+                   ensure_ascii=False, allow_nan=False).encode('utf-8')
+        return result
     except FileNotFoundError:
         warnings.append('ledger_missing')
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, RecursionError):
         warnings.append('ledger_unavailable_or_invalid')
     return None
 
@@ -290,7 +297,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     import os
     import tempfile
     import threading
-    from collaborative_engine import CollaborationStore
+    from collaborative_engine import CollaborationStore, GitUnavailableError
     if report_autosave and (collaboration_dir is None or experimental_fixture_publish):
         raise ValueError('report autosave requires a collaboration store and excludes fixture publication')
     if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
@@ -659,7 +666,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                                     result['publication']['state'] = 'conflict'
                                                     result['publication']['reasons'].append('source_changed')
                                     collaboration.complete_publication(key, operation, result['publication']['state'])
-                                except (OSError, UnicodeError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError):
+                                except (GitUnavailableError, OSError, UnicodeError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError):
                                     result['publication'] = {'state': 'outcome_uncertain',
                                                              'operation': operation_id(key, payload['request_id']),
                                                              'reasons': ['publication_or_observation_failed']}
@@ -677,6 +684,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.reply(200, result)
             except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
                 return self.reply(409 if write else 404, {'error': 'invalid_or_conflicting_request'})
+            except GitUnavailableError:
+                return self.reply(503, {'error': 'git_unavailable', 'message': 'Retain your local draft; install Git and make git available on the server PATH, then retry with the same request ID and inspect the result.'})
             except sqlite3.Error as exc:
                 if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL:
                     return self.reply(503, {'error': 'collaboration_capacity', 'message': 'Retain your local draft; increase the store limit or free disk space, then retry with the same request ID.'})

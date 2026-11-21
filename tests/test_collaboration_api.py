@@ -2,6 +2,7 @@
 import http.client
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -13,6 +14,49 @@ import app
 
 
 class CollaborationAPITests(unittest.TestCase):
+    def test_missing_git_only_blocks_merge_and_retry_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'root'; report = root / 'web_bounty/example/web/reports/example.md'
+            report.parent.mkdir(parents=True); report.write_text('one\ntwo\nthree\n')
+            empty_path = Path(tmp) / 'empty-path'; empty_path.mkdir()
+            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private')
+            thread = threading.Thread(target=server.serve_forever); thread.start()
+            identity = dict(family='web_bounty', program='example', lane='web', path='example.md',
+                            root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest())
+            def request(method, body=None):
+                host = f'127.0.0.1:{server.server_port}'
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+                try:
+                    conn.request(method, '/api/collaboration?' + urlencode(identity),
+                                 json.dumps(body) if body is not None else None,
+                                 {'Host': host, 'Origin': 'http://' + host, 'Content-Type': 'application/json',
+                                  'X-Requested-With': 'Bounty-Board'})
+                    response = conn.getresponse(); raw = response.read()
+                    self.assertNotIn(str(root).encode(), raw)
+                    return response.status, json.loads(raw)
+                finally:
+                    conn.close()
+            try:
+                with mock.patch.dict(os.environ, {'PATH': str(empty_path)}):
+                    base = request('GET')[1]['revision']
+                    first_status, first = request('POST', {'base': base, 'content': 'ONE\ntwo\nthree\n', 'request_id': 'first'})
+                    self.assertEqual((first_status, first['status']), (200, 'saved'))
+                    payload = {'base': base, 'content': 'one\ntwo\nTHREE\n', 'request_id': 'retry'}
+                    status, failure = request('POST', payload)
+                    self.assertEqual((status, failure['error']), (503, 'git_unavailable'))
+                    self.assertIn('git', failure['message'].lower())
+                    self.assertIn('path', failure['message'].lower())
+                    self.assertIn('draft', failure['message'].lower())
+                    self.assertIn('same request', failure['message'].lower())
+                    self.assertNotIn('ONE\\ntwo\\nthree', json.dumps(failure))
+                    self.assertEqual(request('GET')[1]['revision'], first['revision'])
+                status, merged = request('POST', payload)
+                self.assertEqual((status, merged['status'], merged['content']), (200, 'merged', 'ONE\ntwo\nTHREE\n'))
+                self.assertEqual(request('POST', payload)[1], merged)
+                self.assertEqual(report.read_text(), 'one\ntwo\nthree\n')
+            finally:
+                server.shutdown(); thread.join(); server.server_close()
+
     def test_simultaneous_slow_collaboration_requests_are_admission_bounded(self):
         import socket
         import time

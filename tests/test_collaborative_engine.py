@@ -5,6 +5,22 @@ from pathlib import Path
 
 
 class CollaborationEngineTests(unittest.TestCase):
+    def test_git_launch_failure_preserves_cause_and_other_os_errors(self):
+        from unittest import mock
+        import collaborative_engine
+        with tempfile.TemporaryDirectory() as tmp:
+            store = collaborative_engine.CollaborationStore(Path(tmp) / 'private')
+            for cause in (FileNotFoundError('missing executable'), PermissionError('not executable')):
+                with self.subTest(cause=type(cause).__name__), mock.patch.object(collaborative_engine.subprocess, 'run', side_effect=cause):
+                    with self.assertRaises(collaborative_engine.GitUnavailableError) as raised:
+                        store._merge('current', 'base', 'incoming')
+                    self.assertIs(raised.exception.__cause__, cause)
+            other = OSError('unrelated process failure')
+            with mock.patch.object(collaborative_engine.subprocess, 'run', side_effect=other):
+                with self.assertRaises(OSError) as raised:
+                    store._merge('current', 'base', 'incoming')
+                self.assertIs(raised.exception, other)
+
     def test_corrupt_retained_version_is_not_returned_as_confirmed(self):
         import sqlite3
         from contextlib import closing

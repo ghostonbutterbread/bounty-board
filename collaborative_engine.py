@@ -26,6 +26,10 @@ def _revision(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
+class GitUnavailableError(Exception):
+    """The Git executable required for a three-way merge could not start."""
+
+
 class CollaborationStore:
     def __init__(self, root, max_store_bytes=DEFAULT_STORE_BYTES):
         if type(max_store_bytes) is not int or max_store_bytes < 65536:
@@ -141,8 +145,11 @@ class CollaborationStore:
             paths = [Path(tmp) / name for name in ('current', 'base', 'incoming')]
             for path, text in zip(paths, (current, base, incoming)):
                 path.write_text(text, encoding='utf-8', newline='')
-            result = subprocess.run(['git', 'merge-file', '-p', '--', *(str(p) for p in paths)],
-                                    capture_output=True, timeout=15, check=False)
+            try:
+                result = subprocess.run(['git', 'merge-file', '-p', '--', *(str(p) for p in paths)],
+                                        capture_output=True, timeout=15, check=False)
+            except (FileNotFoundError, PermissionError) as exc:
+                raise GitUnavailableError('git merge-file could not start') from exc
         # git returns the conflict count (capped at 127); fatal errors return 255.
         if 1 <= result.returncode <= 127:
             return None

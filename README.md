@@ -6,7 +6,7 @@ A local-first workspace for navigating bug-bounty findings, surface coverage, re
 
 ## Run locally
 
-Requires Python 3.11 or newer; the server uses the Python standard library. The default root is `~/Shared`; the root must contain `web_bounty/` and/or `binaries/`.
+Requires Python 3.11 or newer; the server's Python code uses the standard library. The default root is `~/Shared`; the root must contain `web_bounty/` and/or `binaries/`. Read-only use and simple shared-draft edits do not require Git; three-way collaboration merges require the `git` executable on the server's `PATH` (`git merge-file`).
 
 ```sh
 python3 app.py --root "$HOME/Shared" --port 9001
@@ -43,7 +43,7 @@ Browser storage is origin-scoped: `http://127.0.0.1:9001`, `http://localhost:900
 
 ### Optional shared drafts and experimental report autosave
 
-Choose a private collaboration directory outside the source tree; it contains sensitive drafts, retained versions and publication records. Shared drafts without source publication use `--collaboration-dir` alone. To also opt in to experimental source publication:
+Choose a private collaboration directory outside the source tree; it contains sensitive drafts, retained versions and publication records. Shared drafts without source publication use `--collaboration-dir` alone. Install Git and ensure `git` is executable on the server's `PATH` for concurrent edits that need a three-way merge. If it is unavailable, retain the draft, restore Git, and retry with the same request ID; inspect the result. Reads and edits that need no merge still work. To also opt in to experimental source publication:
 
 ```sh
 python3 app.py --root /path/to/data --port 9001 \
