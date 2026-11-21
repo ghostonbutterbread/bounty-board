@@ -236,7 +236,7 @@ def valid_tailnet_host(host):
 
 
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
-                collaboration_dir=None, experimental_fixture_publish=False):
+                collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None):
     import os
     import tempfile
     import threading
@@ -249,7 +249,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             raise ValueError('fixture publication requires collaboration storage and explicit TMPDIR')
         if root.is_symlink() or not root.resolve(strict=True).is_relative_to(Path(tempfile.gettempdir()).resolve(strict=True)):
             raise ValueError('fixture root must be inside TMPDIR')
-    collaboration = CollaborationStore(collaboration_dir) if collaboration_dir else None
+    collaboration = (CollaborationStore(collaboration_dir, **({} if collaboration_max_bytes is None else
+                                                               {'max_store_bytes': collaboration_max_bytes}))
+                     if collaboration_dir else None)
     if collaboration:
         with collaboration.observation():
             collaboration.bind_source(root)
@@ -284,11 +286,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.end_headers()
             self.wfile.write(data)
 
-        def collaboration_identity(self):
+        def collaboration_identity(self, extra=()):
             import hashlib
             import re
-            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
-            if set(params) != {'family', 'program', 'lane', 'path', 'root_identity'} or any(len(v) != 1 for v in params.values()):
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
+            required = {'family', 'program', 'lane', 'path', 'root_identity'}
+            if not required <= set(params) or set(params) - required - set(extra) or any(len(v) != 1 for v in params.values()):
                 raise ValueError('invalid identity')
             root_id = hashlib.sha256(os.fsencode(str(root.resolve(strict=True)))).hexdigest()
             if params['root_identity'][0] != root_id:
@@ -302,13 +305,36 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             relative = f'{family}/{program}/{lane}/reports/{path}'
             return json.dumps([str(root.resolve()), relative], ensure_ascii=False), relative
 
-        def collaboration_request(self, write=False):
+        def collaboration_admitted(self, **kwargs):
+            if not self.server.collaboration_slots.acquire(blocking=False):
+                return self.reply(503, {'error': 'collaboration_busy', 'message': 'Retain your local draft and retry.'}, {'Retry-After': '2'})
+            timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(15)
+                return self.collaboration_request(**kwargs)
+            finally:
+                try:
+                    self.connection.settimeout(timeout)
+                finally:
+                    self.server.collaboration_slots.release()
+
+        def collaboration_request(self, write=False, view='current'):
             import sqlite3
             import subprocess
             if collaboration is None:
                 return self.reply(503, {'error': 'collaboration_disabled'})
             try:
-                key, relative = self.collaboration_identity()
+                extra = {'history': ('before',), 'version': ('revision',)}.get(view, ())
+                key, relative = self.collaboration_identity(extra)
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
+                before = None
+                if view == 'history' and 'before' in params:
+                    raw = params['before'][0]
+                    if not raw.isascii() or not raw.isdecimal() or len(raw) > 19:
+                        raise ValueError('invalid cursor')
+                    before = int(raw)
+                if view == 'version' and 'revision' not in params:
+                    raise ValueError('missing revision')
                 payload = {}
                 if write:
                     if (not self.trusted_request(require_origin=True) or
@@ -329,15 +355,19 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 with collaboration_lock, collaboration.observation():
                     collaboration.bind_source(root)
                     content = read_file(root, relative).decode('utf-8')
-                    collaboration.observe_source(key, content)
-                    if write and payload.get('action') == 'publish':
+                    if view == 'current':
+                        collaboration.observe_source(key, content)
+                    if view == 'history':
+                        result = collaboration.history_page(key, before)
+                    elif view == 'version':
+                        result = collaboration.version(key, params['revision'][0])
+                    elif write and payload.get('action') == 'publish':
                         if not experimental_fixture_publish:
                             return self.reply(403, {'error': 'publication_disabled'})
                         current = collaboration.current(key)
                         if current is None:
                             raise ValueError('missing document')
-                        if current['revision'] != payload['revision'] or any(
-                                e['kind'].endswith(':conflict') and not e['resolved_revision'] for e in collaboration.history(key)):
+                        if current['revision'] != payload['revision'] or collaboration.unresolved_count(key):
                             return self.reply(409, {'error': 'head_changed_or_conflict'})
                         latest = read_file(root, relative).decode('utf-8')
                         if latest != content:
@@ -357,12 +387,18 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         result = collaboration.current(key)
                         if result is None:
                             raise ValueError('missing document')
-                        result['history'] = collaboration.history(key, recent_limit=100)
+                        page = collaboration.history_page(key)
+                        result['history'] = page['history']
+                        result['unresolved_count'] = page['unresolved_count']
                 return self.reply(200, result)
             except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
                 return self.reply(409 if write else 404, {'error': 'invalid_or_conflicting_request'})
-            except (OSError, sqlite3.Error, subprocess.SubprocessError):
+            except sqlite3.Error as exc:
+                if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL:
+                    return self.reply(503, {'error': 'collaboration_capacity', 'message': 'Retain your local draft; increase the store limit or free disk space, then retry with the same request ID.'})
                 return self.reply(503, {'error': 'collaboration_unavailable', 'message': 'Retain your local draft and retry.'})
+            except (OSError, subprocess.SubprocessError):
+                return self.reply(503, {'error': 'collaboration_unavailable', 'message': 'Retain your local draft and retry; check available disk space.'})
 
         def publish_fixture(self, relative, content):
             import uuid
@@ -392,7 +428,11 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return
             url = urlsplit(self.path)
             if url.path == '/api/collaboration':
-                return self.collaboration_request()
+                return self.collaboration_admitted()
+            if url.path == '/api/collaboration/history':
+                return self.collaboration_admitted(view='history')
+            if url.path == '/api/collaboration/version':
+                return self.collaboration_admitted(view='version')
             if url.path == '/api/data':
                 result: dict = discover(root)
                 # Identity follows the effective canonical path, not report content.
@@ -451,7 +491,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
 
         def do_POST(self):
             if urlsplit(self.path).path == '/api/collaboration':
-                return self.collaboration_request(write=True)
+                return self.collaboration_admitted(write=True)
             self.do_PUT()
 
         def do_PATCH(self):
@@ -549,6 +589,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         def log_message(self, format, *args):
             pass
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    server.collaboration_slots = threading.BoundedSemaphore(4)
     server.static_root = Path(__file__).parent / 'static'
     server.writer = Path(writer).absolute() if writer else None
     server.writer_enabled = bool(accept_uncoordinated_writes and writer_available(server.writer))
@@ -566,6 +607,7 @@ def parse_config(argv=None):
     parser.add_argument('--accept-uncoordinated-writes', action='store_true',
                         help='accept metadata write risk: concurrent edits can be overwritten; no shared compare-and-swap')
     parser.add_argument('--collaboration-dir', type=Path, help='opt in to experimental private shared draft storage')
+    parser.add_argument('--collaboration-max-bytes', type=int, help='maximum SQLite database size in bytes (default 512 MiB; minimum 65536)')
     parser.add_argument('--experimental-fixture-publish', action='store_true', help='dangerous test-only source writes, restricted to TMPDIR')
     args = parser.parse_args(argv)
     settings = {}
@@ -598,6 +640,8 @@ def parse_config(argv=None):
         parser.error('tailnet host must be a canonical lowercase node.tailnet.ts.net hostname')
     if not 1 <= args.port <= 65535:
         parser.error('port must be from 1 to 65535')
+    if args.collaboration_max_bytes is not None and args.collaboration_max_bytes < 65536:
+        parser.error('collaboration max bytes must be at least 65536')
     return args
 
 
@@ -606,7 +650,8 @@ def main():
     make_server(args.root, args.port, writer=args.bbh,
                 accept_uncoordinated_writes=args.accept_uncoordinated_writes,
                 tailnet_host=args.tailnet_host, collaboration_dir=args.collaboration_dir,
-                experimental_fixture_publish=args.experimental_fixture_publish).serve_forever()
+                experimental_fixture_publish=args.experimental_fixture_publish,
+                **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
 
 if __name__ == '__main__':
