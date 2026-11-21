@@ -4,7 +4,7 @@
 - Owner: history backend implementer; parent owns review/integration, sibling owns frontend.
 - Branch/worktree: `feat/collaboration-history`, `/home/ryushe/projects/bounty-board-collab-history`.
 - Base: `0104c390fb8417f0870750cdd839455e0525e46f`; target: `feat/collaborative-reports` (not main/beta).
-- Implementation checkpoint: pending the implementation commit; a subsequent dossier-only commit will record its actual SHA.
+- Implementation checkpoint: `a7e28d7db41c5b66986a0b235dc656bd41979ab2`; the branch tip additionally contains this dossier-only handoff commit.
 - Intent: replace snapshot-amplifying history polling and unlimited unresolved-event output without deleting any versions or compromising request-id idempotency and the existing interprocess observation lock.
 
 ## Frontend/backend contract
