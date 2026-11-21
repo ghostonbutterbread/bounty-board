@@ -12,3 +12,5 @@
 .draft-recovery{margin-bottom:20px;border-color:var(--border)}.draft-recovery[hidden]{display:none}.draft-recovery p{overflow-wrap:anywhere}.recovery-draft+.recovery-draft{border-top:1px solid var(--border);margin-top:16px}.recovery-draft textarea{display:block;width:100%;min-width:0;margin:8px 0;resize:vertical}
 
 .observation-body{white-space:pre-wrap;overflow-wrap:anywhere;max-height:32rem;overflow:auto}
+/* Native details gives keyboard activation and exposes the expanded state. */
+.availability p{margin:8px 0}.availability summary{cursor:pointer;color:var(--accent);font-weight:700}.availability summary:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.availability-details{max-height:18rem;overflow:auto;overflow-wrap:anywhere}.availability-details ul{padding-left:1.4em}.availability-details li{margin:4px 0}
