@@ -1,0 +1,4 @@
+# Preserve upstream third-party asset bytes; their whitespace is not ours to edit.
+/static/vendor/easymde/licenses/codemirror-spell-checker.txt whitespace=-blank-at-eof
+/static/vendor/font-awesome/OFL-1.1.txt whitespace=-blank-at-eof
+/static/vendor/font-awesome/fonts/fontawesome-webfont.svg whitespace=-blank-at-eol
