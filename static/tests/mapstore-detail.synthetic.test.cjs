@@ -52,3 +52,31 @@ test('lazy scoped observations render as inert text and pending reads cannot cro
     fs.rmSync(root,{recursive:true,force:true});
   }
 });
+
+test('nonfinite map input leaves the healthy program usable in a real browser', async () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'bmn-'));
+  const repo=path.resolve(__dirname,'../..');
+  const child=spawn('python3',['-u','tests/mapstore_browser_fixture.py',root,'nonfinite'],{cwd:repo,env:{...process.env,PYTHONPATH:repo},stdio:['ignore','pipe','inherit']});
+  let browser;
+  try {
+    const port=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',code=>reject(new Error(`fixture exited ${code}`)));child.stdout.once('data',data=>resolve(Number(String(data).trim())));});
+    browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome'});
+    const page=await browser.newPage();
+    await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1' ? route.continue() : route.abort());
+    await page.goto(`http://127.0.0.1:${port}`);
+    await page.getByRole('button',{name:'Open workspace'}).click();
+    await page.getByRole('button',{name:'MapStore',exact:true}).click();
+    assert.match(await page.locator('#app').innerText(),/map_unavailable_or_invalid/);
+    await page.locator('#program-select').selectOption('web_bounty/beta');
+    assert.match(await page.locator('#app').innerText(),/beta gadget/);
+    await page.getByRole('button',{name:'Gadgets',exact:true}).click();
+    await page.getByRole('button',{name:'Open observation'}).click();
+    await page.getByText(/beta Capability:/).waitFor();
+    assert.equal(await page.locator('#app img').count(),0);
+    assert.equal(await page.locator('#app a').count(),0);
+  } finally {
+    if(browser)await browser.close();
+    child.kill('SIGTERM'); await new Promise(resolve=>child.exitCode!==null||child.signalCode!==null ? resolve() : child.once('exit',resolve));
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});

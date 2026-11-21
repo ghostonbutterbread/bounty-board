@@ -46,6 +46,46 @@ class MapDetailTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result['content'], 'Capability:\n- grants: observed\n')
 
+    def test_nonfinite_map_values_are_isolated_from_strict_http_json(self):
+        good_maps = self.root / 'web_bounty/beta/web/recon/maps'
+        good_maps.mkdir(parents=True)
+        good_entry = {'path': self.path, 'title': '安全 <img src=x onerror=alert(1)>',
+                      'tags': ['gadget', {'nested': [1.25, -3, '鍵']}],
+                      'surface': {'values': [0, 1e100, {'key': '✓'}]}}
+        (good_maps / 'map.jsonl').write_text(json.dumps(good_entry, ensure_ascii=False) + '\n', encoding='utf-8')
+        body = good_maps / self.path
+        body.parent.mkdir(parents=True)
+        body.write_text('beta <script>inert</script>', encoding='utf-8')
+
+        def reject_constant(value):
+            raise ValueError('non-standard JSON constant: ' + value)
+
+        cases = ('{"title":1e999,"tags":["gadget"]}',
+                 '{"title":"bad","tags":["gadget",{"nested":[NaN]}]}',
+                 '{"title":-Infinity,"tags":[]}')
+        for bad in cases:
+            with self.subTest(bad=bad):
+                (self.maps / 'map.jsonl').write_text(bad + '\n', encoding='utf-8')
+                conn = HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
+                try:
+                    conn.request('GET', '/api/data')
+                    response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    payload = response.read()
+                    self.assertNotIn(str(self.root).encode(), payload)
+                    programs = {p['name']: p['lanes'][0] for p in
+                                json.loads(payload, parse_constant=reject_constant)['programs']}
+                finally:
+                    conn.close()
+                self.assertIsNone(programs['alpha']['map'])
+                self.assertIsNone(programs['alpha']['gadgets'])
+                self.assertIn('map_unavailable_or_invalid', programs['alpha']['warnings'])
+                self.assertEqual(programs['beta']['map'][0]['title'], good_entry['title'])
+                self.assertEqual(programs['beta']['map'][0]['surface'], good_entry['surface'])
+                self.assertEqual(programs['beta']['gadgets'][0]['tags'], good_entry['tags'])
+                self.assertNotIn('map_unavailable_or_invalid', programs['beta']['warnings'])
+                self.assertEqual(self.get(program='beta'), (200, {'content': 'beta <script>inert</script>'}))
+
     def test_unindexed_duplicate_and_wrong_lane_are_refused(self):
         self.assertNotEqual(self.get(path='_app/other/index.md')[0], 200)
         self.assertNotEqual(self.get(lane='api')[0], 200)

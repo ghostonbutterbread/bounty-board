@@ -13,7 +13,10 @@ for name in ('alpha', 'beta'):
         {'title': f'{name} missing', 'path': 'xss/_surface/missing/index.md', 'tags': []},
         {'title': f'{name} legacy', 'tags': []},
     ]
-    (maps / 'map.jsonl').write_text(''.join(json.dumps(item) + '\n' for item in entries))
+    index = ''.join(json.dumps(item) + '\n' for item in entries)
+    if len(sys.argv) > 2 and sys.argv[2] == 'nonfinite' and name == 'alpha':
+        index += '{"title":1e999,"tags":["gadget"]}\n'
+    (maps / 'map.jsonl').write_text(index)
     body = maps / entries[0]['path']
     body.parent.mkdir(parents=True)
     body.write_text(f'{name} Capability:\n- grants: observed\n<img src="https://evil.invalid/pixel" onerror="alert(1)">\n[link](https://evil.invalid/)')

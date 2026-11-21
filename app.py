@@ -80,7 +80,7 @@ def map_entries(lane, warnings):
         result = [{key: item.get(key) for key in fields} for item in entries]
         # Check at the actual portfolio nesting depth, before it can break the
         # response for every other lane during final JSON encoding.
-        json.dumps({'programs': [{'lanes': [{'map': result}]}]}, ensure_ascii=False).encode('utf-8')
+        json.dumps({'programs': [{'lanes': [{'map': result}]}]}, ensure_ascii=False, allow_nan=False).encode('utf-8')
         return result
     except FileNotFoundError:
         warnings.append('map_missing')
