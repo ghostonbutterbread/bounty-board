@@ -263,7 +263,7 @@
   }
   function savedSharedRecovery() {
     if(!state.data?.capabilities?.collaboration)return '';
-    return `<section class="panel panel-pad"><h2>Recover a saved shared draft</h2><p class="hint">Deleted or renamed reports disappear from the picker. Enter the original path relative to this lane's reports folder. Only previously observed reports can be recovered; this does not save a report file.</p><label for="saved-shared-path">Original report path</label> <input id="saved-shared-path" type="text" autocomplete="off"><button type="button" class="button" data-find-shared>Find saved shared draft</button><div data-shared-recovery role="status"></div></section>`;
+    return `<section class="panel panel-pad"><h2>Recover saved drafts</h2><p class="hint">Deleted or renamed reports disappear from the picker. Enter the original path relative to this lane's reports folder. Find saved local drafts and pending requests in this browser, or look up a previously observed shared draft. Local recovery leaves the original intact; if the source is unavailable, it waits for the source to return. None of this saves a report file.</p><label for="saved-shared-path">Original report path</label> <input id="saved-shared-path" type="text" autocomplete="off"><button type="button" class="button" data-find-shared>Find saved shared draft</button><button type="button" class="button" data-find-local>Find saved local drafts</button><div data-shared-recovery role="status"></div><div data-local-recovery></div></section>`;
   }
   function reports() {
     return savedSharedRecovery()+reportEditor();
@@ -291,17 +291,19 @@
     const unavailableSource=report.loadState==='error' ? '<div class="message warning">Report could not be loaded. Source is unavailable; your draft is shown below. Refresh the workspace to retry.</div>' : '';
     return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}${unavailableSource}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><p class="hint">Drafts are stored in this browser and can be lost if browser data is cleared. They are not saved to the report. Older unscoped drafts are retained but not automatically imported.</p><button class="button" disabled title="Report writing is disabled to protect source files">Save to report unavailable</button>${state.data?.capabilities?.collaboration ? '<div id="orphan-drafts"><button type="button" class="button" data-find-drafts>Find saved drafts</button><div data-draft-candidates></div></div><div id="collaboration-history"></div>' : ''}<div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
   }
-  function findSavedDrafts(draft) {
-    const box=app.querySelector('[data-draft-candidates]');if(!box || !rootIdentity())return;
+  function findSavedDrafts(draft, box=app.querySelector('[data-draft-candidates]'), includeCurrent=false) {
+    if(!box || !rootIdentity())return;
+    const scope={root:rootIdentity(),program:state.program,lane:state.lane};
     box.replaceChildren();
     const note=document.createElement('p');note.textContent='Saved drafts for this report are retained. A live tab cannot be recovered; copy its text instead. Recovery leaves the original untouched.';box.append(note);
-    const prefix=`bounty-board-report-draft-v2:${draft.key}:`;
+    const base=`bounty-board-report-draft-v2:${draft.key}`, prefix=base+':';
     try {
       for(let i=0;i<localStorage.length;i++){
-        const key=localStorage.key(i);if(!key?.startsWith(prefix) || key===storageKey(draft.key))continue;
-        const namespace=key.slice(prefix.length);if(!/^[0-9a-f-]{36}$/i.test(namespace))continue;
+        const key=localStorage.key(i);if(!key || (key!==base && !key.startsWith(prefix)) || (!includeCurrent && key===storageKey(draft.key)))continue;
+        const namespace=key===base ? null : key.slice(prefix.length);if(namespace && !/^[0-9a-f-]{36}$/i.test(namespace))continue;
         const raw=localStorage.getItem(key);let saved;try {saved=JSON.parse(raw);}catch{continue;}
-        if(!saved || saved.version!==1 || typeof saved.text!=='string' || typeof saved.original!=='string' || !(saved.revision===null || typeof saved.revision==='string') || (!saved.hasDraft && !saved.pendingShared))continue;
+        if(!saved || saved.version!==1 || typeof saved.text!=='string' || (saved.hasDraft===false && !saved.pendingShared))continue;
+        const complete=typeof saved.original==='string' && (saved.revision===null || typeof saved.revision==='string');
         const card=document.createElement('section');card.dataset.recoveryCandidate='';
         const label=document.createElement('label');label.textContent='Saved draft (select and copy if recovery is unavailable)';
         const text=document.createElement('textarea');text.readOnly=true;text.rows=4;text.textContent=saved.text;label.append(text);card.append(label);
@@ -309,9 +311,12 @@
         const status=document.createElement('p');status.setAttribute('role','status');card.append(status);
         const button=document.createElement('button');button.type='button';button.className='button';button.textContent='Recover this draft';card.append(button);box.append(card);
         button.addEventListener('click',async()=>{
+          if(!namespace || !complete){status.textContent='This older draft has no provable tab ownership or complete recovery data. Select and copy the draft text.';return;}
+          if(key===storageKey(draft.key)){status.textContent='This is the current tab’s draft. Select and copy the text; no data was changed.';return;}
           if(!navigator.locks || !tabReloadRecovery){status.textContent='Safe recovery is unavailable in this browser. Select and copy the draft text.';return;}
           try {
             await navigator.locks.request('bounty-board-tab:'+namespace,{ifAvailable:true},async lock=>{
+              if(!box.isConnected || rootIdentity()!==scope.root || state.program!==scope.program || state.lane!==scope.lane){status.textContent='Workspace changed. Find saved drafts again.';return;}
               if(!lock){status.textContent='This draft belongs to a live tab. Copy the text instead; no data was changed.';return;}
               if(localStorage.getItem('bounty-board-lock-owner:'+namespace)!=='locked'){status.textContent='This older or lockless draft cannot be safely claimed. Select and copy its text.';return;}
               if(localStorage.getItem(key)!==raw){status.textContent='The saved draft changed. Find saved drafts again.';return;}
@@ -325,9 +330,9 @@
               }
               if(!persisted){status.textContent='Recovery could not be saved in this tab. Copy the draft before leaving; the original remains unchanged.';refreshStatus(draft);renderRecovery();return;}
               status.textContent='Recovered into this tab; original saved draft retained.';
-              draft.collabMessage=draft.status==='conflict' ? 'Conflict: your draft is preserved. Compare history and submit a resolution.' : 'Recovered local draft; saving shared draft…';
+              draft.collabMessage=draft.status==='conflict' ? 'Conflict: your draft is preserved. Compare history and submit a resolution.' : draft.collabStarted ? 'Recovered local draft; saving shared draft…' : 'Recovered locally. Restore the source and reopen the report before retrying.';
               showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);
-              if(draft.status!=='conflict')scheduleSharedSave(draft,0);
+              if(draft.collabStarted && draft.status!=='conflict')scheduleSharedSave(draft,0);
             });
           }catch{status.textContent='Safe recovery failed. Select and copy the draft text.';}
         });
@@ -609,6 +614,12 @@
         const text=document.createElement('textarea');text.readOnly=true;text.rows=10;text.value=result.content;label.append(text);box.append(message,label);
       } catch {if(box.isConnected)box.textContent='No saved shared draft found or recovery is unavailable. Check the original path and retry.';}
       finally {if(target.isConnected)target.disabled=false;}
+    }
+    else if(target.hasAttribute('data-find-local')){
+      const path=app.querySelector('#saved-shared-path').value, box=app.querySelector('[data-local-recovery]');
+      if(!path || path.startsWith('/') || path.split('/').some(part=>!part || part==='.' || part==='..')){box.textContent='Enter the original relative report path.';return;}
+      const report=reportById(path) || {id:path,content:null};
+      findSavedDrafts(draftFor(report),box,true);
     }
     else if(target.hasAttribute('data-find-drafts')){const report=reportById(state.report);if(report)findSavedDrafts(draftFor(report));}
     else if(target.hasAttribute('data-go-program')){state.view='program';render();}

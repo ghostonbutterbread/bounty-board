@@ -288,7 +288,6 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
 
         def collaboration_identity(self, extra=()):
             import hashlib
-            import re
             params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
             required = {'family', 'program', 'lane', 'path', 'root_identity'}
             if not required <= set(params) or set(params) - required - set(extra) or any(len(v) != 1 for v in params.values()):
@@ -298,7 +297,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 raise ValueError('root changed')
             family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
             if (family not in FAMILIES or lane not in FAMILIES[family] or
-                    not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', program) or
+                    not program or program.startswith('_') or program in ('.', '..') or '/' in program or '\0' in program or
                     path.startswith('/') or Path(path).suffix.lower() != '.md' or
                     any(p in ('', '.', '..') for p in path.split('/'))):
                 raise ValueError('invalid identity')
