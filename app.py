@@ -293,11 +293,15 @@ def valid_tailnet_host(host):
 
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
                 collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
-                report_autosave=False):
+                report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None):
     import os
     import tempfile
     import threading
     from collaborative_engine import CollaborationStore, GitUnavailableError
+    if retention_max_operations is not None and (type(retention_max_operations) is not int or retention_max_operations < 1):
+        raise ValueError('invalid retention operation limit')
+    if retention_min_free_bytes is not None and (type(retention_min_free_bytes) is not int or retention_min_free_bytes < 0):
+        raise ValueError('invalid retention free-space floor')
     if report_autosave and (collaboration_dir is None or experimental_fixture_publish):
         raise ValueError('report autosave requires a collaboration store and excludes fixture publication')
     if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
@@ -336,7 +340,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 snapshot = retained_snapshot(collaboration.root, operation)
             except FileNotFoundError:
                 # A failed or interrupted attempt may never have made a receipt.
-                if state in ('pending', 'outcome_uncertain', 'conflict'):
+                if state in ('pending', 'outcome_uncertain', 'conflict') or state.startswith('capacity:'):
                     continue
                 raise
             if snapshot is None:
@@ -503,7 +507,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         operation = operation_id(key, params['request_id'][0])
                         state = collaboration.publication_state(key, operation)
                         current['publication'] = inspect(root, relative, collaboration.root / 'publication' / operation)
-                        if state is None:
+                        if state and state.startswith('capacity:'):
+                            current['publication'] = {'state': 'capacity', 'operation': operation, 'reasons': ['retention_capacity']}
+                        elif state is None:
                             current['publication']['state'] = ('outcome_uncertain' if reconciliation['state'] != 'complete' else 'conflict')
                             current['publication']['reasons'].append('not_published')
                         elif state in ('pending', 'outcome_uncertain'):
@@ -613,8 +619,19 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                             result['store_saved'] = True
                             operation = operation_id(key, payload['request_id'])
                             prior = collaboration.publication_state(key, operation)
-                            if prior is not None:
-                                result['publication'] = inspect(root, relative, collaboration.root / 'publication' / operation)
+                            capacity_retry = bool(prior and prior.startswith('capacity:'))
+                            if capacity_retry:
+                                import hashlib
+                                capacity_retry = (previous_receipt is not None and reconciliation['state'] == 'complete' and
+                                                  hashlib.sha256(content.encode('utf-8')).hexdigest() == prior[9:] and
+                                                  collaboration.current(key)['revision'] == result['revision'] and
+                                                  result['status'] != 'conflict' and not collaboration.unresolved_count(key))
+                            if prior is not None and not capacity_retry:
+                                if prior.startswith('capacity:'):
+                                    result['publication'] = {'state': 'conflict', 'operation': operation,
+                                                             'reasons': ['capacity_retry_changed']}
+                                else:
+                                    result['publication'] = inspect(root, relative, collaboration.root / 'publication' / operation)
                                 if prior in ('pending', 'outcome_uncertain'):
                                     result['publication']['state'] = 'outcome_uncertain'
                                     result['publication']['reasons'].append('incomplete_attempt')
@@ -630,22 +647,24 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                             elif reconciliation['state'] == 'uncertain':
                                 result['publication'] = {'state': 'outcome_uncertain', 'operation': operation,
                                                          'reasons': ['retained_uncertain']}
-                            elif previous_receipt is not None:
+                            elif previous_receipt is not None and not capacity_retry:
                                 # A retry of a stored-only save is never a new
                                 # authorization to exchange the current source.
                                 result['publication'] = {'state': 'conflict', 'operation': operation,
                                                          'reasons': ['not_published']}
                             elif result['status'] == 'conflict' or collaboration.unresolved_count(key):
                                 result['publication'] = {'state': 'conflict', 'reasons': ['unresolved_store_conflict']}
-                            elif needs_reconciliation:
+                            elif needs_reconciliation and not capacity_retry:
                                 result['publication'] = {'state': 'conflict', 'reasons': ['store_needs_reconciliation']}
                             elif collaboration.current(key)['revision'] != result['revision']:
                                 result['publication'] = {'state': 'conflict', 'reasons': ['head_changed']}
                             else:
                                 try:
-                                    collaboration.begin_publication(key, operation)
+                                    collaboration.begin_publication(key, operation, prior if capacity_retry else None)
                                     result['publication'] = publish(root, relative, collaboration.root, key,
-                                                                    payload['request_id'], content, result['content'])
+                                                                    payload['request_id'], content, result['content'],
+                                                                    max_operations=retention_max_operations,
+                                                                    min_free_bytes=retention_min_free_bytes)
                                     if result['publication']['state'] in ('published', 'conflict'):
                                         snapshot = retained_snapshot(collaboration.root, result['publication']['operation'])
                                         if snapshot is not None:
@@ -665,7 +684,11 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                                 elif actual != result['content']:
                                                     result['publication']['state'] = 'conflict'
                                                     result['publication']['reasons'].append('source_changed')
-                                    collaboration.complete_publication(key, operation, result['publication']['state'])
+                                    stored_state = result['publication']['state']
+                                    if stored_state == 'capacity':
+                                        import hashlib
+                                        stored_state += ':' + hashlib.sha256(content.encode('utf-8')).hexdigest()
+                                    collaboration.complete_publication(key, operation, stored_state)
                                 except (GitUnavailableError, OSError, UnicodeError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError):
                                     result['publication'] = {'state': 'outcome_uncertain',
                                                              'operation': operation_id(key, payload['request_id']),
@@ -935,6 +958,11 @@ def parse_config(argv=None):
     parser.add_argument('--collaboration-max-bytes', type=int, help='maximum SQLite database size in bytes (default 512 MiB; minimum 65536)')
     parser.add_argument('--experimental-fixture-publish', action='store_true', help='dangerous test-only source writes, restricted to TMPDIR')
     parser.add_argument('--report-autosave', action='store_true', help='opt in to experimental source publication; external writers and sync can race')
+    from report_publisher import DEFAULT_MAX_OPERATIONS, DEFAULT_MIN_FREE_BYTES
+    parser.add_argument('--retention-max-operations', type=int, default=DEFAULT_MAX_OPERATIONS,
+                        help='maximum retained publication entries (default 1000)')
+    parser.add_argument('--retention-min-free-bytes', type=int, default=DEFAULT_MIN_FREE_BYTES,
+                        help='free-space floor in bytes (default 1073741824)')
     args = parser.parse_args(argv)
     settings = {}
     if args.config:
@@ -968,15 +996,20 @@ def parse_config(argv=None):
         parser.error('port must be from 1 to 65535')
     if args.collaboration_max_bytes is not None and args.collaboration_max_bytes < 65536:
         parser.error('collaboration max bytes must be at least 65536')
+    if args.retention_max_operations < 1 or args.retention_min_free_bytes < 0:
+        parser.error('retention operations must be positive and free-space floor non-negative')
     return args
 
 
 def main():
+    from report_publisher import DEFAULT_MAX_OPERATIONS, DEFAULT_MIN_FREE_BYTES
     args = parse_config()
     make_server(args.root, args.port, writer=args.bbh,
                 accept_uncoordinated_writes=args.accept_uncoordinated_writes,
                 tailnet_host=args.tailnet_host, collaboration_dir=args.collaboration_dir,
                 experimental_fixture_publish=args.experimental_fixture_publish,
+                **({} if args.retention_max_operations == DEFAULT_MAX_OPERATIONS else {'retention_max_operations': args.retention_max_operations}),
+                **({} if args.retention_min_free_bytes == DEFAULT_MIN_FREE_BYTES else {'retention_min_free_bytes': args.retention_min_free_bytes}),
                 **({'report_autosave': True} if args.report_autosave else {}),
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 

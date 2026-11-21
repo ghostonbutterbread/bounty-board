@@ -282,12 +282,17 @@ class CollaborationStore:
             row = db.execute('SELECT state FROM publication_attempts WHERE key=? AND operation=?', (self._key(key), operation)).fetchone()
             return None if row is None else row[0]
 
-    def begin_publication(self, key, operation):
+    def begin_publication(self, key, operation, retry_capacity=None):
         with self._connect() as db:
-            db.execute('INSERT INTO publication_attempts VALUES (?,?,?)', (self._key(key), operation, 'pending'))
+            if retry_capacity is None:
+                db.execute('INSERT INTO publication_attempts VALUES (?,?,?)', (self._key(key), operation, 'pending'))
+            elif db.execute('UPDATE publication_attempts SET state=? WHERE key=? AND operation=? AND state=?',
+                            ('pending', self._key(key), operation, retry_capacity)).rowcount != 1:
+                raise ValueError('publication attempt changed')
 
     def complete_publication(self, key, operation, state):
-        if state not in ('published', 'conflict', 'outcome_uncertain'):
+        if state not in ('published', 'conflict', 'outcome_uncertain') and not (
+                isinstance(state, str) and state.startswith('capacity:') and len(state) == 73):
             raise ValueError('invalid publication state')
         with self._connect() as db:
             if db.execute('UPDATE publication_attempts SET state=? WHERE key=? AND operation=? AND state=?',

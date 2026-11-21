@@ -11,6 +11,31 @@ import os
 import stat
 from pathlib import Path
 
+# The directory cache is invalidated by inode or directory metadata changes.
+# A scan counts every immediate entry, including crash remnants and symlinks.
+DEFAULT_MAX_OPERATIONS = 1000
+DEFAULT_MIN_FREE_BYTES = 1024 ** 3
+_capacity_counts = {}
+
+
+def _directory_version(st):
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
+def _operation_count(fd):
+    before = os.fstat(fd)
+    version = _directory_version(before)
+    cached = _capacity_counts.get((before.st_dev, before.st_ino))
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    with os.scandir(fd) as entries:
+        count = sum(1 for _ in entries)
+    after = os.fstat(fd)
+    if _directory_version(after) != version:
+        raise OSError('publication directory changed during capacity scan')
+    _capacity_counts[(before.st_dev, before.st_ino)] = (version, count)
+    return count
+
 
 def generated_navigation(relative, text):
     """Match BBH navigation markers and its exact seeded-index placeholders."""
@@ -148,7 +173,8 @@ def retained_snapshot(store_root, operation):
     return intent['observed'], data.decode('utf-8')
 
 
-def publish(root, relative, store_root, key, request_id, observed, draft, hook=None):
+def publish(root, relative, store_root, key, request_id, observed, draft, hook=None,
+            max_operations=None, min_free_bytes=None):
     """Attempt once; errors retain the store draft and any created operation.
 
     Observed is the exact source snapshot merged into the accepted store head.
@@ -161,14 +187,37 @@ def publish(root, relative, store_root, key, request_id, observed, draft, hook=N
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077:
         raise PermissionError('publication directory must be private')
     op = area / opid
-    try:
-        op.mkdir(mode=0o700)
-    except FileExistsError:
-        return inspect(root, relative, op)
+    max_operations = DEFAULT_MAX_OPERATIONS if max_operations is None else max_operations
+    min_free_bytes = DEFAULT_MIN_FREE_BYTES if min_free_bytes is None else min_free_bytes
     afd = os.open(area, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    os.fsync(afd)
-    os.close(afd)
-    ofd = os.open(op, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(afd)
+        if _identity(info) != _identity(st):
+            raise OSError('publication directory moved')
+        try:
+            existing = os.stat(opid, dir_fd=afd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if not stat.S_ISDIR(existing.st_mode):
+                return {'state': 'outcome_uncertain', 'operation': opid, 'reasons': ['invalid_operation']}
+            return inspect(root, relative, op)
+        count = _operation_count(afd)
+        free = os.fstatvfs(afd)
+        available = free.f_bavail * free.f_frsize
+        needed = 2 * len(draft.encode('utf-8')) + 1024 * 1024
+        if count >= max_operations or available < min_free_bytes + needed:
+            return {'state': 'capacity', 'operation': opid, 'reasons': ['retention_capacity']}
+        try:
+            os.mkdir(opid, mode=0o700, dir_fd=afd)
+        except FileExistsError:
+            return inspect(root, relative, op)
+        os.fsync(afd)
+        current = os.fstat(afd)
+        _capacity_counts[(current.st_dev, current.st_ino)] = (_directory_version(current), count + 1)
+        ofd = os.open(opid, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=afd)
+    finally:
+        os.close(afd)
     parent = source = -1
     exchanged = False
     try:
@@ -211,6 +260,14 @@ def publish(root, relative, store_root, key, request_id, observed, draft, hook=N
             raise ValueError('source changed before exchange')
         if hook:
             hook('before_exchange', op)
+        # Do not exchange if retained evidence has been moved away from the
+        # advertised private path. This is a point-in-time check, not exclusion
+        # of an uncoordinated rename after it.
+        area_now = area.lstat()
+        op_now = op.lstat()
+        if (not stat.S_ISDIR(area_now.st_mode) or _identity(area_now) != _identity(st) or
+                not stat.S_ISDIR(op_now.st_mode) or _identity(op_now) != _identity(os.fstat(ofd))):
+            raise ValueError('retention directory moved')
         final_data, _ = _snapshot(source)
         if generated_navigation(relative, final_data.decode('utf-8')):
             raise ValueError('generated navigation is not editable')
