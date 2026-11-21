@@ -190,6 +190,63 @@ test('old conflict resolved in another tab cannot remain actionable', {timeout:1
 }));
 
 
+async function recentConflict(context,base){
+  const root=(await (await context.request.get(base+'/api/data')).json()).root_identity;
+  const query=new URLSearchParams({family:'web_bounty',program:'example',lane:'web',path:'example.md',root_identity:root});
+  const endpoint=base+'/api/collaboration?'+query,initial=await (await context.request.get(endpoint)).json();
+  async function post(payload){const response=await context.request.post(endpoint,{headers:{Origin:base,'X-Requested-With':'Bounty-Board'},data:payload});assert.equal(response.status(),200,await response.text());return response.json();}
+  const head=await post({base:initial.revision,content:'reviewed head\n',request_id:'setup-head'});
+  const conflict=await post({base:initial.revision,content:'other edit\n',request_id:'setup-conflict'});
+  assert.equal(conflict.status,'conflict');return {endpoint,head,conflict,post};
+}
+
+for(const failure of [false,true])test(`resolution survives a ${failure?'failed':'successful'} held poll, repeat clicks and later edits`,{timeout:45000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),{head,conflict}=await recentConflict(context,base),page=await context.newPage();await open(page,base);
+  await page.getByText('Shared history and conflicts').click();
+  const button=page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});await button.waitFor();
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r),posts=[];let held=false;
+  await page.route('**/api/collaboration?*',async route=>{if(route.request().method()==='POST'){posts.push(route.request().postDataJSON());return route.continue();}if(held)return route.continue();held=true;arrive();await gate;return failure?route.abort():route.continue();});
+  try {
+    await withTimeout(started,10000,'resolution held poll');await button.click();await button.click();
+    const saved=await page.evaluate(()=>Object.values(localStorage).map(x=>{try{return JSON.parse(x)}catch{return null}}).find(x=>x?.pendingShared));
+    assert.ok(saved,'resolution intent must be durable before the poll completes');assert.equal(saved.hasDraft,true);assert.equal(saved.pendingShared.base,head.revision);assert.equal(saved.pendingShared.conflict_id,conflict.conflict_id);assert.equal(saved.pendingShared.content,'reviewed head\n');
+    await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('later edit\n');
+    await page.waitForTimeout(700);assert.equal(posts.length,0);assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'later edit\n');
+  } finally {release();}
+  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('Shared draft ready'),null,{timeout:12000});
+  assert.equal(posts.filter(p=>p.conflict_id===conflict.conflict_id).length,1);assert.equal(posts[0].content,'reviewed head\n');assert.equal(posts[0].base,head.revision);assert.equal(posts.at(-1).content,'later edit\n');
+  assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'later edit\n');
+}));
+
+test('resolution storage failure preserves copyable text and never sends', {timeout:30000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),{conflict}=await recentConflict(context,base),page=await context.newPage(),posts=[];await open(page,base);
+  await page.getByText('Shared history and conflicts').click();
+  const button=page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});await button.waitFor();
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);let held=false;
+  await page.route('**/api/collaboration?*',async route=>{if(route.request().method()==='POST'){posts.push(route.request().postDataJSON());return route.continue();}if(held)return route.continue();held=true;arrive();await gate;return route.continue();});
+  try {await withTimeout(started,10000,'storage held poll');await page.evaluate(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('bounty-board-report-draft-v2:'))throw new DOMException('quota','QuotaExceededError');return set.call(this,k,v);};});await button.click();
+    assert.equal(await page.getByLabel('Recover draft text').inputValue(),'reviewed head\n');
+  } finally {release();}
+  await page.waitForTimeout(1500);assert.deepEqual(posts,[]);assert.match(await page.locator('#report-status').innerText(),/storage unavailable/i);
+}));
+
+
+test('stale held-poll resolution preserves both the reviewed submission and later editor text', {timeout:30000},()=>fixture(async({browser,base})=>{
+  const context=await browser.newContext(),{head,conflict,post}=await recentConflict(context,base),page=await context.newPage(),posts=[];await open(page,base);
+  await page.getByText('Shared history and conflicts').click();const button=page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});await button.waitFor();
+  let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);let held=false;
+  await page.route('**/api/collaboration?*',async route=>{if(route.request().method()==='POST'){posts.push(route.request().postDataJSON());return route.continue();}if(held)return route.continue();held=true;arrive();await gate;return route.continue();});
+  try {await withTimeout(started,10000,'stale resolution held poll');await button.click();await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('later local\n');
+    const advanced=await post({base:head.revision,content:'other head\n',request_id:'advance-head'});assert.equal(advanced.status,'saved');
+  } finally {release();}
+  await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('stale resolution'),null,{timeout:10000});
+  const saved=await page.evaluate(()=>Object.values(localStorage).map(x=>{try{return JSON.parse(x)}catch{return null}}).find(x=>x?.staleResolution));
+  assert.equal(saved.text,'later local\n');assert.deepEqual(saved.rejectedResolutions,[posts[0]]);
+  assert.equal(await page.getByLabel('Rejected resolution requests').inputValue(),JSON.stringify([posts[0]],null,2));
+  assert.equal(posts.length,1);assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'later local\n');
+}));
+
+
 test('reopen discovers orphan and replays the exact pending request before newer text', {timeout:60000},()=>fixture(async({browser,base})=>{
   const context=await browser.newContext(),a=await context.newPage();await open(a,base);
   let first,notify;const committed=new Promise(r=>notify=r);

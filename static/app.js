@@ -63,7 +63,7 @@
     try {
       const current=localStorage.getItem(storageKey(draft.key));
       if(current!==draft.storageSnapshot){draft.storageBlocked=true;return false;}
-      const next=JSON.stringify({version:1,text:draft.text,original:draft.original,revision:draft.revision ?? null,conflict:draft.status==='conflict',conflictId:draft.conflictId ?? null,conflictBase:draft.conflictBase ?? null,staleResolution:!!draft.staleResolution,hasDraft:draft.hasDraft,pendingShared:draft.pendingShared ?? null,publicationNotice:draft.publicationNotice ?? null,publicationDetail:draft.publicationDetail ?? null,reviewedPublications:draft.reviewedPublications ?? []});
+      const next=JSON.stringify({version:1,text:draft.text,original:draft.original,revision:draft.revision ?? null,conflict:draft.status==='conflict',conflictId:draft.conflictId ?? null,conflictBase:draft.conflictBase ?? null,staleResolution:!!draft.staleResolution,rejectedResolutions:draft.rejectedResolutions ?? [],hasDraft:draft.hasDraft,pendingShared:draft.pendingShared ?? null,inspectRequested:draft.inspectRequested ?? null,publicationNotice:draft.publicationNotice ?? null,publicationDetail:draft.publicationDetail ?? null,reviewedPublications:draft.reviewedPublications ?? []});
       localStorage.setItem(storageKey(draft.key),next);
       if(localStorage.getItem(storageKey(draft.key))!==next){draft.storageBlocked=true;return false;}
       draft.storageSnapshot=next;
@@ -94,6 +94,8 @@
           let saved;try {saved=JSON.parse(raw);} catch {}
           if(!saved || saved.version!==1 || typeof saved.text!=='string' || typeof saved.original!=='string' || !(saved.revision===null || typeof saved.revision==='string') || (saved.conflict!==undefined && typeof saved.conflict!=='boolean')) draft.storageBlocked=true;
           else {draft.text=saved.text;draft.original=saved.original;draft.revision=saved.revision;draft.hasDraft=saved.hasDraft!==false;draft.conflictId=saved.conflictId;draft.conflictBase=saved.conflictBase;draft.staleResolution=!!saved.staleResolution;draft.pendingShared=saved.pendingShared || null;draft.publicationNotice=typeof saved.publicationNotice==='string'?saved.publicationNotice:null;draft.publicationDetail=saved.publicationDetail || null;draft.reviewedPublications=Array.isArray(saved.reviewedPublications)?saved.reviewedPublications:[];draft.status=saved.conflict?'conflict':draft.hasDraft?'unsaved':'saved';}
+          if(saved?.inspectRequested && saved.inspectRequested===draft.pendingShared?.request_id)draft.inspectRequested=saved.inspectRequested;
+          if(Array.isArray(saved?.rejectedResolutions))draft.rejectedResolutions=saved.rejectedResolutions;
           if(draft.pendingShared && draft.publicationNotice?.includes('Retrying the exact request'))draft.publicationNotice='Automatic retry stopped on reload. The outcome may be unconfirmed; inspect the original save and retain your draft.';
         }
       } catch {draft.storageError=true;draft.storageUnreadable=true;}
@@ -344,7 +346,7 @@
               if(localStorage.getItem(key)!==raw){status.textContent='The saved draft changed. Find saved drafts again.';return;}
               if(draft.hasDraft || draft.pendingShared || draft.storageBlocked || draft.storageUnreadable || draft.storageError || localStorage.getItem(storageKey(draft.key))!==draft.storageSnapshot){status.textContent='This tab already has unsaved or changed data. Copy the draft instead.';return;}
               if(saved.pendingShared && (typeof saved.pendingShared!=='object' || typeof saved.pendingShared.content!=='string' || typeof saved.pendingShared.request_id!=='string' || typeof saved.pendingShared.base!=='string')){status.textContent='Pending request cannot be safely replayed. Copy the text instead.';return;}
-              Object.assign(draft,{text:saved.text,original:saved.original,revision:saved.revision,hasDraft:saved.hasDraft!==false,conflictId:saved.conflictId,conflictBase:saved.conflictBase,staleResolution:!!saved.staleResolution,pendingShared:saved.pendingShared||null,publicationNotice:saved.publicationNotice||null,publicationDetail:saved.publicationDetail||null,reviewedPublications:Array.isArray(saved.reviewedPublications)?saved.reviewedPublications:[],status:saved.conflict?'conflict':'unsaved'});
+              Object.assign(draft,{text:saved.text,original:saved.original,revision:saved.revision,hasDraft:saved.hasDraft!==false,conflictId:saved.conflictId,conflictBase:saved.conflictBase,staleResolution:!!saved.staleResolution,rejectedResolutions:Array.isArray(saved.rejectedResolutions)?saved.rejectedResolutions:[],pendingShared:saved.pendingShared||null,inspectRequested:saved.inspectRequested===saved.pendingShared?.request_id?saved.inspectRequested:null,publicationNotice:saved.publicationNotice||null,publicationDetail:saved.publicationDetail||null,reviewedPublications:Array.isArray(saved.reviewedPublications)?saved.reviewedPublications:[],status:saved.conflict?'conflict':'unsaved'});
               const persisted=persistDraft(draft);
               if(draftKey(state.program,state.lane,state.report)===draft.key){
                 draft.applyingRemote=true;try {if(editor)editor.value(draft.text);}finally{draft.applyingRemote=false;}
@@ -379,7 +381,7 @@
     if(fromPoll && box.contains(document.activeElement) && document.activeElement.tagName==='TEXTAREA')return;
     const wasOpen=box.querySelector('details[data-shared-history]')?.open;
     const reviewedOpen=box.querySelector('details[data-reviewed-publications]')?.open;
-    box.innerHTML=(state.data?.capabilities?.report_autosave && draft.pendingShared ? `<section aria-label="Publication recovery"><p>Request ${esc(draft.pendingShared.request_id)} is retained. Inspect its original receipt before submitting another edit. Inspection does not publish.</p><label>Original pending request<textarea readonly aria-label="Original pending request">${esc(JSON.stringify(draft.pendingShared,null,2))}</textarea></label>${draft.publicationDetail ? `<label>Latest publication inspection<textarea readonly aria-label="Latest publication inspection">${esc(JSON.stringify(draft.publicationDetail,null,2))}</textarea></label>` : ''}<button type="button" class="button" data-inspect-save>Inspect original save</button><button type="button" class="button" data-inspect-markdown>Inspect current Markdown</button>${draft.markdownInspection!=null ? `<label>Current Markdown inspection<textarea readonly aria-label="Current Markdown inspection">${esc(draft.markdownInspection)}</textarea></label>` : ''}${draft.recoveryNotFound ? '<button type="button" class="button" data-retry-original>Retry exact original request</button>' : ''}${draft.publicationConflict ? '<button type="button" class="button" data-review-conflict>Continue after reviewing conflict</button><p>Compare retained versions and the current Markdown before continuing. Publication may already have changed the file.</p>' : ''}</section>` : '')+(draft.reviewedPublications?.length ? `<details data-reviewed-publications ${reviewedOpen?'open':''}><summary>Reviewed publication requests</summary><label>Retained request and inspection data<textarea readonly aria-label="Reviewed publication requests">${esc(JSON.stringify(draft.reviewedPublications,null,2))}</textarea></label></details>` : '')+`<details data-shared-history ${wasOpen?'open':''}><summary>Shared history and conflicts</summary>`+(draft.historyGaps?.length ? '<p role="status">History is incomplete; fetching missing pages. Keep this page open.</p>' : '')+history.map(item=>
+    box.innerHTML=(draft.rejectedResolutions?.length ? `<label>Rejected resolution requests<textarea readonly aria-label="Rejected resolution requests">${esc(JSON.stringify(draft.rejectedResolutions,null,2))}</textarea></label>` : '')+(state.data?.capabilities?.report_autosave && draft.pendingShared ? `<section aria-label="Publication recovery"><p>Request ${esc(draft.pendingShared.request_id)} is retained. Inspect its original receipt before submitting another edit. Inspection does not publish.</p><label>Original pending request<textarea readonly aria-label="Original pending request">${esc(JSON.stringify(draft.pendingShared,null,2))}</textarea></label>${draft.publicationDetail ? `<label>Latest publication inspection<textarea readonly aria-label="Latest publication inspection">${esc(JSON.stringify(draft.publicationDetail,null,2))}</textarea></label>` : ''}<button type="button" class="button" data-inspect-save>Inspect original save</button><button type="button" class="button" data-inspect-markdown>Inspect current Markdown</button>${draft.markdownInspection!=null ? `<label>Current Markdown inspection<textarea readonly aria-label="Current Markdown inspection">${esc(draft.markdownInspection)}</textarea></label>` : ''}${draft.recoveryNotFound ? '<button type="button" class="button" data-retry-original>Retry exact original request</button>' : ''}${draft.publicationConflict ? '<button type="button" class="button" data-review-conflict>Continue after reviewing conflict</button><p>Compare retained versions and the current Markdown before continuing. Publication may already have changed the file.</p>' : ''}</section>` : '')+(draft.reviewedPublications?.length ? `<details data-reviewed-publications ${reviewedOpen?'open':''}><summary>Reviewed publication requests</summary><label>Retained request and inspection data<textarea readonly aria-label="Reviewed publication requests">${esc(JSON.stringify(draft.reviewedPublications,null,2))}</textarea></label></details>` : '')+`<details data-shared-history ${wasOpen?'open':''}><summary>Shared history and conflicts</summary>`+(draft.historyGaps?.length ? '<p role="status">History is incomplete; fetching missing pages. Keep this page open.</p>' : '')+history.map(item=>
       `<div class="record"><strong><span>Event #${esc(item.id)}</span> · <span>${esc(item.kind)}</span>${item.kind.endsWith(':conflict') ? (item.resolved_revision ? ' (resolved)' : ' (unresolved)') : ''}</strong> <span>Revision ${esc(item.revision.slice(0,12))}${item.head!==item.revision ? ` · result ${esc(item.head.slice(0,12))}` : ''}</span><button type="button" class="button" data-version="${esc(item.id)}">Preview this version</button>${item.head!==item.revision ? `<button type="button" class="button" data-result="${esc(item.id)}">Preview resulting revision</button>` : ''}${item.kind.endsWith(':conflict') && !item.resolved_revision ? `<button type="button" class="button" data-conflict="${esc(item.id)}" ${conflictFresh(draft,item)?'':'disabled'}>Resolve conflict ${esc(item.id)} with editor</button>${conflictFresh(draft,item)?'':` <span>Conflict status may be stale.</span> <button type="button" class="button" data-refresh-conflict="${esc(item.id)}">Refresh conflict ${esc(item.id)} status</button>`}` : ''}</div>`).join('')+(draft.historyBefore ? '<button type="button" class="button" data-older>Load older history</button>' : '')+
       (draft.versionPreview ? `<section class="panel-pad"><h3>Preview event #${esc(draft.versionPreview.id)} · revision ${esc(draft.versionPreview.revision)}</h3><label>Version preview<textarea readonly aria-label="Version preview">${esc(draft.versionPreview.value)}</textarea></label><button type="button" class="button" data-confirm-version>Confirm restore version</button><button type="button" class="button" data-cancel-version>Cancel preview</button></section>` : '')+'</details>' +
       (draft.retryExhausted ? '<button type="button" class="button" data-retry>Retry shared save</button>' : '') +
@@ -467,11 +469,14 @@
       } catch {draft.collabMessage='Conflict status could not be refreshed. Retry before resolving.';showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);}
     }));
     const resolve=(id)=>{
-      if(!draft.sharedRevision || (!id && !draft.revision) || (state.data?.capabilities?.report_autosave && draft.pendingShared))return;
+      if(!draft.sharedRevision || (!id && !draft.revision) || draft.pendingShared || (draft.collabBusy && !draft.pollInFlight))return;
       // Only an explicit store-conflict resolution is based on the reviewed
       // head. A publication-only conflict is a new edit from its causal base.
-      draft.publicationNotice=null;draft.conflictId=id; if(id)draft.revision=draft.sharedRevision; draft.status='unsaved'; draft.collabMessage='Submitting resolution…';
-      persistDraft(draft); scheduleSharedSave(draft);
+      draft.publicationNotice=null;draft.conflictId=id; if(id)draft.revision=draft.sharedRevision; draft.status='unsaved';draft.hasDraft=true;draft.collabMessage='Submitting resolution…';
+      const pending={base:draft.revision,content:draft.text,request_id:crypto.randomUUID()};if(id)pending.conflict_id=id;
+      draft.pendingShared=pending;draft.resolutionQueued=true;
+      if(!persistDraft(draft)){refreshStatus(draft);renderRecovery();return;}
+      refreshStatus(draft);scheduleSharedSave(draft);
     };
     box.querySelector('[data-resolve]')?.addEventListener('click',()=>resolve(draft.conflictId));
     box.querySelectorAll('[data-conflict]').forEach(button=>button.addEventListener('click',()=>resolve(Number(button.dataset.conflict))));
@@ -569,7 +574,9 @@
     finally {
       draft.collabBusy=false;draft.pollInFlight=false;
       const pendingPublish=draft.publishAfterPoll;draft.publishAfterPoll=null;
-      if(draft.hasDraft && draft.collabReady && draft.status!=='conflict')scheduleSharedSave(draft);
+      if(draft.inspectRequested && draft.pendingShared?.request_id===draft.inspectRequested)inspectSave(draft);
+      else if(draft.resolutionQueued)scheduleSharedSave(draft,0);
+      else if(draft.hasDraft && draft.collabReady && draft.status!=='conflict')scheduleSharedSave(draft);
       if(pendingPublish){
         if(pollSucceeded)publishFixture(draft,pendingPublish);
         else draft.collabMessage='Shared read failed; fixture publication was not attempted. Retry after refresh.';
@@ -579,8 +586,12 @@
   }
   async function inspectSave(draft) {
     const pending=draft.pendingShared;
-    if(!pending || draft.collabBusy)return;
     clearTimeout(draft.backlogRetryTimer);
+    if(!pending)return;
+    draft.inspectRequested=pending.request_id;
+    draft.publicationNotice='Waiting to inspect the original save; its outcome remains unconfirmed.';
+    if(!persistDraft(draft)){refreshStatus(draft);renderRecovery();return;}
+    if(draft.collabBusy){refreshStatus(draft);return;}
     draft.collabBusy=true;draft.recoveryNotFound=false;
     try {
       const result=await BoardAPI.collaborationRead(draft.collabProgram,draft.lane,draft.collabPath,draft.collabRoot,'recovery',{request_id:pending.request_id});
@@ -591,7 +602,7 @@
       draft.recoveryNotFound=error.status===404;
       draft.publicationNotice=error.status===404 ? 'Original request not found in the store at inspection time. The outcome is unconfirmed; you may retry the exact original request, not a new one.' : 'Original request inspection failed. Store and Markdown outcomes are unconfirmed; retain the request and copy your draft.';
       persistDraft(draft);
-    } finally {draft.collabBusy=false;showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);if(!draft.pendingShared && draft.hasDraft && draft.status!=='conflict')scheduleSharedSave(draft);}
+    } finally {draft.inspectRequested=null;persistDraft(draft);draft.collabBusy=false;showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);if(!draft.pendingShared && draft.hasDraft && draft.status!=='conflict')scheduleSharedSave(draft);}
   }
   function handleAutosaveReceipt(draft,pending,receipt,publication,inspected=false) {
     const stateName=publication?.state;
@@ -630,12 +641,13 @@
   }
   function scheduleSharedSave(draft, delay=500) {
     clearTimeout(draft.saveTimer);
-    if(reportReadOnly(draft) || draft.retryExhausted || (state.data?.capabilities?.report_autosave && draft.pendingShared) || draft.storageBlocked || draft.storageUnreadable || draft.storageError || (draft.sourceUnavailable && !draft.pendingShared))return;
-    draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
+    if(reportReadOnly(draft) || draft.retryExhausted || (state.data?.capabilities?.report_autosave && draft.pendingShared && !draft.resolutionQueued) || draft.storageBlocked || draft.storageUnreadable || draft.storageError || (draft.sourceUnavailable && !draft.pendingShared))return;
+    draft.saveTimer=setTimeout(()=>saveShared(draft,!!draft.resolutionQueued),delay);
   }
   // Only an explicit pre-submit backlog response permits automatic replay.
   function scheduleBacklogRetry(draft,pending,delay) {
     clearTimeout(draft.backlogRetryTimer);
+    if(draft.inspectRequested)return;
     draft.backlogRetryTimer=setTimeout(()=>{
       if(draft.pendingShared!==pending || draft.storageBlocked || draft.storageUnreadable || draft.storageError || reportReadOnly(draft))return;
       if(draft.collabBusy){scheduleBacklogRetry(draft,pending,100);return;}
@@ -646,6 +658,7 @@
     const autosave=state.data?.capabilities?.report_autosave===true;
     if(reportReadOnly(draft) || draft.collabBusy || !draft.collabReady || (draft.status==='conflict' && !retryOriginal) || (autosave && draft.pendingShared && !retryOriginal)) return;
     draft.collabBusy=true;
+    draft.resolutionQueued=false;
     const pending=draft.pendingShared || {base:draft.revision,content:draft.text,request_id:crypto.randomUUID()};
     if(draft.conflictId && !draft.pendingShared)pending.conflict_id=draft.conflictId;
     draft.pendingShared=pending;
@@ -702,14 +715,14 @@
         draft.collabMessage='Source unavailable; pending request and local draft are retained. Restore the source before retrying.';
         persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);
       }
-      else if(error.status===409){draft.pendingShared=null;draft.staleResolution=!!pending.conflict_id;draft.status='conflict';draft.collabMessage='Conflict or stale resolution. Your draft is preserved; review history before retrying.';persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);}
+      else if(error.status===409){if(pending.conflict_id)(draft.rejectedResolutions ||= []).push(pending);draft.pendingShared=null;draft.staleResolution=!!pending.conflict_id;draft.status='conflict';draft.collabMessage='Conflict or stale resolution. Your draft is preserved; review history before retrying.';persistDraft(draft);showSharedHistory(draft,draft.sharedHistory||[]);}
       else {
         draft.retryAttempts=(draft.retryAttempts||0)+1;
         if(draft.retryAttempts>=3){draft.retryExhausted=true;draft.collabMessage='Shared save failed. Your local draft is retained; use Retry shared save.';showSharedHistory(draft,draft.sharedHistory||[]);}
         else {draft.collabMessage='Shared save failed. Your local draft is retained; retrying.';scheduleSharedSave(draft,500 * 2 ** (draft.retryAttempts-1));}
       }
     }
-    finally {draft.collabBusy=false;refreshStatus(draft);if(autosave && !draft.pendingShared && draft.hasDraft && draft.status!=='conflict')scheduleSharedSave(draft);}
+    finally {draft.collabBusy=false;refreshStatus(draft);if(draft.inspectRequested && draft.pendingShared?.request_id===draft.inspectRequested)inspectSave(draft);else if(autosave && !draft.pendingShared && draft.hasDraft && draft.status!=='conflict')scheduleSharedSave(draft);}
   }
   setInterval(()=>{for(const draft of state.drafts.values()) if(draft.collabStarted && !draft.collabBusy && (!draft.pendingShared || state.data?.capabilities?.report_autosave)) pollShared(draft);},2000);
   function reportStatus(draft) {
