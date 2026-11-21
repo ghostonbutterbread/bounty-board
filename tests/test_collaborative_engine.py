@@ -5,6 +5,20 @@ from pathlib import Path
 
 
 class CollaborationEngineTests(unittest.TestCase):
+    def test_recent_history_keeps_older_unresolved_conflicts(self):
+        import collaborative_engine
+        with tempfile.TemporaryDirectory() as tmp:
+            store = collaborative_engine.CollaborationStore(Path(tmp) / 'private')
+            base = store.observe_source('report', 'base\n')['revision']
+            store.submit('report', base, 'accepted\n')
+            conflict = store.submit('report', base, 'conflicting\n')
+            for n in range(101):
+                head = store.current('report')['revision']
+                store.submit('report', head, f'next {n}\n')
+            events = store.history('report', recent_limit=100)
+            self.assertTrue(any(e['id'] == conflict['conflict_id'] for e in events))
+            self.assertEqual(len(events), 101)
+
     def test_divergent_edits_merge_and_survive_reopening(self):
         import collaborative_engine
         with tempfile.TemporaryDirectory() as tmp:

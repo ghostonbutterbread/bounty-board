@@ -19,7 +19,12 @@
   let unidentifiedSequence=0;
   const rootIdentity = () => /^[a-f0-9]{64}$/.test(state.data?.root_identity || '') ? state.data.root_identity : null;
   const draftKey = (program,lane,id) => JSON.stringify([rootIdentity() || state.unidentifiedRoot,program,lane,String(id)]);
-  const storageKey = key => `bounty-board-report-draft-v2:${key}`;
+  let tabId;
+  // sessionStorage is cloned by window.open, so it cannot identify a tab.
+  // window.name survives reload but starts empty for a new unnamed top-level tab.
+  try { const prefix='bounty-board-tab:'; tabId=window.name.startsWith(prefix) ? window.name.slice(prefix.length) : crypto.randomUUID(); window.name=prefix+tabId; }
+  catch { tabId=crypto.randomUUID(); }
+  const storageKey = key => `bounty-board-report-draft-v2:${key}${state.data?.capabilities?.collaboration ? ':'+tabId : ''}`;
   // This panel lives outside #app so navigation and editor rerenders cannot
   // hide a draft belonging to an earlier root.
   const recovery=document.createElement('section');
@@ -36,7 +41,7 @@
     try {
       const current=localStorage.getItem(storageKey(draft.key));
       if(current!==draft.storageSnapshot){draft.storageBlocked=true;return;}
-      const next=JSON.stringify({version:1,text:draft.text,original:draft.original,revision:draft.revision ?? null,conflict:draft.status==='conflict'});
+      const next=JSON.stringify({version:1,text:draft.text,original:draft.original,revision:draft.revision ?? null,conflict:draft.status==='conflict',conflictId:draft.conflictId ?? null,hasDraft:draft.hasDraft});
       localStorage.setItem(storageKey(draft.key),next);
       draft.storageSnapshot=next;
       draft.storageError=false;
@@ -61,7 +66,7 @@
         if(raw!==null){
           let saved;try {saved=JSON.parse(raw);} catch {}
           if(!saved || saved.version!==1 || typeof saved.text!=='string' || typeof saved.original!=='string' || !(saved.revision===null || typeof saved.revision==='string') || (saved.conflict!==undefined && typeof saved.conflict!=='boolean')) draft.storageBlocked=true;
-          else {draft.text=saved.text;draft.original=saved.original;draft.revision=saved.revision;draft.hasDraft=true;draft.status=saved.conflict?'conflict':'unsaved';}
+          else {draft.text=saved.text;draft.original=saved.original;draft.revision=saved.revision;draft.hasDraft=saved.hasDraft!==false;draft.conflictId=saved.conflictId;draft.status=saved.conflict?'conflict':draft.hasDraft?'unsaved':'saved';}
         }
       } catch {draft.storageError=true;draft.storageUnreadable=true;}
       state.drafts.set(key,draft);
@@ -248,13 +253,106 @@
       if(!draftFor(report).hasDraft) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Report could not be loaded. Refresh the workspace to retry.</div></section>`;
     }
     const draft=draftFor(report);
+    if(state.data?.capabilities?.collaboration && !draft.collabStarted) startCollaboration(draft, currentProgram(), report.path);
     const status=reportStatus(draft);
     const unavailableSource=report.loadState==='error' ? '<div class="message warning">Report could not be loaded. Source is unavailable; your draft is shown below. Refresh the workspace to retry.</div>' : '';
-    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}${unavailableSource}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><p class="hint">Drafts are stored in this browser and can be lost if browser data is cleared. They are not saved to the report. Older unscoped drafts are retained but not automatically imported.</p><button class="button" disabled title="Report writing is disabled to protect source files">Save to report unavailable</button><div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
+    return `<section class="panel panel-pad"><div class="blockhead"><div><h2>Reports</h2><p class="hint">Markdown source and safe preview. Reports remain in their owning source.</p></div></div>${picker}${unavailableSource}<div id="report-status" class="message report-status" role="status">${esc(status)}</div><p class="hint">Drafts are stored in this browser and can be lost if browser data is cleared. They are not saved to the report. Older unscoped drafts are retained but not automatically imported.</p><button class="button" disabled title="Report writing is disabled to protect source files">Save to report unavailable</button>${state.data?.capabilities?.collaboration ? '<div id="collaboration-history"></div>' : ''}<div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
   }
+  function startCollaboration(draft, program, path) {
+    draft.collabStarted=true; draft.collabProgram={family:program.family,name:program.name}; draft.collabPath=path; draft.collabRoot=rootIdentity();
+    pollShared(draft);
+  }
+  function showSharedHistory(draft, history) {
+    const box=document.querySelector('#collaboration-history');
+    if(!box || draftKey(state.program,state.lane,state.report)!==draft.key) return;
+    const wasOpen=box.querySelector('details')?.open;
+    box.innerHTML=`<details ${wasOpen?'open':''}><summary>Shared history and conflicts</summary>`+history.slice().reverse().map(item=>
+      `<div class="record"><strong>${esc(item.kind)}${item.kind.endsWith(':conflict') ? (item.resolved_revision ? ' (resolved)' : ' (unresolved)') : ''}</strong><pre>${esc(item.content)}</pre><button type="button" class="button" data-version="${esc(item.revision)}">Use this version</button>${item.head!==item.revision ? `<button type="button" class="button" data-result="${item.id}">Use resulting revision</button>` : ''}${item.kind.endsWith(':conflict') && !item.resolved_revision ? `<button type="button" class="button" data-conflict="${item.id}">Resolve conflict ${item.id} with editor</button>` : ''}</div>`).join('')+'</details>' +
+      (draft.status==='conflict' ? '<button type="button" class="button" data-resolve>Submit editor as resolution</button>' : '') +
+      (state.data?.capabilities?.fixture_publish ? '<p class="warning">Experimental fixture publishing can overwrite uncoordinated edits. Never use with real reports or sync.</p><button type="button" class="button" data-publish>Publish fixture report</button>' : '');
+    box.querySelectorAll('[data-version]').forEach(button=>button.addEventListener('click',()=>{
+      const entry=history.find(item=>item.revision===button.dataset.version); if(!entry)return;
+      draft.applyingRemote=true; if(editor)editor.value(entry.content); draft.applyingRemote=false;
+      updateDraft(draft,entry.content);
+    }));
+    box.querySelectorAll('[data-result]').forEach(button=>button.addEventListener('click',()=>{
+      const entry=history.find(item=>item.id===Number(button.dataset.result)); if(!entry)return;
+      draft.applyingRemote=true; if(editor)editor.value(entry.head_content); draft.applyingRemote=false;
+      updateDraft(draft,entry.head_content);
+    }));
+    const resolve=(id)=>{
+      if(!draft.sharedRevision)return;
+      draft.conflictId=id; draft.revision=draft.sharedRevision; draft.status='unsaved'; draft.collabMessage='Submitting resolution…';
+      persistDraft(draft); scheduleSharedSave(draft);
+    };
+    box.querySelector('[data-resolve]')?.addEventListener('click',()=>resolve(draft.conflictId));
+    box.querySelectorAll('[data-conflict]').forEach(button=>button.addEventListener('click',()=>resolve(Number(button.dataset.conflict))));
+    box.querySelector('[data-publish]')?.addEventListener('click',async()=>{
+      if(draft.hasDraft || draft.collabBusy || !draft.sharedRevision){draft.collabMessage='Save or resolve your local draft before publishing.';refreshStatus(draft);return;}
+      draft.collabBusy=true;
+      try {
+        await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,{action:'publish',revision:draft.sharedRevision},draft.collabRoot);
+        draft.collabMessage='Fixture report published. Uncoordinated writers are not protected.';
+      } catch {draft.collabMessage='Fixture publication failed or became stale. Your draft is retained; refresh and resolve conflicts.';}
+      finally {draft.collabBusy=false;refreshStatus(draft);if(draft.hasDraft && draft.status!=='conflict')scheduleSharedSave(draft);}
+    });
+  }
+  function applyShared(draft, content, revision) {
+    draft.text=content; draft.original=content; draft.revision=revision; draft.hasDraft=false; draft.status='saved';
+    persistDraft(draft);
+    if(editor && draftKey(state.program,state.lane,state.report)===draft.key) {
+      draft.applyingRemote=true; editor.value(content); draft.applyingRemote=false;
+      const preview=document.querySelector('#report-preview'); if(preview)preview.innerHTML=markdown(content);
+    }
+  }
+  async function pollShared(draft) {
+    if(draft.collabBusy) return;
+    draft.collabBusy=true;
+    try {
+      const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,null,draft.collabRoot);
+      draft.sharedRevision=result.revision; draft.sharedHistory=result.history;
+      if(!draft.hasDraft) applyShared(draft,result.content,result.revision);
+      draft.collabReady=true;
+      const unresolved=result.history.filter(item=>item.kind.endsWith(':conflict') && !item.resolved_revision).length;
+      draft.collabMessage=draft.status==='conflict' ? 'Conflict: your draft is preserved. Compare history and submit a resolution.' : draft.hasDraft ? 'Unsaved locally; saving shared draft…' : `Shared draft ready. Source report is not saved.${unresolved ? ` ${unresolved} unresolved conflict(s); see history.` : ''}`;
+      if(draft.hasDraft && draft.status!=='conflict') scheduleSharedSave(draft);
+      showSharedHistory(draft,result.history);
+    } catch { draft.collabMessage='Shared draft unavailable. Your local draft is retained; retrying.'; }
+    finally {draft.collabBusy=false;if(draft.hasDraft && draft.collabReady && draft.status!=='conflict') scheduleSharedSave(draft);refreshStatus(draft);}
+  }
+  function scheduleSharedSave(draft, delay=500) {
+    clearTimeout(draft.saveTimer); draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
+  }
+  async function saveShared(draft) {
+    if(draft.collabBusy || !draft.collabReady || draft.status==='conflict') return;
+    draft.collabBusy=true;
+    const pending=draft.pendingShared || {base:draft.revision,content:draft.text,request_id:crypto.randomUUID()};
+    if(draft.conflictId && !draft.pendingShared)pending.conflict_id=draft.conflictId;
+    draft.pendingShared=pending;
+    try {
+      const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,pending,draft.collabRoot);
+      draft.pendingShared=null; draft.sharedRevision=result.revision;
+      if(result.status==='conflict') {
+        draft.conflictId=result.conflict_id; draft.status='conflict'; draft.collabMessage='Conflict: your draft is preserved. Compare history and submit a resolution.'; persistDraft(draft);
+      } else if(draft.text===pending.content) {
+        draft.conflictId=null;
+        applyShared(draft,result.content,result.revision); draft.collabMessage='Shared draft ready. Source report is not saved.';
+      } else {
+        draft.conflictId=null;
+        draft.revision=result.incoming_revision; draft.original=pending.content; persistDraft(draft); scheduleSharedSave(draft);
+      }
+    } catch (error) {
+      if(error.status===409){draft.pendingShared=null;draft.status='conflict';draft.collabMessage='Conflict or stale resolution. Your draft is preserved; review history before retrying.';persistDraft(draft);}
+      else {draft.collabMessage='Shared save failed. Your local draft is retained; retrying.';scheduleSharedSave(draft,2000);}
+    }
+    finally {draft.collabBusy=false;refreshStatus(draft);}
+  }
+  setInterval(()=>{for(const draft of state.drafts.values()) if(draft.collabStarted && !draft.collabBusy && !draft.pendingShared) pollShared(draft);},2000);
   function reportStatus(draft) {
     const sourceUnavailable=draft.source?.loadState==='error' ? 'Source unavailable. ' : '';
     if(draft.storageBlocked) return `${draft.status==='conflict'?'Conflict: the report changed in its source. The conflict warning may not be saved. ':''}${sourceUnavailable}Browser draft data is invalid or changed in another tab; it was not overwritten. Copy your edits before leaving.`;
+    if(draft.collabMessage && (draft.storageError || draft.storageUnreadable)) return `${draft.status==='conflict'?'Conflict: ':''}${sourceUnavailable}Browser draft storage unavailable. Your edits may be only in this tab; copy them before leaving.`;
+    if(draft.collabMessage) return draft.collabMessage;
     if(draft.status==='conflict') return `Conflict: the report changed in its source. ${sourceUnavailable}${draft.storageError?'Browser draft storage unavailable; the conflict warning could not be saved. Copy your edits before leaving.':'Your browser draft is preserved; compare it with the source before reconciling.'}`;
     if(sourceUnavailable && draft.storageError) return `${sourceUnavailable}Browser draft storage unavailable; copy your edits before leaving.`;
     if(sourceUnavailable) return `${sourceUnavailable}Your draft is shown; copy it or refresh to retry.`;
@@ -326,8 +424,11 @@
     if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}
   });
   function updateDraft(draft,text){
+    if(draft.applyingRemote) return;
     draft.text=text;draft.hasDraft=true;if(draft.status!=='conflict')draft.status='unsaved';
+    if(draft.collabReady && draft.status!=='conflict')draft.collabMessage='Unsaved locally; saving shared draft…';
     persistDraft(draft);
+    if(draft.collabStarted && draft.collabReady && draft.status!=='conflict') scheduleSharedSave(draft);
     const preview=document.querySelector('#report-preview');if(preview)preview.innerHTML=markdown(text);
     refreshStatus(draft);
     renderRecovery();

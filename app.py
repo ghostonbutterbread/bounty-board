@@ -235,10 +235,22 @@ def valid_tailnet_host(host):
             re.fullmatch(fr'{label}\.{label}\.ts\.net', host) is not None)
 
 
-def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None):
+def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
+                collaboration_dir=None, experimental_fixture_publish=False):
+    import os
+    import tempfile
+    import threading
+    from collaborative_engine import CollaborationStore
     if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
         raise ValueError('invalid canonical tailnet hostname')
     root = Path(root).absolute()
+    if experimental_fixture_publish:
+        if collaboration_dir is None or not os.environ.get('TMPDIR'):
+            raise ValueError('fixture publication requires collaboration storage and explicit TMPDIR')
+        if root.is_symlink() or not root.resolve(strict=True).is_relative_to(Path(tempfile.gettempdir()).resolve(strict=True)):
+            raise ValueError('fixture root must be inside TMPDIR')
+    collaboration = CollaborationStore(collaboration_dir) if collaboration_dir else None
+    collaboration_lock = threading.RLock()
     class Handler(BaseHTTPRequestHandler):
         def trusted_request(self, require_origin=False):
             port = self.server.server_port
@@ -269,12 +281,114 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.end_headers()
             self.wfile.write(data)
 
+        def collaboration_identity(self):
+            import hashlib
+            import re
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            if set(params) != {'family', 'program', 'lane', 'path', 'root_identity'} or any(len(v) != 1 for v in params.values()):
+                raise ValueError('invalid identity')
+            root_id = hashlib.sha256(os.fsencode(str(root.resolve(strict=True)))).hexdigest()
+            if params['root_identity'][0] != root_id:
+                raise ValueError('root changed')
+            family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
+            if (family not in FAMILIES or lane not in FAMILIES[family] or
+                    not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', program) or
+                    path.startswith('/') or Path(path).suffix.lower() != '.md' or
+                    any(p in ('', '.', '..') for p in path.split('/'))):
+                raise ValueError('invalid identity')
+            relative = f'{family}/{program}/{lane}/reports/{path}'
+            return json.dumps([str(root.resolve()), relative], ensure_ascii=False), relative
+
+        def collaboration_request(self, write=False):
+            import sqlite3
+            import subprocess
+            if collaboration is None:
+                return self.reply(503, {'error': 'collaboration_disabled'})
+            try:
+                key, relative = self.collaboration_identity()
+                payload = {}
+                if write:
+                    if (not self.trusted_request(require_origin=True) or
+                            self.headers.get_all('X-Requested-With', []) != ['Bounty-Board'] or
+                            [x.lower() for x in self.headers.get_all('Content-Type', [])] != ['application/json'] or
+                            self.headers.get('Transfer-Encoding')):
+                        return self.reply(403, {'error': 'untrusted_origin'})
+                    lengths = self.headers.get_all('Content-Length', [])
+                    if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 30_050_000:
+                        raise ValueError('invalid length')
+                    payload = json.loads(self.rfile.read(int(lengths[0])))
+                    if not isinstance(payload, dict) or set(payload) not in ({'base', 'content', 'request_id'}, {'base', 'content', 'request_id', 'conflict_id'}, {'action', 'revision'}):
+                        raise ValueError('invalid payload')
+                    if 'action' in payload and (payload['action'] != 'publish' or not isinstance(payload['revision'], str)):
+                        raise ValueError('invalid action')
+                    if 'action' not in payload and not all(isinstance(payload[k], str) and payload[k] for k in ('base', 'request_id')):
+                        raise ValueError('invalid payload')
+                with collaboration_lock:
+                    content = read_file(root, relative).decode('utf-8')
+                    collaboration.observe_source(key, content)
+                    if write and payload.get('action') == 'publish':
+                        if not experimental_fixture_publish:
+                            return self.reply(403, {'error': 'publication_disabled'})
+                        current = collaboration.current(key)
+                        if current is None:
+                            raise ValueError('missing document')
+                        if current['revision'] != payload['revision'] or any(
+                                e['kind'].endswith(':conflict') and not e['resolved_revision'] for e in collaboration.history(key)):
+                            return self.reply(409, {'error': 'head_changed_or_conflict'})
+                        latest = read_file(root, relative).decode('utf-8')
+                        if latest != content:
+                            collaboration.observe_source(key, latest)
+                            return self.reply(409, {'error': 'source_changed'})
+                        # This is deliberately only a fixture publisher. External writers do
+                        # not take this lock; check-then-replace is not a filesystem CAS.
+                        self.publish_fixture(relative, current['content'])
+                        observed = read_file(root, relative).decode('utf-8')
+                        collaboration.observe_source(key, observed)
+                        if observed != current['content']:
+                            return self.reply(409, {'error': 'publication_changed'})
+                        result = {'status': 'published', 'revision': current['revision']}
+                    elif write:
+                        result = collaboration.submit(key, payload['base'], payload['content'], payload['request_id'], payload.get('conflict_id'))
+                    else:
+                        result = collaboration.current(key)
+                        if result is None:
+                            raise ValueError('missing document')
+                        result['history'] = collaboration.history(key, recent_limit=100)
+                return self.reply(200, result)
+            except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+                return self.reply(409 if write else 404, {'error': 'invalid_or_conflicting_request'})
+            except (OSError, sqlite3.Error, subprocess.SubprocessError):
+                return self.reply(503, {'error': 'collaboration_unavailable', 'message': 'Retain your local draft and retry.'})
+
+        def publish_fixture(self, relative, content):
+            import uuid
+            parts = Path(relative).parts
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            name = '.board-' + uuid.uuid4().hex
+            try:
+                for part in parts[:-1]:
+                    next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                    os.close(directory); directory = next_fd
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                try:
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(content.encode('utf-8')); stream.flush(); os.fsync(stream.fileno())
+                    os.replace(name, parts[-1], src_dir_fd=directory, dst_dir_fd=directory)
+                    os.fsync(directory)
+                finally:
+                    try: os.unlink(name, dir_fd=directory)
+                    except FileNotFoundError: pass
+            finally:
+                os.close(directory)
+
         def do_GET(self):
             import hashlib
             if not self.trusted_request():
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
             url = urlsplit(self.path)
+            if url.path == '/api/collaboration':
+                return self.collaboration_request()
             if url.path == '/api/data':
                 result: dict = discover(root)
                 # Identity follows the effective canonical path, not report content.
@@ -289,7 +403,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'finding_fields': ['severity', 'class_name', 'status', 'severity_rationale'] if self.server.writer_enabled else [],
                                           'finding_options': {'severity': SEVERITIES, 'status': STATUSES} if self.server.writer_enabled else {},
                                           'finding_metadata_warning': METADATA_WRITE_WARNING,
-                                          'report_edit': False}
+                                          'report_edit': False,
+                                          'collaboration': collaboration is not None,
+                                          'fixture_publish': experimental_fixture_publish}
                 self.reply(200, result)
                 return
             if url.path == '/api/report':
@@ -330,6 +446,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.reply(403, {'error': 'editing_disabled', 'message': 'Report writes are disabled; retain your draft.'})
 
         def do_POST(self):
+            if urlsplit(self.path).path == '/api/collaboration':
+                return self.collaboration_request(write=True)
             self.do_PUT()
 
         def do_PATCH(self):
@@ -443,6 +561,8 @@ def parse_config(argv=None):
     parser.add_argument('--bbh', type=Path, help='opt in to metadata writes with this BBH executable')
     parser.add_argument('--accept-uncoordinated-writes', action='store_true',
                         help='accept metadata write risk: concurrent edits can be overwritten; no shared compare-and-swap')
+    parser.add_argument('--collaboration-dir', type=Path, help='opt in to experimental private shared draft storage')
+    parser.add_argument('--experimental-fixture-publish', action='store_true', help='dangerous test-only source writes, restricted to TMPDIR')
     args = parser.parse_args(argv)
     settings = {}
     if args.config:
@@ -481,7 +601,8 @@ def main():
     args = parse_config()
     make_server(args.root, args.port, writer=args.bbh,
                 accept_uncoordinated_writes=args.accept_uncoordinated_writes,
-                tailnet_host=args.tailnet_host).serve_forever()
+                tailnet_host=args.tailnet_host, collaboration_dir=args.collaboration_dir,
+                experimental_fixture_publish=args.experimental_fixture_publish).serve_forever()
 
 
 if __name__ == '__main__':
