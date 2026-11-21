@@ -121,3 +121,13 @@ test('not-observed recovery permits only exact original retry before newer edit'
   await page.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('Markdown file saved') && document.querySelector('.CodeMirror').CodeMirror.getValue()==='after failure\n',{},{timeout:15000});
   assert.equal(fs.readFileSync(report,'utf8'),'after failure\n');
 }));
+
+
+test('a saved notice is invalidated when reload observes a later external change', {timeout:30000},()=>fixture(async({browser,base,report})=>{
+  const page=await browser.newPage();await open(page,base);await edit(page,'saved earlier\n');await page.getByText(/Markdown file saved/).waitFor();
+  fs.writeFileSync(report,'later external\n');await page.reload();
+  await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue()==='later external\n');
+  await page.waitForTimeout(300);
+  assert.doesNotMatch(await page.locator('#report-status').innerText(),/Markdown file saved/);
+}));

@@ -77,7 +77,7 @@
     // Collaborative revisions describe the shared draft, not the source report.
     // The server observes source changes and determines conflicts when saving.
     if(draft.hasDraft && changed && !state.data?.capabilities?.collaboration && draft.status!=='conflict') {draft.status='conflict';persistDraft(draft);}
-    else if(!draft.hasDraft && content!==null){draft.text=content;draft.original=draft.text;draft.revision=report.revision;}
+    else if(!draft.hasDraft && content!==null){if(changed && state.data?.capabilities?.report_autosave)draft.publicationNotice=null;draft.text=content;draft.original=draft.text;draft.revision=report.revision;}
     draft.source=report;draft.observedContent=content;draft.observedRevision=revision;
   }
   const draftFor = report => {
