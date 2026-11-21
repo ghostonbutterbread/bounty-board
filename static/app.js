@@ -16,6 +16,7 @@
   };
   const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
+  const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && draft.source?.editable===false;
   let unidentifiedSequence=0;
   const rootIdentity = () => /^[a-f0-9]{64}$/.test(state.data?.root_identity || '') ? state.data.root_identity : null;
   const draftKey = (program,lane,id) => JSON.stringify([rootIdentity() || state.unidentifiedRoot,program,lane,String(id)]);
@@ -296,12 +297,16 @@
     if(report.content == null && report.path){
       if(!report.loadState) {
         report.loadState='loading';const program=currentProgram(), lane=state.lane;
-        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(result.editable===false)report.editable=false;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
+        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(typeof result.editable==='boolean')report.editable=result.editable;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
       }
       if(report.loadState!=='error') return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Loading report…</div></section>`;
       if(!draftFor(report).hasDraft) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Report could not be loaded. Refresh the workspace to retry.</div></section>`;
     }
     const draft=draftFor(report);
+    if(reportReadOnly(draft)) {
+      clearTimeout(draft.saveTimer);
+      return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div id="report-status" class="message warning" role="status">This report is read-only under the backend editing policy. Any retained browser draft is shown for copying; it will not be published.</div><div class="report-layout"><div><label for="report-source">Markdown source</label><textarea id="report-source" readonly spellcheck="false">${esc(draft.text)}</textarea></div><div><label>Preview</label><div id="report-preview" class="preview">${markdown(draft.text)}</div></div></div></section>`;
+    }
     if(state.data?.capabilities?.collaboration && !draft.collabStarted) startCollaboration(draft, currentProgram(), report.path);
     const status=reportStatus(draft)+(draft.historyGaps?.length ? ' History is incomplete; fetching missing pages.' : '')+(draft.undoNotice ? ` ${draft.undoNotice}` : '');
     const unavailableSource=report.loadState==='error' ? '<div class="message warning">Report could not be loaded. Source is unavailable; your draft is shown below. Refresh the workspace to retry.</div>' : '';
@@ -461,8 +466,10 @@
       } catch {draft.collabMessage='Conflict status could not be refreshed. Retry before resolving.';showSharedHistory(draft,draft.sharedHistory||[]);refreshStatus(draft);}
     }));
     const resolve=(id)=>{
-      if(!draft.sharedRevision || (state.data?.capabilities?.report_autosave && draft.pendingShared))return;
-      draft.publicationNotice=null;draft.conflictId=id; draft.revision=draft.sharedRevision; draft.status='unsaved'; draft.collabMessage='Submitting resolution…';
+      if(!draft.sharedRevision || (!id && !draft.revision) || (state.data?.capabilities?.report_autosave && draft.pendingShared))return;
+      // Only an explicit store-conflict resolution is based on the reviewed
+      // head. A publication-only conflict is a new edit from its causal base.
+      draft.publicationNotice=null;draft.conflictId=id; if(id)draft.revision=draft.sharedRevision; draft.status='unsaved'; draft.collabMessage='Submitting resolution…';
       persistDraft(draft); scheduleSharedSave(draft);
     };
     box.querySelector('[data-resolve]')?.addEventListener('click',()=>resolve(draft.conflictId));
@@ -476,6 +483,7 @@
     });
   }
   async function publishFixture(draft, expectedRevision) {
+    if(reportReadOnly(draft))return;
     if(draft.sourceUnavailable){draft.collabMessage='Source unavailable. Publication was not attempted.';refreshStatus(draft);return;}
     if(draft.hasDraft || draft.collabBusy || !expectedRevision || draft.sharedRevision!==expectedRevision){draft.collabMessage='Save or resolve your local draft before publishing; retry if the shared revision changed.';refreshStatus(draft);return;}
     draft.collabBusy=true;draft.fixturePublishedRevision=null;
@@ -508,7 +516,7 @@
     }
   }
   async function pollShared(draft) {
-    if(draft.collabBusy || draft.retryExhausted || (draft.pollRetryAt && Date.now()<draft.pollRetryAt)) return;
+    if(reportReadOnly(draft) || draft.collabBusy || draft.retryExhausted || (draft.pollRetryAt && Date.now()<draft.pollRetryAt)) return;
     draft.collabBusy=true;draft.pollInFlight=true;let pollSucceeded=false;
     try {
       const result=await BoardAPI.collaboration(draft.collabProgram,draft.lane,draft.collabPath,null,draft.collabRoot);
@@ -588,17 +596,25 @@
     draft.publicationDetail=publication ?? null;
     // This response is emitted before any exchange, so a successful shared
     // edit is safe to acknowledge separately from Markdown publication.
-    if(publication?.state==='conflict' && !publication.operation && publication.reasons?.includes('store_needs_reconciliation') && ['saved','merged','unchanged'].includes(receipt.status) && typeof receipt.revision==='string' && typeof receipt.content==='string'){
+    const storeOnly=publication?.state==='conflict' && ((!publication.operation && publication.reasons?.includes('store_needs_reconciliation')) || (inspected && publication.reasons?.includes('not_published')));
+    if(storeOnly && ['saved','merged','unchanged'].includes(receipt.status) && typeof receipt.revision==='string' && typeof receipt.content==='string' && (draft.text===pending.content || typeof receipt.incoming_revision==='string')){
       draft.pendingShared=null;draft.conflictId=null;draft.publicationConflict=false;draft.sharedRevision=receipt.revision;
       draft.publicationNotice='Saved to shared draft only. Review the merged report before saving Markdown.';
       if(draft.text===pending.content)applyShared(draft,receipt.content,receipt.revision);
-      else {draft.revision=receipt.revision;draft.original=pending.content;persistDraft(draft);}
+      else {
+        // Later editor text descends from the submitted input, not the merged
+        // receipt. The store must three-way merge it against that input.
+        draft.revision=receipt.incoming_revision;draft.original=pending.content;persistDraft(draft);
+      }
       return true;
     }
-    if(stateName!=='published' || !['saved','merged','unchanged'].includes(receipt.status) || typeof receipt.revision!=='string' || typeof receipt.content!=='string') {
+    if(stateName!=='published' || !['saved','merged','unchanged'].includes(receipt.status) || typeof receipt.revision!=='string' || typeof receipt.content!=='string' || (draft.text!==pending.content && typeof receipt.incoming_revision!=='string')) {
       draft.hasDraft=true;draft.publicationConflict=inspected && stateName==='conflict';
       if(receipt.status==='conflict'){draft.conflictId=receipt.conflict_id;draft.conflictBase=pending.base;}
-      const shared='Shared draft saved. ';
+      else if(['saved','merged','unchanged'].includes(receipt.status) && typeof receipt.incoming_revision==='string'){
+        draft.revision=receipt.incoming_revision;draft.original=pending.content;
+      }
+      const shared=receipt.status==='conflict' ? 'Shared draft conflict retained. ' : 'Shared draft saved. ';
       draft.publicationNotice=shared+(stateName==='conflict' ? 'Publication conflict: the Markdown file may already have changed. Inspect the original save and compare retained history before resolving.' : stateName==='pending' ? 'Markdown publication is pending and unconfirmed. Inspect the original save.' : 'Markdown publication outcome is uncertain or unrecognized. Inspect the original save; retain this request for manual review.');
       persistDraft(draft);return false;
     }
@@ -612,12 +628,12 @@
   }
   function scheduleSharedSave(draft, delay=500) {
     clearTimeout(draft.saveTimer);
-    if(draft.retryExhausted || (state.data?.capabilities?.report_autosave && draft.pendingShared) || draft.storageBlocked || draft.storageUnreadable || draft.storageError || (draft.sourceUnavailable && !draft.pendingShared))return;
+    if(reportReadOnly(draft) || draft.retryExhausted || (state.data?.capabilities?.report_autosave && draft.pendingShared) || draft.storageBlocked || draft.storageUnreadable || draft.storageError || (draft.sourceUnavailable && !draft.pendingShared))return;
     draft.saveTimer=setTimeout(()=>saveShared(draft),delay);
   }
   async function saveShared(draft, retryOriginal=false) {
     const autosave=state.data?.capabilities?.report_autosave===true;
-    if(draft.collabBusy || !draft.collabReady || (draft.status==='conflict' && !retryOriginal) || (autosave && draft.pendingShared && !retryOriginal)) return;
+    if(reportReadOnly(draft) || draft.collabBusy || !draft.collabReady || (draft.status==='conflict' && !retryOriginal) || (autosave && draft.pendingShared && !retryOriginal)) return;
     draft.collabBusy=true;
     const pending=draft.pendingShared || {base:draft.revision,content:draft.text,request_id:crypto.randomUUID()};
     if(draft.conflictId && !draft.pendingShared)pending.conflict_id=draft.conflictId;
@@ -703,7 +719,8 @@
     if(source && typeof EasyMDE !== 'undefined') {
       // EasyMDE's own autosave removes empty values and clears data on submit;
       // the board owns persistence and retains the source revision instead.
-      editor=new EasyMDE({element:source,autoDownloadFontAwesome:false,autosave:{enabled:false},forceSync:true,spellChecker:false,status:false,previewRender:markdown,toolbar:['bold','italic','heading','|','quote','unordered-list','ordered-list','code','|','preview','side-by-side']});
+      editor=new EasyMDE({element:source,autoDownloadFontAwesome:false,autosave:{enabled:false},forceSync:true,spellChecker:false,status:false,previewRender:markdown,toolbar:source.readOnly ? false : ['bold','italic','heading','|','quote','unordered-list','ordered-list','code','|','preview','side-by-side']});
+      if(source.readOnly)editor.codemirror.setOption('readOnly',true);
       const field=editor.codemirror.getInputField();field.id='report-source-editor';app.querySelector('label[for="report-source"]').htmlFor=field.id;field.setAttribute('aria-describedby','report-status');
       const draft=draftFor(reportById(state.report));
       editor.codemirror.on('change',()=>updateDraft(draft,editor.value()));
@@ -786,7 +803,7 @@
     if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}
   });
   function updateDraft(draft,text){
-    if(draft.applyingRemote) return;
+    if(draft.applyingRemote || reportReadOnly(draft)) return;
     if(state.data?.capabilities?.report_autosave && !draft.pendingShared)draft.publicationNotice=null;
     draft.fixturePublishedRevision=null;
     draft.text=text;draft.hasDraft=true;if(draft.status!=='conflict')draft.status='unsaved';
