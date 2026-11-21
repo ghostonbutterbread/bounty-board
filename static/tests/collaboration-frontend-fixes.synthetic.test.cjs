@@ -10,15 +10,17 @@ async function fixture(run) {
   const tmp=fs.mkdtempSync(path.join(process.env.TMPDIR,'front-fixes-'));
   const root=path.join(tmp,'root'), report=path.join(root,'web_bounty/example/web/reports/example.md');
   fs.mkdirSync(path.dirname(report),{recursive:true});fs.writeFileSync(report,'original\n');
-  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:path.resolve(__dirname,'../..'),env:process.env,stdio:['ignore','pipe','pipe']});
-  proc.stderr.resume(); // Drain request logs so a large synthetic burst cannot block the server.
+  const proc=spawn('python3',['-B','-u','-c',"import sys,app; s=app.make_server(sys.argv[1],0,collaboration_dir=sys.argv[2]); print(s.server_port,flush=True); s.serve_forever()",root,path.join(tmp,'private')],{cwd:tmp,env:{...process.env,PYTHONPATH:path.resolve(__dirname,'../..')},stdio:['ignore','pipe','pipe']});
+  let stderr='';proc.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-12000);});
   let browser;
   try {
-    const [chunk]=await once(proc.stdout,'data');const base='http://127.0.0.1:'+Number(chunk.toString().trim());
+    const [chunk]=await withTimeout(once(proc.stdout,'data'),10000,'server startup');const base='http://127.0.0.1:'+Number(chunk.toString().trim());
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
     await run({browser,base,report});
-  } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
+  } catch(error) {console.error('Synthetic server stderr (tail):',stderr);throw error;}
+  finally {try {if(browser)await withTimeout(browser.close(),5000,'browser close');} finally {if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill('SIGKILL');await withTimeout(done,5000,'server exit');}fs.rmSync(tmp,{recursive:true,force:true});}}
 }
+async function withTimeout(promise,ms,phase){let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(`Timed out: ${phase}`)),ms);})]);}finally{clearTimeout(timer);}}
 async function open(page,base){page.setDefaultTimeout(10000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
 
 for(const failure of ['quota','cas','silent']) test(`recovery ${failure} failure keeps copyable text and never sends an undurable request`, {timeout:60000},()=>fixture(async({browser,base})=>{
@@ -99,35 +101,56 @@ test('a newly created shared request is not sent when its persistence fails', {t
  await page.waitForTimeout(3000);assert.deepEqual(posts,[]);
 }));
 
-test('history bridges a 100-submission burst after older history is loaded', {timeout:120000},()=>fixture(async({browser,base})=>{
+async function historyBurst({browser,base},injectFailure=false){
+  let phase='setup';
+  try {
   const context=await browser.newContext(),page=await context.newPage();
   const root=(await (await context.request.get(base+'/api/data')).json()).root_identity;
   const query=new URLSearchParams({family:'web_bounty',program:'example',lane:'web',path:'example.md',root_identity:root});
   const endpoint=base+'/api/collaboration?'+query;
   let head=await (await context.request.get(endpoint)).json();
   const post=async (content,id)=>{const r=await context.request.post(endpoint,{headers:{Origin:base,'X-Requested-With':'Bounty-Board'},data:{base:head.revision,content,request_id:id}});assert.equal(r.status(),200,await r.text());head=await r.json();};
-  for(let i=0;i<52;i++) await post(`initial ${i}\n`,`initial-${i}`);
+  phase='initial submissions';
+  for(let i=0;i<52;i++) await withTimeout(post(`initial ${i}\n`,`initial-${i}`),10000,`history: initial submission ${i}`);
+  phase='open and load older history';
   await open(page,base);await page.getByText('Shared history and conflicts').click();
   await page.getByRole('button',{name:'Load older history'}).click();
   await page.getByText('source:initial',{exact:true}).waitFor();
   let release,arrive;const gate=new Promise(r=>release=r),started=new Promise(r=>arrive=r);
-  let held=false;const hold=async route=>{if(route.request().method()!=='GET'||held)return route.continue();held=true;arrive();await gate;await route.continue();};
-  await page.route('**/api/collaboration?*',hold);await started;
-  for(let i=0;i<100;i++) await post(`burst ${i}\n`,`burst-${i}`);
-  const latest=await (await context.request.get(endpoint)).json();
-  const expected=[];let before;
-  do {const q=new URLSearchParams(query);if(before)q.set('before',before);const result=await (await context.request.get(base+'/api/collaboration/history?'+q)).json();expected.push(...result.history.map(x=>x.id));before=result.next_before;} while(before);
-  let releaseBridge,arriveBridge;const bridgeGate=new Promise(r=>releaseBridge=r),bridgeStarted=new Promise(r=>arriveBridge=r);
-  let bridgeHeld=false;await page.route('**/api/collaboration/history?*',async route=>{if(bridgeHeld)return route.continue();bridgeHeld=true;arriveBridge();await bridgeGate;await route.continue();});
-  release();
-  await bridgeStarted;
-  try {assert.match(await page.locator('#report-status').innerText(),/history is incomplete/i);}
-  finally {releaseBridge();}
-  await page.waitForFunction(revision=>document.querySelector('#report-status')?.textContent.includes('Shared draft ready')&&document.querySelector('.CodeMirror')?.CodeMirror.getValue()==='burst 99\n',latest.revision);
-  await page.waitForFunction(count=>document.querySelectorAll('#collaboration-history [data-version]').length>=count,expected.length,{timeout:12000});
-  const ids=await page.locator('#collaboration-history [data-version]').evaluateAll(nodes=>nodes.map(n=>Number(n.dataset.version)));
-  assert.deepEqual(ids,expected);
-}));
+  let releaseBridge=()=>{};
+  try {
+    let held=false;const hold=async route=>{if(route.request().method()!=='GET'||held)return route.continue();held=true;arrive();await gate;await route.continue();};
+    phase='initial poll barrier';
+    // The intentionally held poll must survive fixture setup. Its native 10 s
+    // AbortSignal would expire during slow sequential submissions, allowing a
+    // later poll to consume a partial burst before the barrier is released.
+    await page.evaluate(()=>{window.restorePollTimeout=AbortSignal.timeout;AbortSignal.timeout=()=>new AbortController().signal;});
+    await page.route('**/api/collaboration?*',hold);await withTimeout(started,10000,'history: initial poll barrier');
+    await page.evaluate(()=>{AbortSignal.timeout=window.restorePollTimeout;delete window.restorePollTimeout;});
+    if(injectFailure)throw new Error('injected held-poll failure');
+    phase='burst submissions';
+    for(let i=0;i<100;i++) await withTimeout(post(`burst ${i}\n`,`burst-${i}`),10000,`history: burst submission ${i}`);
+    phase='collect expected history';
+    const latest=await (await context.request.get(endpoint)).json();
+    const expected=[];let before;
+    do {const q=new URLSearchParams(query);if(before)q.set('before',before);const result=await (await context.request.get(base+'/api/collaboration/history?'+q)).json();expected.push(...result.history.map(x=>x.id));before=result.next_before;} while(before);
+    let arriveBridge;const bridgeGate=new Promise(r=>releaseBridge=r),bridgeStarted=new Promise(r=>arriveBridge=r);
+    let bridgeHeld=false;await page.route('**/api/collaboration/history?*',async route=>{if(bridgeHeld)return route.continue();bridgeHeld=true;arriveBridge();await bridgeGate;await route.continue();});
+    phase='bridge barrier';release();
+    await withTimeout(bridgeStarted,10000,'history: bridge barrier');
+    assert.match(await page.locator('#report-status').innerText(),/history is incomplete/i);
+    releaseBridge();phase='history convergence';
+    await page.waitForFunction(revision=>document.querySelector('#report-status')?.textContent.includes('Shared draft ready')&&document.querySelector('.CodeMirror')?.CodeMirror.getValue()==='burst 99\n',latest.revision);
+    await page.waitForFunction(count=>document.querySelectorAll('#collaboration-history [data-version]').length>=count,expected.length,{timeout:12000});
+    const ids=await page.locator('#collaboration-history [data-version]').evaluateAll(nodes=>nodes.map(n=>Number(n.dataset.version)));
+    assert.deepEqual(ids,expected);
+  } finally {release();releaseBridge();}
+  } catch(error) {throw new Error(`history phase: ${phase}: ${error.message}`,{cause:error});}
+}
+test('history bridges a 100-submission burst after older history is loaded', {timeout:120000},()=>fixture(historyBurst));
+test('history fixture releases held requests and propagates failures', {timeout:60000},async()=>{
+  await assert.rejects(fixture(args=>historyBurst(args,true)),/history phase: initial poll barrier: injected held-poll failure/);
+});
 
 
 test('old conflict resolved in another tab cannot remain actionable', {timeout:120000},()=>fixture(async({browser,base})=>{
@@ -143,8 +166,20 @@ test('old conflict resolved in another tab cannot remain actionable', {timeout:1
   for(let i=0;i<52;i++)head=await post({base:head.revision,content:`edit ${i}\n`,request_id:`edit-${i}`});
   await Promise.all([open(a,base),open(b,base)]);
   for(const page of [a,b]) {await page.getByText('Shared history and conflicts').evaluate(el=>el.click());await page.getByRole('button',{name:'Load older history'}).click({force:true});await page.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).waitFor();}
-  await b.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`}).click();
-  await b.getByText(/Shared draft ready/).waitFor();
+  let releasePoll,arrivePoll;const gate=new Promise(r=>releasePoll=r),started=new Promise(r=>arrivePoll=r);let held=false;const posts=[];
+  await b.route('**/api/collaboration?*',async route=>{
+    if(route.request().method()==='POST'){posts.push(route.request().postDataJSON());return route.continue();}
+    if(held)return route.continue();held=true;arrivePoll();await gate;return route.continue();
+  });
+  try {
+    await withTimeout(started,10000,'resolution: poll barrier');
+    const button=b.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});
+    await button.click();await b.waitForTimeout(1000);
+    assert.doesNotMatch(await b.locator('#report-status').innerText(),/Shared draft ready/);
+  } finally {releasePoll();}
+  await b.waitForFunction(()=>document.querySelector('#report-status')?.textContent.includes('Shared draft ready'),null,{timeout:10000});
+  assert.equal(posts.length,1,'resolution must be sent exactly once after poll');
+  assert.equal(posts[0].conflict_id,conflict.conflict_id);
   const cached=a.getByRole('button',{name:`Resolve conflict ${conflict.conflict_id} with editor`});
   await a.waitForFunction(id=>document.querySelector(`[data-conflict="${id}"]`)?.disabled,conflict.conflict_id,{timeout:10000});
   assert.equal(await cached.isDisabled(),true);

@@ -1,11 +1,11 @@
 # Retained-scan backlog retry — branch-local handoff
 
-- **Status:** review pending; not integrated or activated
+- **Status:** blocked; resolution race reproduced, not fixed; not integrated or activated
 - **Owner / branch:** delegated worker, `fix/board-backlog-retry`
 - **Base:** `9ea3031` (`feat/board-release` at delegation); integration target: parent-owned `feat/board-release`, then parent determines beta propagation. The defect belongs to the combined release candidate, not independently applicable to beta without its autosave backend.
 - **Last updated:** 2026-11-21
 - **Owning ref:** `fix/board-backlog-retry`
-- **Latest immutable recovery checkpoint / implementation:** `5f0c8e808b97b0943693ce3450e4afc896720d94`; this dossier-only follow-up is the current tip.
+- **Prior implementation checkpoint:** `5f0c8e808b97b0943693ce3450e4afc896720d94`; `b2ef2b8` was the prior dossier-only handoff. The later diagnostic checkpoint adds no product fix; use the branch tip for its exact commit.
 - **Inspiration:** independent backend review of pre-submit `503 retained_scan_backlog`; `BACKEND_API.md` retained-sweep contract.
 
 ## Intent and contract
@@ -30,6 +30,14 @@ Only HTTP 503 plus exact `retained_scan_backlog` permits three bounded automatic
 - No full repository suite was run; parent to choose broader release-candidate gates. Previously existing writer concurrency and uncoordinated external/sync limitations remain; source publication stays opt-in and activation is a separate decision.
 - No propagation to beta or stable was authorized in this worker. Parent integrates/reviews the release candidate, resolves branch topology and removes this temporary dossier from the target upon accepted merge.
 
+## Resolution-race and history-diagnostic checkpoint
+
+- **Blocked, not review-ready:** no product fix was made. The checked-in `old conflict resolved in another tab cannot remain actionable` regression deliberately fails on current `app.js`: the in-flight real poll is held past the save timer and the status still says `Shared draft ready` with one unresolved conflict. A separate scratch probe at `/home/ryushe/.hermes/cache/scratch/diagboard-JyPLPG/run_test.py race 45` also observed zero resolution POSTs. The checked-in red assertion fails earlier on the misleading status. Do not merge this checkpoint as a green suite.
+- Root cause for the observed race: resolve schedules the timer but does not mark the resolution as a retained draft; `saveShared` returns when `collabBusy`; the poll then takes the `!hasDraft` branch and says ready. A simple `hasDraft=true` patch is not accepted as complete: it must also safely handle an already in-flight save, immutable request identity, duplicate clicks, stale reviewed heads, newer text, persisted/reloaded pending requests, storage failure and unknown outcomes.
+- History harness now bounds both gate waiters and each submission, releases both gates in `finally`, captures a bounded server-stderr tail, starts the server in the isolated fixture directory, and reports the phase of failures. The separate `history fixture releases held requests and propagates failures` injects a failure with the poll held; it passed, proving this failure propagates after release. The exact 100-submission history assertion is unchanged. The fixture replaces `AbortSignal.timeout` only while creating the deliberately held poll and restores it on interception; all later requests retain native timeouts. This is a controlled fixture, not evidence that the native 10-second browser timeout was exercised during the held poll.
+- Real Chromium, synthetic loopback HTTP, read-only source mount, isolated HOME/HERMES_HOME/XDG/TMPDIR, no network: history + injected failure: 2/2 passed. Earlier same-harness run before the timeout-control change failed with `history phase: bridge barrier: Timed out: history: bridge barrier`. An independent scratch negative control forced the native held poll past 10 seconds and recorded `net::ERR_ABORTED`, `Shared draft unavailable...retrying`, then the same bridge-barrier timeout. This establishes one reproducible harness failure mode; it does **not** establish the cause of the three earlier uninstrumented timeouts. Scratch control: `/home/ryushe/.hermes/cache/scratch/diagboard-JyPLPG/history-abort-control`.
+- The container runner outside the test uses a hard wall timeout and removes the container in `finally`; fixture browser close is bounded, but if that close itself hangs there is no independent Chromium process-group reaper inside the Node fixture. Do not claim in-process cleanup is fully proved. The existing 503 retry implementation was not changed or rerun in this checkpoint.
+
 ## Resume
 
-Review the staged/committed diff and rerun the named focused cases as needed. Confirm current branch tip and immutable implementation checkpoint in the follow-up handoff commit. Worktree should be clean; no push or service changes.
+Implement and independently review a durable resolution queue or equivalent, then run the checked-in race regression green plus deterministic poll/save contention, stale-head, multiple-click, storage-failure, newer-edit, reload/unknown-outcome and exact 503 retry cases. Run the history tests repeatedly and check browser/server cleanup even on forced browser-close failure. Container harness is `/home/ryushe/.hermes/cache/scratch/diagboard-JyPLPG/run_test.py`; mount this checkout at `/work` instead of its diagnostic copy. No push, merge, live source, fixture publisher, remote, or service activation authorized.
