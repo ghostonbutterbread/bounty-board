@@ -15,6 +15,8 @@
     return list(key==='coverage' && value && !Array.isArray(value) ? value.items : value);
   };
   const reportsIncomplete = lane => (list(lane?.warnings)||[]).some(w=>typeof w==='string' && w.startsWith('reports_'));
+  const reportWarning = warning => typeof warning==='string' && (warning.startsWith('reports_') || warning.startsWith('report_content_'));
+  const mergeWarnings = (...groups) => [...new Set(groups.flat())];
   const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
   const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
@@ -155,7 +157,8 @@
           if(!current() || check!==applyGeneration)return;
           if(identity.root_instance!==snapshot.root_instance)throw new Error('Root changed');
           if(view!==renderGeneration || app.contains(document.activeElement)){lane._deferred=selection;phaseMessage('Selected lane loaded. Apply it when ready.',apply,'Apply selected lane');return;}
-          const indexed=lane._reportsLoaded ? {reports:lane.reports,reports_unscanned:false} : null;
+          const indexed=lane._reportsLoaded ? {reports:lane.reports,reports_unscanned:false,
+            warnings:mergeWarnings((list(result.lane.warnings)||[]).filter(w=>!reportWarning(w)),lane._reportWarnings||[])} : null;
           Object.assign(lane,result.lane,indexed || {});delete lane.unscanned;delete lane._deferred;
           phaseMessage('');render();
           if(!snapshot._portfolioRequested){snapshot._portfolioRequested=true;loadPortfolio();}
@@ -183,7 +186,12 @@
       if(!current())return;
       if(identity.root_instance!==snapshot.root_instance)throw new Error('Root changed');
       lane.reports=result.reports;lane._reportsLoaded=true;delete lane.reports_unscanned;
-      lane.warnings=[...new Set([...(lane.warnings||[]),...(result.warnings||[])])];
+      // The report endpoint rereads the ledger for ownership. Once the lane
+      // scan has arrived, its ledger/map/coverage warnings own those sources;
+      // only the index owns report warnings. Replace, never accumulate, each.
+      const warnings=list(result.warnings)||[];
+      lane._reportWarnings=warnings.filter(reportWarning);
+      lane.warnings=mergeWarnings(lane.unscanned ? warnings.filter(w=>!reportWarning(w)) : (list(lane.warnings)||[]).filter(w=>!reportWarning(w)),lane._reportWarnings);
       if(state.view==='program' && state.section==='reports')render();
     } catch {
       if(current()){lane._reportsFailed=true;phaseMessage('Selected reports could not be loaded or the source changed. Use Refresh to retry.');}
