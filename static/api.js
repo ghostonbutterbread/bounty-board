@@ -44,8 +44,8 @@ window.BoardAPI = (() => {
     }
     return data;
   }
-  function report(program, lane, path) {
-    const query = new URLSearchParams({family:program.family,program:program.name,lane,path});
+  function report(program, lane, path, rootInstance) {
+    const query = new URLSearchParams({family:program.family,program:program.name,lane,path,...(rootInstance ? {root_instance:rootInstance} : {})});
     return request(`/api/report?${query}`, {cache:'no-store'});
   }
   function observation(program, lane, path, rootInstance) {
@@ -59,6 +59,14 @@ window.BoardAPI = (() => {
     if (result?.lane) normalize({programs:[{lanes:[result.lane]}]});
     return result;
   }
+  async function laneReports(program, laneName, rootInstance) {
+    const query = new URLSearchParams({family:program.family,program:program.name,lane:laneName,root_instance:rootInstance});
+    const result = await request(`/api/lane-reports?${query}`, {cache:'no-store'});
+    if (result && Array.isArray(result.reports)) {
+      const lane={reports:result.reports}; normalize({programs:[{lanes:[lane]}]}); result.reports=lane.reports;
+    }
+    return result;
+  }
   function collaboration(program, lane, path, payload, rootIdentity) {
     const query = new URLSearchParams({family:program.family,program:program.name,lane,path,root_identity:rootIdentity});
     const options=payload ? {method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify(payload),signal:AbortSignal.timeout(10000)} : {cache:'no-store',signal:AbortSignal.timeout(10000)};
@@ -68,5 +76,5 @@ window.BoardAPI = (() => {
     const query=new URLSearchParams({family:program.family,program:program.name,lane,path,root_identity:rootIdentity,...extra});
     return request(`/api/collaboration/${view}?${query}`,{cache:'no-store',signal:AbortSignal.timeout(10000)});
   }
-  return { load: async (phase, rootInstance) => normalize(await request(phase && phase!=='summary' ? `/api/data?${new URLSearchParams({phase,...(rootInstance ? {root_instance:rootInstance} : {})})}` : '/api/data', {cache:'no-store',...(phase==='summary' ? {headers:{'X-Bounty-Board-Phase':'summary'}} : {})})), lane, rootInstance, report, observation, collaboration, collaborationRead, capability, write };
+  return { load: async (phase, rootInstance) => normalize(await request(phase && phase!=='summary' ? `/api/data?${new URLSearchParams({phase,...(rootInstance ? {root_instance:rootInstance} : {})})}` : '/api/data', {cache:'no-store',...(phase==='summary' ? {headers:{'X-Bounty-Board-Phase':'summary'}} : {})})), lane, laneReports, rootInstance, report, observation, collaboration, collaborationRead, capability, write };
 })();

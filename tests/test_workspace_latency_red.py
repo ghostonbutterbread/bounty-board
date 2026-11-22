@@ -59,6 +59,71 @@ class WorkspaceSummaryBarrierTests(unittest.TestCase):
             finally:
                 server.shutdown(); server.server_close(); serving.join(5)
 
+    def test_selected_reports_index_and_body_are_root_bound_and_lane_owned(self):
+        with tempfile.TemporaryDirectory(prefix='workspace-reports-') as tmp:
+            root = Path(tmp) / 'source'
+            for name in ('selected', 'unrelated'):
+                lane = root / 'web_bounty' / name / 'web'
+                (lane / 'ledgers').mkdir(parents=True)
+                (lane / 'reports').mkdir()
+                (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': name, 'report_path': 'reports/report.md'}]}))
+                (lane / 'reports/report.md').write_text('# ' + name)
+            (root / 'web_bounty/selected/web/reports/nav.md').write_text('<!-- generated: bounty-core-report-navigation -->\n# index')
+            server = app.make_server(root, port=0)
+            serving = threading.Thread(target=server.serve_forever); serving.start()
+            base = f'http://127.0.0.1:{server.server_port}'
+            try:
+                with urlopen(base + '/api/data?phase=summary', timeout=5) as response:
+                    token = json.load(response)['root_instance']
+                query = {'root_instance': token, 'family': 'web_bounty', 'program': 'selected', 'lane': 'web'}
+                with patch.object(app, 'reports', wraps=app.reports) as index:
+                    with urlopen(base + '/api/lane-reports?' + urlencode(query), timeout=5) as response:
+                        result = json.load(response)
+                self.assertEqual([c.args[0].parent.name for c in index.call_args_list], ['selected'])
+                indexed = {item['path']: item for item in result['reports']}
+                self.assertEqual(indexed['report.md']['owner_fids'], ['selected'])
+                self.assertEqual(indexed['report.md']['kind'], 'registered_report')
+                self.assertFalse(indexed['report.md']['editable'])
+                self.assertEqual(indexed['nav.md']['kind'], 'generated_navigation')
+                self.assertFalse(indexed['nav.md']['editable'])
+                self.assertFalse(indexed['nav.md']['collaboration_editable'])
+                with urlopen(base + '/api/report?' + urlencode({**query, 'path': 'report.md'}), timeout=5) as response:
+                    self.assertEqual(json.load(response)['content'], '# selected')
+                root.rename(root.with_name('old')); root.mkdir()
+                for endpoint, params in (('/api/lane-reports?', query), ('/api/report?', {**query, 'path': 'report.md'})):
+                    with self.assertRaises(HTTPError) as error:
+                        urlopen(base + endpoint + urlencode(params), timeout=5)
+                    self.assertEqual(error.exception.code, 409); error.exception.close()
+            finally:
+                server.shutdown(); server.server_close(); serving.join(5)
+
+    def test_selected_report_index_rejects_root_swap_during_read(self):
+        with tempfile.TemporaryDirectory(prefix='workspace-report-swap-') as tmp:
+            root = Path(tmp) / 'source'
+            lane = root / 'web_bounty/selected/web'
+            (lane / 'ledgers').mkdir(parents=True)
+            (lane / 'reports').mkdir()
+            (lane / 'ledgers/ledger.json').write_text('{"findings": []}')
+            (lane / 'reports/report.md').write_text('# old')
+            server = app.make_server(root, port=0)
+            serving = threading.Thread(target=server.serve_forever); serving.start()
+            base = f'http://127.0.0.1:{server.server_port}'
+            try:
+                with urlopen(base + '/api/data?phase=summary', timeout=5) as response:
+                    token = json.load(response)['root_instance']
+                query = urlencode({'root_instance': token, 'family': 'web_bounty', 'program': 'selected', 'lane': 'web'})
+                original = app.reports
+                def replace_root(*args, **kwargs):
+                    value = original(*args, **kwargs)
+                    root.rename(root.with_name('old')); root.mkdir()
+                    return value
+                with patch.object(app, 'reports', replace_root):
+                    with self.assertRaises(HTTPError) as error:
+                        urlopen(base + '/api/lane-reports?' + query, timeout=5)
+                self.assertEqual(error.exception.code, 409); error.exception.close()
+            finally:
+                server.shutdown(); server.server_close(); serving.join(5)
+
     def test_selected_lane_is_read_independently(self):
         with tempfile.TemporaryDirectory(prefix='workspace-lane-') as tmp:
             root = Path(tmp) / 'source'

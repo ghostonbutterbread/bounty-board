@@ -83,6 +83,27 @@ test('superseded full response does not disturb an active report draft', async()
   assert.match(await page.locator('#report-status').innerText(),/draft saved in browser/i);
 },{FIRST_REPORT_ONLY:'1'}));
 
+test('busy stale scan permits selected report drafting and retry guidance', async()=>fixture(async({root,page,url})=>{
+  await page.goto(url);await held(root);
+  const busy=page.waitForResponse(r=>r.url().includes('phase=complete') && r.status()===503,{timeout:5000});
+  await page.locator('#refresh').click();
+  await page.getByRole('button',{name:'Load entire portfolio'}).click();
+  assert.equal((await busy).status(),503);
+  await page.getByText(/Portfolio scan is busy.*Load entire portfolio/).waitFor();
+  await page.getByRole('button',{name:'Open workspace'}).click();
+  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  const input=page.locator('.CodeMirror textarea');await input.waitFor();await input.focus();
+  await page.keyboard.press('Control+A');await page.keyboard.insertText('Draft while old scan is held');
+  assert.equal(fs.existsSync(path.join(root,'release')),false);
+  assert.equal(await page.locator('#report-source').inputValue(),'Draft while old scan is held');
+  assert.equal(await input.evaluate(e=>e===document.activeElement),true);
+  assert.match(await page.locator('#report-status').innerText(),/draft saved in browser/i);
+  await page.locator('#refresh').click();
+  await page.getByText(/Refresh could not complete.*scan is busy.*Load entire portfolio/).waitFor();
+  assert.equal(await page.locator('#report-source').inputValue(),'Draft while old scan is held');
+  assert.match(await page.locator('#report-status').innerText(),/draft saved in browser/i);
+},{FIRST_REPORT_ONLY:'1'}));
+
 test('root replacement during a held full read is rejected and refresh recovers', async()=>fixture(async({root,page,url})=>{
   await page.goto(url);await held(root);
   fs.renameSync(path.join(root,'source'),path.join(root,'old-source'));
@@ -108,7 +129,7 @@ test('deferred report result is rejected if root changes before apply', async()=
 }));
 
 for (const order of ['newer-first','older-first']) test(`concurrent apply checks invalidate older result (${order})`, async()=>fixture(async({root,page,url})=>{
-  let checks=0, releaseOld, releaseNew, oldReady, newReady;
+  let checks=0, releaseOld, releaseNew, oldReady, newReady, armed=false;
   const oldGate=new Promise(r=>releaseOld=r), newGate=new Promise(r=>releaseNew=r);
   const oldArrived=new Promise(r=>oldReady=r), newArrived=new Promise(r=>newReady=r);
   let oldDone, newDone;
@@ -126,12 +147,14 @@ for (const order of ['newer-first','older-first']) test(`concurrent apply checks
     };
   });
   await page.route('**/api/data?phase=identity',async route=>{
+    if(!armed)return route.continue();
     const n=++checks, response=await route.fetch();
     if(n===1){oldReady();await oldGate;await route.fulfill({response});oldDone();}
     else {newReady();await newGate;await route.fulfill({response});newDone();}
   });
   try {
     await page.goto(url);await held(root);await page.locator('#dashboard-program').focus();
+    await page.evaluate(()=>{window.__identityReads=0;});armed=true;
     fs.writeFileSync(path.join(root,'release'),'release');
     const apply=page.getByRole('button',{name:'Apply loaded reports'});await apply.waitFor();
     await apply.click();await oldArrived;
@@ -182,10 +205,10 @@ for (const section of ['MapStore','Gadgets']) test(`partial ${section} refuses a
 
 test('refresh cancels an outstanding apply check without overwriting the new snapshot', async()=>fixture(async({root,page,url})=>{
   let release, reached, finished;const gate=new Promise(r=>release=r), ready=new Promise(r=>reached=r), done=new Promise(r=>finished=r);
-  let checks=0;
-  await page.route('**/api/data?phase=identity',async route=>{const response=await route.fetch();if(++checks===1){reached();await gate;}await route.fulfill({response});finished();});
+  let checks=0, armed=false;
+  await page.route('**/api/data?phase=identity',async route=>{if(!armed)return route.continue();const response=await route.fetch();if(++checks===1){reached();await gate;}await route.fulfill({response});finished();});
   try {
-    await page.goto(url);await held(root);await page.locator('#dashboard-program').focus();fs.writeFileSync(path.join(root,'release'),'release');
+    await page.goto(url);await held(root);await page.locator('#dashboard-program').focus();armed=true;fs.writeFileSync(path.join(root,'release'),'release');
     await page.getByRole('button',{name:'Apply loaded reports'}).click();await ready;
     fs.writeFileSync(path.join(root,'source/web_bounty/alpha/web/ledgers/ledger.json'),JSON.stringify({findings:[{fid:'B',title:'After refresh'}]}));
     await page.locator('#refresh').click();await page.getByRole('button',{name:'Open workspace'}).click();await page.getByText('After refresh').waitFor();
@@ -197,9 +220,10 @@ test('refresh cancels an outstanding apply check without overwriting the new sna
 
 test('navigation invalidates an automatic apply check but allows explicit retry', async()=>fixture(async({root,page,url})=>{
   let release, reached;const gate=new Promise(r=>release=r), ready=new Promise(r=>reached=r);
-  await page.route('**/api/data?phase=identity',async route=>{const response=await route.fetch();reached();await gate;await route.fulfill({response});});
+  let armed=false;
+  await page.route('**/api/data?phase=identity',async route=>{if(!armed)return route.continue();const response=await route.fetch();reached();await gate;await route.fulfill({response});});
   try {
-    await page.goto(url);await held(root);fs.writeFileSync(path.join(root,'release'),'release');await ready;
+    await page.goto(url);await held(root);armed=true;fs.writeFileSync(path.join(root,'release'),'release');await ready;
     await page.getByRole('button',{name:'Open workspace'}).click();
     const response=page.waitForResponse(r=>r.url().includes('phase=identity'));release();await response;
     await page.getByRole('button',{name:'Apply loaded reports'}).waitFor({timeout:5000});
@@ -210,12 +234,13 @@ test('navigation invalidates an automatic apply check but allows explicit retry'
 }));
 
 test('failed complete request retains summary and refresh retries', async()=>fixture(async({root,page,url})=>{
-  let failed=false;
-  await page.route('**/api/data?phase=complete**',async route=>{failed=true;await route.fulfill({status:500,contentType:'application/json',body:'{}'});});
+  let failed=false, fail=true;
+  await page.route('**/api/data?phase=complete**',async route=>{if(!fail)return route.continue();failed=true;await route.fulfill({status:500,contentType:'application/json',body:'{}'});});
   await page.goto(url);
   await page.getByText(/could not be loaded.*Refresh to retry/).waitFor();
   assert.equal(failed,true);
   assert.equal(await page.getByRole('heading',{name:'Portfolio overview'}).count(),1);
+  fail=false;
   fs.writeFileSync(path.join(root,'release'),'release');
   await page.locator('#refresh').click();
   await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(e=>e.textContent.includes('Report records') && e.querySelector('strong')?.textContent==='1'));

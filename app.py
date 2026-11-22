@@ -828,7 +828,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     result['capabilities']['source_authoritative'] = False
                 self.reply(200, result)
                 return
-            if url.path == '/api/lane':
+            if url.path in ('/api/lane', '/api/lane-reports'):
                 if self.server.writer or collaboration is not None or report_autosave or experimental_fixture_publish:
                     self.reply(404, {'error': 'not_found'}); return
                 if not lane_reads.acquire(blocking=False):
@@ -851,6 +851,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         raise ValueError('invalid lane')
                     warnings = []
                     findings = ledger(lane_dir, warnings)
+                    if url.path == '/api/lane-reports':
+                        items = reports(lane_dir, warnings, findings)
+                        if root_snapshot() != before:
+                            self.reply(409, {'error': 'root_changed'}); return
+                        self.reply(200, {'root_instance': before[2], 'family': family, 'program': program,
+                                         'lane': name, 'reports': items, 'warnings': warnings})
+                        return
                     entries = map_entries(lane_dir, warnings)
                     selected = {'name': name, 'findings': findings, 'map': entries,
                                 'coverage': coverage(lane_dir, warnings), 'reports': None,
@@ -908,16 +915,22 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return
             if url.path == '/api/report':
                 params = parse_qs(url.query, keep_blank_values=True)
+                bound = 'root_instance' in params
+                before = root_snapshot() if bound else None
                 try:
-                    if set(params) != {'family', 'program', 'lane', 'path'} or any(len(v) != 1 for v in params.values()):
+                    if set(params) != {'family', 'program', 'lane', 'path'} | ({'root_instance'} if bound else set()) or any(len(v) != 1 for v in params.values()):
                         raise ValueError()
+                    if bound and (not before or params['root_instance'] != [before[2]]):
+                        self.reply(409, {'error': 'root_changed'}); return
                     family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
                     if family not in FAMILIES or lane not in FAMILIES[family] or not program or program.startswith('_') or '/' in program or program in ('.', '..'):
                         raise ValueError()
                     if path.startswith('/') or Path(path).suffix.lower() != '.md' or any(p in ('..', '.') for p in path.split('/')):
                         raise ValueError()
-                    content = read_file(Path(root), f'{family}/{program}/{lane}/reports/{path}')
+                    content = read_file(before[0] if bound else Path(root), f'{family}/{program}/{lane}/reports/{path}')
                     text = content.decode('utf-8')
+                    if bound and root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'}); return
                     revision = hashlib.sha256(content).hexdigest()
                     from report_publisher import generated_navigation
                     eligible = not generated_navigation(path, text)
@@ -925,7 +938,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                      'editable': bool(report_autosave and eligible),
                                      'collaboration_editable': eligible}, {'ETag': '"' + revision + '"'})
                 except (OSError, ValueError, UnicodeError):
-                    self.reply(404, {'error': 'report_not_found_or_unavailable'})
+                    if bound and before and root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'})
+                    else:
+                        self.reply(404, {'error': 'report_not_found_or_unavailable'})
                 return
             if not url.path.startswith('/api/'):
                 import mimetypes
