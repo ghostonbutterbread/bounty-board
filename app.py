@@ -233,7 +233,7 @@ def reports(lane, warnings, findings=None, report_autosave=False):
     return items
 
 
-def discover(root, report_autosave=False, *, include_reports=True):
+def discover(root, report_autosave=False, *, include_reports=True, inventory_only=False):
     if not root.is_dir():
         return {'programs': [], 'warnings': ['root_unavailable']}
     programs = []
@@ -259,12 +259,12 @@ def discover(root, report_autosave=False, *, include_reports=True):
             for lane in program_lanes:
                 if lane.name in lanes and lane.is_dir() and not lane.is_symlink():
                     warnings = []
-                    findings = ledger(lane, warnings)
-                    entries = map_entries(lane, warnings)
+                    findings = None if inventory_only else ledger(lane, warnings)
+                    entries = None if inventory_only else map_entries(lane, warnings)
                     found.append({'name': lane.name, 'findings': findings, 'map': entries,
-                                  'coverage': coverage(lane, warnings), 'reports': reports(lane, warnings, findings, report_autosave) if include_reports else None,
+                                  'coverage': None if inventory_only else coverage(lane, warnings), 'reports': reports(lane, warnings, findings, report_autosave) if include_reports and not inventory_only else None,
                                   'gadgets': [e for e in entries if 'gadget' in (e['tags'] or [])] if entries is not None else None,
-                                  'warnings': warnings})
+                                  'warnings': warnings, **({'unscanned': True} if inventory_only else {})})
             if found:
                 programs.append({'id': family + '/' + program.name, 'name': program.name,
                                  'family': family, 'lanes': found})
@@ -333,6 +333,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         with collaboration.observation():
             collaboration.bind_source(root)
     collaboration_lock = threading.RLock()
+    portfolio_scan = threading.BoundedSemaphore(1)
+    lane_reads = threading.BoundedSemaphore(8)
     # Progress is per server: an incomplete sweep never permits a new exchange.
     retained_cursors = {}
     # A completed multi-request sweep can authorize one following write,
@@ -790,12 +792,19 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 if phased and phase == 'complete' and (not before or params.get('root_instance') != [before[2]]):
                     self.reply(409, {'error': 'root_changed'}); return
                 if phased and before:
-                    result: dict = discover(before[0], include_reports=phase != 'summary')
+                    if phase == 'complete' and not portfolio_scan.acquire(blocking=False):
+                        self.reply(503, {'error': 'portfolio_scan_busy'}); return
+                    try:
+                        result: dict = discover(before[0], include_reports=phase != 'summary', inventory_only=phase == 'summary')
+                    finally:
+                        if phase == 'complete':
+                            portfolio_scan.release()
                     if root_snapshot() != before:
                         self.reply(409, {'error': 'root_changed'}); return
                     result['root_identity'] = before[1]
                     result['root_instance'] = before[2]
                     result['reports_loading'] = phase == 'summary'
+                    result['portfolio_unloaded'] = phase == 'summary'
                 else:
                     result = discover(root, report_autosave)
                 # Identity follows the effective canonical path, not report content.
@@ -818,6 +827,52 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 if phased and phase == 'summary' and before:
                     result['capabilities']['source_authoritative'] = False
                 self.reply(200, result)
+                return
+            if url.path in ('/api/lane', '/api/lane-reports'):
+                if self.server.writer or collaboration is not None or report_autosave or experimental_fixture_publish:
+                    self.reply(404, {'error': 'not_found'}); return
+                if not lane_reads.acquire(blocking=False):
+                    self.reply(503, {'error': 'lane_read_busy'}); return
+                before = root_snapshot()
+                try:
+                    params = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=4)
+                    if set(params) != {'root_instance', 'family', 'program', 'lane'} or any(len(v) != 1 for v in params.values()):
+                        raise ValueError('invalid selector')
+                    if not before or params['root_instance'] != [before[2]]:
+                        self.reply(409, {'error': 'root_changed'}); return
+                    family, program, name = (params[k][0] for k in ('family', 'program', 'lane'))
+                    if (family not in FAMILIES or name not in FAMILIES[family] or not program or
+                            program.startswith('_') or program in ('.', '..') or '/' in program or '\0' in program):
+                        raise ValueError('invalid selector')
+                    family_dir = before[0] / family
+                    program_dir = family_dir / program
+                    lane_dir = program_dir / name
+                    if any(p.is_symlink() or not p.is_dir() for p in (family_dir, program_dir, lane_dir)):
+                        raise ValueError('invalid lane')
+                    warnings = []
+                    findings = ledger(lane_dir, warnings)
+                    if url.path == '/api/lane-reports':
+                        items = reports(lane_dir, warnings, findings)
+                        if root_snapshot() != before:
+                            self.reply(409, {'error': 'root_changed'}); return
+                        self.reply(200, {'root_instance': before[2], 'family': family, 'program': program,
+                                         'lane': name, 'reports': items, 'warnings': warnings})
+                        return
+                    entries = map_entries(lane_dir, warnings)
+                    selected = {'name': name, 'findings': findings, 'map': entries,
+                                'coverage': coverage(lane_dir, warnings), 'reports': None,
+                                'gadgets': [e for e in entries if 'gadget' in (e['tags'] or [])] if entries is not None else None,
+                                'warnings': warnings, 'reports_unscanned': True}
+                    if root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'}); return
+                    self.reply(200, {'root_instance': before[2], 'family': family, 'program': program, 'lane': selected})
+                except (OSError, ValueError, UnicodeError):
+                    if before and root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'})
+                    else:
+                        self.reply(404, {'error': 'lane_not_found_or_unavailable'})
+                finally:
+                    lane_reads.release()
                 return
             if url.path == '/api/map-observation':
                 before = None
@@ -860,16 +915,22 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return
             if url.path == '/api/report':
                 params = parse_qs(url.query, keep_blank_values=True)
+                bound = 'root_instance' in params
+                before = root_snapshot() if bound else None
                 try:
-                    if set(params) != {'family', 'program', 'lane', 'path'} or any(len(v) != 1 for v in params.values()):
+                    if set(params) != {'family', 'program', 'lane', 'path'} | ({'root_instance'} if bound else set()) or any(len(v) != 1 for v in params.values()):
                         raise ValueError()
+                    if bound and (not before or params['root_instance'] != [before[2]]):
+                        self.reply(409, {'error': 'root_changed'}); return
                     family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
                     if family not in FAMILIES or lane not in FAMILIES[family] or not program or program.startswith('_') or '/' in program or program in ('.', '..'):
                         raise ValueError()
                     if path.startswith('/') or Path(path).suffix.lower() != '.md' or any(p in ('..', '.') for p in path.split('/')):
                         raise ValueError()
-                    content = read_file(Path(root), f'{family}/{program}/{lane}/reports/{path}')
+                    content = read_file(before[0] if bound else Path(root), f'{family}/{program}/{lane}/reports/{path}')
                     text = content.decode('utf-8')
+                    if bound and root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'}); return
                     revision = hashlib.sha256(content).hexdigest()
                     from report_publisher import generated_navigation
                     eligible = not generated_navigation(path, text)
@@ -877,7 +938,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                      'editable': bool(report_autosave and eligible),
                                      'collaboration_editable': eligible}, {'ETag': '"' + revision + '"'})
                 except (OSError, ValueError, UnicodeError):
-                    self.reply(404, {'error': 'report_not_found_or_unavailable'})
+                    if bound and before and root_snapshot() != before:
+                        self.reply(409, {'error': 'root_changed'})
+                    else:
+                        self.reply(404, {'error': 'report_not_found_or_unavailable'})
                 return
             if not url.path.startswith('/api/'):
                 import mimetypes

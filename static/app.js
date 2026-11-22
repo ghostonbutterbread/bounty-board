@@ -15,6 +15,8 @@
     return list(key==='coverage' && value && !Array.isArray(value) ? value.items : value);
   };
   const reportsIncomplete = lane => (list(lane?.warnings)||[]).some(w=>typeof w==='string' && w.startsWith('reports_'));
+  const reportWarning = warning => typeof warning==='string' && (warning.startsWith('reports_') || warning.startsWith('report_content_'));
+  const mergeWarnings = (...groups) => [...new Set(groups.flat())];
   const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
   const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
@@ -124,10 +126,81 @@
   let loadGeneration=0, applyGeneration=0, renderGeneration=0;
   const phaseStatus=document.createElement('div');
   phaseStatus.className='message';phaseStatus.setAttribute('role','status');phaseStatus.hidden=true;app.before(phaseStatus);
-  function phaseMessage(text, apply) {
+  const portfolioAction=document.createElement('div');
+  portfolioAction.className='message';portfolioAction.hidden=true;app.before(portfolioAction);
+  portfolioAction.append('Portfolio totals and report index are not loaded. ');
+  const portfolioButton=document.createElement('button');portfolioButton.className='button';portfolioButton.textContent='Load entire portfolio';portfolioAction.append(portfolioButton);
+  async function loadPortfolio() {
+    const snapshot=state.data, generation=loadGeneration;
+    if(!snapshot?.portfolio_unloaded || snapshot._portfolioLoading)return;
+    snapshot._portfolioLoading=true;
+    portfolioButton.disabled=true;
+    try {await completeInitialLoad(snapshot,generation);} finally {snapshot._portfolioLoading=false;if(state.data===snapshot)portfolioButton.disabled=false;}
+  }
+  portfolioButton.addEventListener('click',loadPortfolio);
+  let laneGeneration=0;
+  async function loadSelectedLane() {
+    const snapshot=state.data, program=currentProgram(), lane=currentLane(), generation=loadGeneration;
+    if(!snapshot?.portfolio_unloaded || !program || !lane?.unscanned || lane._pending || lane._failed || lane._deferred===laneGeneration)return;
+    const selection=laneGeneration, programId=state.program, laneName=state.lane;
+    lane._pending=true;
+    const current=()=>state.data===snapshot && generation===loadGeneration && selection===laneGeneration && state.program===programId && state.lane===laneName;
+    try {
+      const result=await BoardAPI.lane(program,laneName,snapshot.root_instance);
+      if(!current())return;
+      if(result.root_instance!==snapshot.root_instance || result.family!==program.family || result.program!==program.name || result.lane?.name!==laneName)throw new Error('Stale lane');
+      const apply=async()=>{
+        if(!current())return;
+        const check=++applyGeneration, view=renderGeneration;
+        try {
+          const identity=await BoardAPI.rootInstance();
+          if(!current() || check!==applyGeneration)return;
+          if(identity.root_instance!==snapshot.root_instance)throw new Error('Root changed');
+          if(view!==renderGeneration || app.contains(document.activeElement)){lane._deferred=selection;phaseMessage('Selected lane loaded. Apply it when ready.',apply,'Apply selected lane');return;}
+          const indexed=lane._reportsLoaded ? {reports:lane.reports,reports_unscanned:false,
+            warnings:mergeWarnings((list(result.lane.warnings)||[]).filter(w=>!reportWarning(w)),lane._reportWarnings||[])} : null;
+          Object.assign(lane,result.lane,indexed || {});delete lane.unscanned;delete lane._deferred;
+          phaseMessage('');render();
+          if(!snapshot._portfolioRequested){snapshot._portfolioRequested=true;loadPortfolio();}
+        } catch {
+          if(current() && check===applyGeneration){lane._failed=true;phaseMessage('Selected lane could not be loaded or the source changed. Use Refresh to retry.');}
+        }
+      };
+      if(app.contains(document.activeElement)){lane._deferred=selection;phaseMessage('Selected lane loaded. Apply it when ready.',apply,'Apply selected lane');}
+      else await apply();
+    } catch {
+      if(current()){lane._failed=true;phaseMessage('Selected lane could not be loaded. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+    } finally {delete lane._pending;if(currentLane()===lane && lane.unscanned && !lane._failed)loadSelectedLane();}
+  }
+  async function loadSelectedReports() {
+    const snapshot=state.data, program=currentProgram(), lane=currentLane(), generation=loadGeneration;
+    if(!snapshot?.portfolio_unloaded || state.view!=='program' || state.section!=='reports' || !program || !lane || lane._reportsPending || lane._reportsLoaded || lane._reportsFailed)return;
+    const selection=laneGeneration, programId=state.program, laneName=state.lane;
+    const current=()=>state.data===snapshot && generation===loadGeneration && selection===laneGeneration && state.program===programId && state.lane===laneName;
+    lane._reportsPending=true;
+    try {
+      const result=await BoardAPI.laneReports(program,laneName,snapshot.root_instance);
+      if(!current())return;
+      if(result.root_instance!==snapshot.root_instance || result.family!==program.family || result.program!==program.name || result.lane!==laneName || !(result.reports===null || Array.isArray(result.reports)))throw new Error('Stale report index');
+      const identity=await BoardAPI.rootInstance();
+      if(!current())return;
+      if(identity.root_instance!==snapshot.root_instance)throw new Error('Root changed');
+      lane.reports=result.reports;lane._reportsLoaded=true;delete lane.reports_unscanned;
+      // The report endpoint rereads the ledger for ownership. Once the lane
+      // scan has arrived, its ledger/map/coverage warnings own those sources;
+      // only the index owns report warnings. Replace, never accumulate, each.
+      const warnings=list(result.warnings)||[];
+      lane._reportWarnings=warnings.filter(reportWarning);
+      lane.warnings=mergeWarnings(lane.unscanned ? warnings.filter(w=>!reportWarning(w)) : (list(lane.warnings)||[]).filter(w=>!reportWarning(w)),lane._reportWarnings);
+      if(state.view==='program' && state.section==='reports')render();
+    } catch {
+      if(current()){lane._reportsFailed=true;phaseMessage('Selected reports could not be loaded or the source changed. Use Refresh to retry.');}
+    } finally {delete lane._reportsPending;if(currentLane()===lane && !lane._reportsLoaded && !lane._reportsFailed)loadSelectedReports();}
+  }
+  function phaseMessage(text, apply, label='Apply loaded reports') {
     phaseStatus.replaceChildren();phaseStatus.hidden=!text;
     if(text)phaseStatus.append(document.createTextNode(text));
-    if(apply){const button=document.createElement('button');button.className='button';button.textContent='Apply loaded reports';button.addEventListener('click',apply);phaseStatus.append(' ',button);}
+    if(apply){const button=document.createElement('button');button.className='button';button.textContent=label;button.addEventListener('click',apply);phaseStatus.append(' ',button);}
   }
   async function completeInitialLoad(summary, generation) {
     try {
@@ -157,8 +230,8 @@
       };
       if(app.contains(document.activeElement) || hasUnsaved())phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);
       else await apply();
-    } catch {
-      if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+    } catch (error) {
+      if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage(error?.code==='portfolio_scan_busy' ? 'Portfolio scan is busy. Your browser drafts remain available; wait for the current scan to finish, then use Load entire portfolio to retry.' : 'Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement) && !hasUnsaved())render();}
     }
   }
   const hasUnrecoverableDraft = () => [...state.drafts.values()].some(d=>d.hasDraft && (d.storageError || d.storageUnreadable || d.storageBlocked));
@@ -189,12 +262,19 @@
   async function load() {
     if(state.metadataPending || pendingReportRefresh) return;
     if(hasUnrecoverableDraft()) {blockRefresh();render();return;}
-    const generation=++loadGeneration, initial=!state.data;
+    const generation=++loadGeneration;
+    ++laneGeneration;
     phaseMessage('');
     let finishRefresh;pendingReportRefresh=new Promise(resolve=>{finishRefresh=resolve;});
     state.loading=true; state.error=''; render();
     try {
-      let data=await BoardAPI.load(initial ? 'summary' : undefined);
+      // A refresh with browser drafts must reconcile their source versions
+      // before replacing the editor with an inventory-only snapshot.
+      let data;
+      if(state.data && hasUnsaved() && state.data.root_instance) {
+        const identity=await BoardAPI.rootInstance();
+        data=identity.root_instance ? await BoardAPI.load('complete',identity.root_instance) : await BoardAPI.load();
+      } else data=await BoardAPI.load('summary');
       // An unidentified partial snapshot cannot be paired safely. Retain the
       // existing full-load behavior, including unscoped draft recovery.
       if(data?.reports_loading===true && (!/^[a-f0-9]{64}$/.test(data.root_identity || '') || !/^[a-f0-9]{64}$/.test(data.root_instance || '')))data=await BoardAPI.load();
@@ -202,18 +282,20 @@
       else {
         if (!data || !Array.isArray(data.programs)) throw new Error('Invalid response');
         state.data=data; state.unidentifiedRoot=`unidentified-${++unidentifiedSequence}`; state.metadataErrors=[]; normalizeSelection();
-        if(data.reports_loading===true)phaseMessage('Reports are loading. Report actions are unavailable until loading completes.');
+        if(data.portfolio_unloaded===true)phaseMessage('Portfolio data and reports are not yet loaded. The selected lane loads first.');
         for(const program of programs())for(const lane of list(program.lanes)||[])for(const report of list(lane.reports)||[]){
           const draft=state.drafts.get(draftKey(String(program.id),String(lane.name),report.id));
           if(draft && (report.content!=null || (report.revision!=null && draft.hasDraft)))reconcileReport(draft,report);
         }
       }
-    } catch {
+    } catch (error) {
       if(hasUnrecoverableDraft())blockRefresh();
+      else if(state.data){state.metadataErrors=[error?.code==='portfolio_scan_busy' ? 'Refresh could not complete because the portfolio scan is busy. Your browser draft remains available; wait for the current scan, then use Load entire portfolio to retry.' : 'Refresh failed. The previously loaded data and browser drafts remain available; try Refresh again.'];}
       else {state.error='Could not load workspace data. Check the local backend and try Refresh.'; state.data=null;}
     }
     state.loading=false;try{render();}finally{pendingReportRefresh=null;finishRefresh();}
-    if(state.data?.reports_loading===true && generation===loadGeneration)completeInitialLoad(state.data,generation);
+    if(state.data?.portfolio_unloaded===true && generation===loadGeneration)loadSelectedLane();
+    if(state.data?.portfolio_unloaded===true && generation===loadGeneration && !currentLane()){state.data._portfolioRequested=true;loadPortfolio();}
   }
   const opt = (value,label,selected) => `<option value="${esc(value)}"${selected?' selected':''}>${esc(label)}</option>`;
   const warningText = w => typeof w==='object' && w!==null ? (w.message ?? JSON.stringify(w)) : String(w);
@@ -240,7 +322,8 @@
     const items=[...groups.values()].map(group=>`<li><strong>${esc(group.label)}</strong> — ${group.lanes.size} ${group.lanes.size===1?'lane':'lanes'}<ul>${[...group.lanes.values()].map(name=>`<li>${esc(name)}</li>`).join('')}</ul></li>`).join('');
     const globalItems=globals.filter(w=>w!=='discovery_incomplete').map(w=>`<li>${esc(globalText(w))}</li>`).join('');
     const counts=[['Missing',categories.missing],['Inaccessible or invalid',categories.invalid],['Other warnings',categories.other]].filter(([,set])=>set.size).map(([label,set])=>`${label}: ${set.size} ${set.size===1?'lane':'lanes'}`).join(' · ');
-    return `<section class="panel panel-pad availability" aria-label="Data availability"><h2>Data availability</h2><p>${affected.size ? `${affected.size} ${affected.size===1?'lane has':'lanes have'} reported availability warnings. ${counts}.` : 'No lane warnings reported for this selection.'}${discoveryIncomplete()?' Discovery is incomplete; counts may be partial.':''}${globalItems?' Other global warnings are available in details.':''}</p>${items || globalItems?`<details><summary>View availability details</summary><div class="availability-details" tabindex="0" aria-label="Availability warning details"><ul>${globalItems}${items}</ul></div></details>`:''}</section>`;
+    const unscanned=ps.some(p=>(list(p.lanes)||[]).some(l=>l.unscanned || l.reports_unscanned));
+    return `<section class="panel panel-pad availability" aria-label="Data availability"><h2>Data availability</h2><p>${affected.size ? `${affected.size} ${affected.size===1?'lane has':'lanes have'} reported availability warnings. ${counts}.` : unscanned ? 'Some sources have not been scanned; warnings are unknown.' : 'No lane warnings reported for this selection.'}${unscanned && affected.size?' Some sources have not been scanned.':''}${discoveryIncomplete()?' Discovery is incomplete; counts may be partial.':''}${globalItems?' Other global warnings are available in details.':''}</p>${items || globalItems?`<details><summary>View availability details</summary><div class="availability-details" tabindex="0" aria-label="Availability warning details"><ul>${globalItems}${items}</ul></div></details>`:''}</section>`;
   }
   function selectors() {
     const ps=programs(), lanes=list(currentProgram()?.lanes)||[];
@@ -266,7 +349,7 @@
     const max=Math.max(1,...classes.values());
     const bars=[...classes].sort((a,b)=>b[1]-a[1]).map(([name,n])=>`<div class="chart-row"><span>${esc(name)}</span><span class="bar"><i style="width:${n/max*100}%"></i></span><strong>${n}</strong></div>`).join('');
     return `${title('Dashboard','A portfolio view of the records currently loaded.',`<div class="toolbar"><label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.id||p.name,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`)}
-      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
+      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(state.data?.portfolio_unloaded ? 'Unknown' : state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
       ${availability(ps)}<div class="dashboard-grid"><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded finding records; not coverage.</p>${bars||'<div class="state">No classified findings available.</div>'}</section><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?'Counts from all loaded finding records.':'Incomplete data: counts include loaded finding records only, not portfolio totals.'}</p>${severityRows||'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad"><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p>${ps.length?ps.map(p=>`<div class="record"><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><p class="hint">${esc(p.family||'Family not provided')} · ${Array.isArray(p.lanes)?`${p.lanes.length} lanes`:'Lanes unavailable'}</p></div>`).join(''):discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for loaded findings only.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
   function workspace() {
@@ -361,7 +444,8 @@
     return savedSharedRecovery()+(partial ? '<div class="message warning">Report list is incomplete; some reports may be unavailable.</div>' : '')+reportEditor();
   }
   function reportEditor() {
-    if(state.data?.reports_loading)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports are loading.</div></section>';
+    if(state.data?.portfolio_unloaded && !currentLane()?._reportsLoaded)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports are loading.</div></section>';
+    if(state.data?.reports_loading && !currentLane()?._reportsLoaded)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports are loading.</div></section>';
     const all=rows('reports'); if(!all)return unavailable('Reports');
     if(!all.length)return `<section class="panel panel-pad"><h2>Reports</h2><div class="state">${reportsIncomplete(currentLane())?'No reports loaded.':'No reports in this lane.'}</div></section>`;
     if(!all.some(r=>String(r.id)===state.report)) state.report=String(all[0].id??'');
@@ -372,8 +456,17 @@
     const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>`;
     if(report.content == null && report.path){
       if(!report.loadState) {
-        report.loadState='loading';const program=currentProgram(), lane=state.lane;
-        BoardAPI.report(program,lane,report.path).then(result=>{if(typeof result.content!=='string')throw new Error('Invalid report');report.content=result.content;report.revision=result.revision;if(typeof result.editable==='boolean')report.editable=result.editable;if(typeof result.collaboration_editable==='boolean')report.collaboration_editable=result.collaboration_editable;report.loadState='loaded';}).catch(()=>{report.loadState='error';}).finally(()=>{if(currentProgram()===program && currentLane()?.name===lane && state.section==='reports')render();});
+        report.loadState='loading';const program=currentProgram(), lane=state.lane, snapshot=state.data, selection=laneGeneration;
+        BoardAPI.report(program,lane,report.path,snapshot?.portfolio_unloaded ? snapshot.root_instance : undefined).then(async result=>{
+          if(typeof result.content!=='string')throw new Error('Invalid report');
+          if(snapshot?.portfolio_unloaded && (await BoardAPI.rootInstance()).root_instance!==snapshot.root_instance)throw new Error('Root changed');
+          if(state.data!==snapshot || selection!==laneGeneration){delete report.loadState;return;}
+          report.content=result.content;report.revision=result.revision;
+          if(typeof result.editable==='boolean')report.editable=result.editable;
+          if(typeof result.collaboration_editable==='boolean')report.collaboration_editable=result.collaboration_editable;
+          report.loadState='loaded';
+        }).catch(()=>{if(state.data!==snapshot || selection!==laneGeneration)delete report.loadState;else report.loadState='error';})
+          .finally(()=>{if(state.data===snapshot && currentProgram()===program && currentLane()?.name===lane && state.section==='reports' && state.report===String(report.id))render();});
       }
       if(report.loadState!=='error') return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Loading report…</div></section>`;
       if(!draftFor(report).hasDraft) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Report could not be loaded. Refresh the workspace to retry.</div></section>`;
@@ -851,6 +944,8 @@
     ++renderGeneration;
     if(editor){editor.toTextArea();editor=null;}
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
+    portfolioAction.hidden=!state.data?.portfolio_unloaded;
+    portfolioButton.disabled=!!state.data?._portfolioLoading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':'Programs';
     if(state.loading) app.innerHTML='<div class="panel state">Loading workspace…</div>';
@@ -869,6 +964,7 @@
       editor.codemirror.on('change',()=>updateDraft(draft,editor.value()));
     }
     renderRecovery();
+    if(!state.loading){loadSelectedLane();loadSelectedReports();}
   }
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
@@ -907,8 +1003,8 @@
       findSavedDrafts(draftFor(report),box,true);
     }
     else if(target.hasAttribute('data-find-drafts')){const report=reportById(state.report);if(report)findSavedDrafts(draftFor(report));}
-    else if(target.hasAttribute('data-go-program')){if(state.dashboardProgram && state.program!==state.dashboardProgram){state.program=state.dashboardProgram;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();}state.view='program';render();}
-    else if(target.hasAttribute('data-open-program')){if(state.program!==target.dataset.openProgram)state.filters={severity:'',class:'',status:'',query:''};state.program=target.dataset.openProgram;state.lane='';state.report='';normalizeSelection();state.view='program';state.section='findings';render();}
+    else if(target.hasAttribute('data-go-program')){if(state.dashboardProgram && state.program!==state.dashboardProgram){++laneGeneration;state.program=state.dashboardProgram;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();}state.view='program';render();}
+    else if(target.hasAttribute('data-open-program')){++laneGeneration;if(state.program!==target.dataset.openProgram)state.filters={severity:'',class:'',status:'',query:''};state.program=target.dataset.openProgram;state.lane='';state.report='';normalizeSelection();state.view='program';state.section='findings';render();}
     else if(target.dataset.section){state.section=target.dataset.section;render();}
     else if(target.hasAttribute('data-rationale-edit')){
       const row=(rows('findings')||[]).find(r=>String(r.id)===target.dataset.rationaleEdit);
@@ -929,8 +1025,8 @@
   app.addEventListener('change',async event=>{
     const el=event.target;
     if(el.id==='dashboard-program'){const focused=document.activeElement===el;state.dashboardProgram=el.value;render();if(focused)app.querySelector('#dashboard-program')?.focus();}
-    else if(el.id==='program-select'){state.program=el.value;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();render();}
-    else if(el.id==='lane-select'){state.lane=el.value;state.report='';state.filters={severity:'',class:'',status:'',query:''};render();}
+    else if(el.id==='program-select'){++laneGeneration;state.program=el.value;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();render();}
+    else if(el.id==='lane-select'){++laneGeneration;state.lane=el.value;state.report='';state.filters={severity:'',class:'',status:'',query:''};render();}
     else if(el.id==='report-select'){state.report=el.value;render();}
     else if(el.dataset.filter){state.filters[el.dataset.filter]=el.value;render();}
     else if(el.dataset.metadata){

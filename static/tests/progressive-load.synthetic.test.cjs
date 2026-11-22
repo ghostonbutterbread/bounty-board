@@ -26,7 +26,7 @@ test('known portfolio is usable before the held report read completes', async ()
     const overview=page.locator('section').filter({has:page.getByRole('heading',{name:'Portfolio overview'})});
     const stat=label=>overview.locator('.stat').filter({hasText:label}).locator('strong');
     assert.equal(await stat('Finding records').innerText(),'1');
-    assert.match(await stat('Report records').innerText(),/loading/i);
+    assert.equal(await stat('Report records').innerText(),'Unknown');
     const availability=page.getByRole('region',{name:'Data availability'});
     assert.match(await availability.innerText(),/1 lane has reported availability warnings/);
     assert.equal(fs.existsSync(path.join(root,'release')),false);

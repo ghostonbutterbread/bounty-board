@@ -126,6 +126,15 @@ test('disposable real loader distinguishes empty, missing, corrupt and unreadabl
     await page.route('**/*',route=>route.request().url().startsWith(origin+'/')?route.continue():route.abort());
     await page.goto(origin);
     const summary=page.getByRole('region',{name:'Data availability'});await summary.waitFor();
+    // A visible summary can still be the inventory/selected-lane snapshot.
+    // Wait for the actual complete-snapshot transition, not a warning value.
+    await page.waitForFunction(()=>{
+      const buttons=[...document.querySelectorAll('button')];
+      return buttons.some(b=>b.textContent==='Apply loaded reports') || buttons.some(b=>b.textContent==='Load entire portfolio' && b.parentElement.hidden);
+    });
+    const apply=page.getByRole('button',{name:'Apply loaded reports'});
+    if(await apply.isVisible())await apply.click();
+    await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Load entire portfolio' && b.parentElement.hidden));
     await summary.locator('summary').click();
     let text=await summary.innerText();
     assert.match(text,/Ledger inaccessible or invalid\s*— 1 lane/);

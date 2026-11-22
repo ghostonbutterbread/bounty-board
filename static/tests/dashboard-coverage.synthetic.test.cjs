@@ -7,6 +7,16 @@ const {spawn} = require('node:child_process');
 const {chromium} = require('playwright');
 
 // A real local backend and real SQLite; all files and browser state are disposable.
+async function waitForPortfolio(page) {
+  await page.waitForFunction(()=>{
+    const buttons=[...document.querySelectorAll('button')];
+    const load=buttons.find(b=>b.textContent==='Load entire portfolio');
+    return !load || load.parentElement.hidden || buttons.some(b=>b.textContent==='Apply loaded reports');
+  },null,{timeout:5000});
+  const apply=page.getByRole('button',{name:'Apply loaded reports'});
+  if(await apply.isVisible())await apply.click();
+  await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Load entire portfolio' && b.parentElement.hidden),null,{timeout:5000});
+}
 test('portfolio filtering, ledger and unassessed inventory end to end', async () => {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'bdc-'));
   const repo=path.resolve(__dirname,'../..');
@@ -21,6 +31,7 @@ test('portfolio filtering, ledger and unassessed inventory end to end', async ()
     await page.goto(`http://127.0.0.1:${port}`);
     const filter=page.getByLabel('Dashboard program');
     await filter.waitFor({timeout:5000});
+    await waitForPortfolio(page);
     const overview=page.locator('section').filter({has:page.getByRole('heading',{name:'Portfolio overview'})});
     const stat=label=>overview.locator('.stat').filter({hasText:label}).locator('strong');
     assert.equal(await stat('Programs loaded').innerText(),'2');
@@ -77,6 +88,7 @@ test('portfolio filtering, ledger and unassessed inventory end to end', async ()
     fs.unlinkSync(path.join(root,'web_bounty/beta/web/ledgers/ledger.json'));
     await page.getByRole('button',{name:'Refresh'}).click();
     await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(el=>el.textContent.includes('Finding records') && el.textContent.includes('Unknown')));
+    await waitForPortfolio(page);
     assert.match(await page.locator('#app').innerText(),/incomplete|unavailable/i);
     await page.getByLabel('Dashboard program').selectOption('web_bounty/alpha');
     assert.equal(await stat('Finding records').innerText(),'2');
@@ -110,6 +122,7 @@ test('same-name programs have distinguishable keyboard-accessible choices', asyn
     await page.goto(`http://127.0.0.1:${port}`);
     const filter=page.getByLabel('Dashboard program');
     await filter.waitFor();
+    await waitForPortfolio(page);
     const options=await filter.locator('option').evaluateAll(els=>els.map(el=>({value:el.value,label:el.textContent})));
     const web=options.find(o=>o.value==='web_bounty/alpha'), binary=options.find(o=>o.value==='binaries/alpha');
     assert.ok(web && binary);
