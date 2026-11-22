@@ -1,101 +1,35 @@
 # Board workspace latency integration dossier
 
-- **Status:** blocked — RED-only checkpoint, not review-ready
-- **Owner:** delegated workspace-latency worker
-- **Branch:** `fix/board-workspace-latency`
+- **Status:** implementation checkpoint, **blocked and not review/merge/activation ready**
+- **Branch:** `fix/board-workspace-latency`, intended target `beta`
 - **Base:** `fea88bc7428b23c55be4d376ac38b81e5e89da8d`
-- **Intended integration target:** `beta`; no merge, push or activation authorized here
-- **Last updated:** 2026-11-21
-- **Recovery checkpoint:** `ac94fb2cfeb46d733400f7af3fc1487cddbb8269` (RED tests and original dossier); the branch tip contains a later dossier-only handoff commit
-- **Feature implementation commits:** none
+- **Previous RED checkpoint:** `ae190cebbd48cfa65b68f73c53ddd82b289d8cc9`
+- **Implementation checkpoint:** `151df25e70eaf773ac5b47570509d9e1f3cb23c6`; the branch tip contains a later dossier-only handoff commit. No beta merge, push, or runtime activation was performed.
 
-## Intent and current contract
+## Intended contract and current implementation
 
-Remove unrelated-lane map and coverage I/O from the initial summary and selected
-workspace paths, while retaining real ledger records, explicit loading/unknown
-states, source capability semantics and complete portfolio discovery. Scope is
-the read-only phased path; metadata writer/collaboration/full baselines must
-remain intact. This checkpoint changes no application behavior.
+The read-only summary now enumerates program/lane directories without reading any ledger, map, coverage database or report. Its lanes carry `unscanned` and null collections. A root-instance-bound `/api/lane` request reads only one lane's ledger, map, and coverage, with a before/after root check and selector validation. Gadgets derive from that lane's map. Reports remain unscanned until the complete portfolio read. Legacy unphased full and writer/collaboration server paths are unchanged. The client starts the complete portfolio read after the selected lane becomes available; incomplete totals and warnings are labeled, and the full scan may also be retried via the load-portfolio button. The selected lane and complete responses are checked against root and generation; the browser keeps selection on the exercised held-response race. Concurrent phased full scans are limited to one per server and selected reads to eight, with 503 on saturation.
 
-`discover()` currently calls `ledger`, `map_entries` and `coverage` for every
-lane before returning the summary; the full phase calls them again. The client
-then calls `completeInitialLoad`, and its deliberate root/generation/view and
-draft protections must not be bypassed. Manual refresh currently requests the
-full endpoint. A target-scoped endpoint must bind the exact root instance both
-before and after the read and verify family/program/lane ownership. In-flight
-results also need client generation, selected lane, root and full-snapshot
-arbitration. Do not infer missing from a source that has not yet been read.
+The original two RED tests demanded findings in the inventory itself. That conflicts with the explicit no-unrelated-source-reads requirement: their assertions now expect null findings, while retaining both deterministic unrelated map/coverage barriers. A separate test verifies that the selected endpoint returns the real selected ledger.
 
-## Evidence
+## Receipts and environment
 
-- `tests/test_workspace_latency_red.py` is a recoverable RED test: real loopback
-  HTTP against two synthetic program lanes, with a deterministic barrier on the
-  unrelated lane, once each for map and coverage. Both ledgers were checked
-  after release. Both tests failed at the intended pre-release assertion with
-  `barrier entered=True` on the base; 2 methods, 2 failures, 0 skips.
-- Reproduce from this checkout (expected failure until implementation):
+Tests used an archived copy of the actual branch worktree extracted into `/runboard` in `nousresearch/hermes-agent:latest`, UID 1000, `--network none`, read-only container root, no writable `/tmp`, a task-owned `/runboard` tmpfs, 2 CPUs and 2 GiB memory limit. Chrome and Node dependencies were read-only binds. The 4 GiB tmpfs is a capacity ceiling, not reserved memory. The archive has no worktree `.git` pointer; host/container SHA-256 hashes matched for `app.py`, `static/api.js`, `static/app.js`, the HTTP regression, and the browser fixture/test. Non-loopback connect returned network unreachable and `/proc/net/route` contained no IPv4 routes. No live dashboard/API, Shared, remote, service, or beta was used.
 
-  ```sh
-  docker run --rm --network none --user 1000:1000 --memory 256m --cpus 0.5 \
-    --pids-limit 64 --read-only \
-    --tmpfs /runboard:rw,exec,nosuid,nodev,size=32m,uid=1000,gid=1000 \
-    --tmpfs /tmp:ro,noexec,nosuid,nodev,size=1m --shm-size 1m \
-    --mount type=bind,src="$PWD",dst=/src,readonly -w /src \
-    -e TMPDIR=/runboard -e HOME=/runboard -e PYTHONPATH=/src \
-    -e PYTHONDONTWRITEBYTECODE=1 python:3.12-slim \
-    python -u tests/test_workspace_latency_red.py
-  ```
+- Before implementation the two inherited HTTP barrier tests failed as intended (2 failures, held unrelated map/coverage entered). The new selected endpoint first failed with HTTP 404.
+- Current focused HTTP suite: `python3 -W error::ResourceWarning -u tests/test_workspace_latency_red.py` — **5 passed**. It includes inventory source-read exclusion, both unrelated source barriers, selected lane, and a root replacement during lane read.
+- Current real HTTP + Chromium `node --test --test-concurrency=1 static/tests/workspace-latency.synthetic.test.cjs` — **3 passed**: separate unrelated map and coverage barriers, selected finding/map/coverage/gadget visible before release, eventual complete portfolio count after release, and A→B→A with B held. These are synthetic functional checks, not production latency measurements.
+- The focused original EasyMDE draft-refresh test failed before the draft-preserving refresh change, then passed (`--test-name-pattern='real EasyMDE saves a browser draft'`). The original focused filter preservation test also passed after restoring the loading state/label. These are individual checks, not a substitute for the default suite.
+- Safe Python selection on the current code: **154 discovered, 152 run, 151 passed, one skipped** (`test_dashboard_coverage.DashboardCoverageTests.test_encoder_depth_failure_is_isolated_for_map_and_coverage`, Python 3.12-specific fixture on Python 3.14). Explicitly excluded `test_backend.BackendTests.test_real_bbh_metadata_write_on_disposable_fixture` and `test_collaboration_api.CollaborationAPITests.test_opt_in_fixture_publication_checks_head_and_writes_source`. The selection includes synthetic writer/collaboration tests. Initial run with a 768 MiB tmpfs produced 34 failures and 2 errors, primarily retention-capacity refusals; the 4 GiB tmpfs rerun passed. The initial failure is retained in the task scratch log, not silently treated as an application pass.
+- `npm test` was attempted three times under a 360-second guard and did **not finish**. The latest complete-output prefix, before the subsequent draft-refresh correction, showed 61 pass lines and 16 fail lines, then SIGTERM; these are not final suite totals. The default script deliberately excludes `browser metadata update reaches backend with a disposable synthetic writer`. Detailed receipts: `/home/ryushe/.hermes/cache/scratch/board-latency-harness/npm-final.log`, `python-final.log`. Scratch may be pruned; rerun the commands rather than relying on those files.
 
-- First Docker invocation exceeded its 35-second outer guard and the detached
-  container exited subsequently; it produced no usable test receipt. The
-  separately run 120-second-guard invocation finished normally in 4.085 seconds
-  of test time with both expected failures. The two-second event wait is a
-  failure guard, not a performance claim.
-- No real-browser test, production traffic/data, npm test, safe Python suite,
-  production speed measurement or independent review was performed. The new
-  red test is discovered by the safe Python suite and will intentionally fail
-  until fixed; it must not be silently excluded for a green release gate.
+## Concrete blockers / next work
 
-## Blocker and exact resume point
+1. **Selected reports on demand are not implemented.** With an older complete scan held at a report, the one-full-scan bound makes the replacement complete request fail/busy rather than letting the selected report open. The existing Chromium test `superseded full response does not disturb an active report draft` was rerun on the latest code and timed out waiting for `.CodeMirror textarea`. Implement a selected-lane report-index/read path, with root ownership and draft reconciliation, without starting a second full scan; rerun this regression. Do not infer that the draft itself was lost from the timeout.
+2. **Existing default browser regressions need reconciliation and a complete green run.** For example, `concurrent apply checks invalidate older result (newer-first)` was rerun and failed because its report barrier was never reached: its identity-request interception also catches the new selected-lane identity check. Adapt the fixture to select the intended real request without weakening its assertions, and investigate remaining failures individually. Dashboard tests that immediately expect complete totals must wait for or explicitly apply the complete response while still testing unknown intermediate totals. Do not classify all observed failures as stale without reproducing them. The default suite timed out, so there is no final pass/fail count.
+3. Revisit deferred selected-lane apply: the result is placed into the partial snapshot before the focused-view apply button is pressed; prove a root replacement between that check and later rendering cannot display stale data. Add deterministic selected-lane/root-swap, refresh, stale partial-versus-full, error/retry, focus, empty-versus-unscanned, XSS, multi-tab/saturation and report/draft tests. The currently passing root swap covers the server read only, not a delayed browser apply.
+4. Re-run the affected/browser and default npm suite and safe Python selection on the final exact source; verify full source identity before/after and obtain parent independent review. New tests are not yet part of the default npm script. Check whether the automatic complete read, even with the per-server concurrency bound, materially competes with later selected-lane reads under real disk pressure; no production speed or starvation guarantee was measured.
 
-This is a partial checkpoint, not a fix. Completing the requested behavior
-safely requires a coordinated backend/client change plus controlled end-to-end
-race evidence; a partial projection or background scan without these checks
-could silently turn missing data into empty data, use another lane/root, clobber
-a draft or overwhelm the server. No production patch was attempted without
-that evidence.
+## Integration / activation
 
-1. Keep the RED tests, then implement an explicitly partial read-only summary
-   that does not read map/coverage/reports. Add a selected-lane scoped read
-   using the existing source readers, exact root before/after, and strict lane
-   ownership validation; keep writer-mode/full endpoint behavior unchanged.
-2. Make selected-lane loading independently observable and race-safe; preserve
-   selections, filters, focus and draft/editor state, ensure error/retry and
-   refresh/selection/root/generation changes invalidate stale work, and ensure
-   a late partial result cannot override a full response. Bound broad scans
-   across requests/tabs so they cannot crowd out selected-lane reads, without
-   dropping full portfolio results or adding global caches.
-3. Add deterministic real HTTP + Chromium synthetic barrier coverage for
-   unrelated map **and** coverage; selected lane must load both before release,
-   then portfolio full scan must complete. Cover selection/root/refresh races,
-   multiple tabs, errors, empty vs missing, read-only permissions, capabilities,
-   lane ownership and action availability. Use nonroot network-none Docker,
-   resource limits and task-owned `/runboard` tmpfs; never live `/api/data` or
-   remote Syncthing. Provision Playwright/Chromium in that fence first: the
-   `nikolaik/python-nodejs:python3.11-nodejs20` image lacks both. A read-only
-   host Playwright 1.60.0 mount resolved successfully, but read-only host Chrome
-   lacked 16 shared libraries in the image. Adding all host libraries via
-   `LD_LIBRARY_PATH` failed with a glibc private-symbol mismatch. No browser
-   launch was achieved; use a compatible pre-provisioned image/runtime rather
-   than claiming that preflight as browser evidence.
-4. Run the RED suite green, affected regressions, selected default npm suite and
-   safe Python suite with audited fixture boundaries; report counts, exclusions,
-   and limits. Obtain parent review of the exact implementation SHA.
-
-## Decision gates
-
-- **Integration:** blocked on implementation, green synthetic and regression
-  evidence, and parent review. This branch is not merge-ready.
-- **Activation:** separate parent decision; no service changed here.
-- **Residual performance:** ledger and root enumeration and host I/O may still
-  dominate even after the requested fix; no production speed claim is justified.
+Do not merge or activate this checkpoint. Parent owns review, integration, and any activation decision. Stable/main propagation is not authorized. This checkpoint establishes a functional synthetic fast path, not a completed or regression-safe release.
