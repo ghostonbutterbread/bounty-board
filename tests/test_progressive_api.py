@@ -41,7 +41,10 @@ class ProgressiveAPI(unittest.TestCase):
         self.start()
         summary = self.get('?phase=summary')
         lane = summary['programs'][0]['lanes'][0]
-        self.assertEqual(lane['findings'][0]['fid'], 'A')
+        self.assertIsNone(lane['findings'])
+        self.assertTrue(lane['unscanned'])
+        with urlopen(f'http://127.0.0.1:{self.server.server_port}/api/lane?root_instance={summary["root_instance"]}&family=web_bounty&program=alpha&lane=web', timeout=5) as response:
+            self.assertEqual(json.load(response)['lane']['findings'][0]['fid'], 'A')
         self.assertIsNone(lane['reports'])
         self.assertNotIn('reports_missing', lane['warnings'])
         self.assertFalse(summary['capabilities']['source_authoritative'])
