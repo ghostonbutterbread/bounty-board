@@ -1,0 +1,104 @@
+// Run only in the documented network-none disposable /runboard container.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const {spawn, spawnSync} = require('node:child_process');
+const {once} = require('node:events');
+const {chromium} = require('playwright');
+
+async function main() {
+  assert.equal(process.env.HOME, '/runboard');
+  assert.equal(process.env.TMPDIR, '/runboard');
+  const root='/runboard/synthetic-root', bbh='/runboard/bbh/scripts/bbh', marker='/runboard/board-writes';
+  fs.mkdirSync(root); fs.writeFileSync('/runboard/sentinel','untouched');
+  function run(...args) {
+    const p=spawnSync(bbh,args,{encoding:'utf8',timeout:60000});
+    assert.equal(p.status,0,`${args[0]} ${p.stderr}`);
+  }
+  const base=['fictional.example','--family','web_bounty','--lane','web','--root',root];
+  fs.writeFileSync('/runboard/note.md','Title: Synthetic fixture\nClass: xss\nSeverity: LOW\nFile: src/example.js\nDescription: Fixture only.\n');
+  run('agents/manual_hunter.py',...base,'--from-file','/runboard/note.md');
+  const path=root+'/web_bounty/fictional.example/web/ledgers/ledger.json';
+  const finding=()=>JSON.parse(fs.readFileSync(path,'utf8')).findings[0];
+  const fid=finding().fid;
+  run('agents/manual_hunter.py',...base,'--set-submission',fid,'--submission-state','submitted','--submission-result','duplicate');
+  const before=JSON.stringify(finding().submission);
+  const writer='/runboard/writer';
+  fs.writeFileSync(writer,`#!/bin/sh\nif [ "$2" != "--help" ]; then printf 'write\\n' >> ${marker}; [ ! -f /runboard/fail-writer ] || exit 1; fi\nexec ${bbh} "$@"\n`,{mode:0o700});
+  const code="import app; s=app.make_server('/runboard/synthetic-root',0,writer='/runboard/writer',accept_uncoordinated_writes=True); print(s.server_port,flush=True); s.serve_forever()";
+  const server=spawn('python',['-u','-c',code],{cwd:process.cwd(),stdio:['ignore','pipe','inherit']});
+  let browser;
+  try {
+    const [chunk]=await once(server.stdout,'data'); const port=Number(String(chunk).trim()); assert(port>0);
+    browser=await chromium.launch({headless:true,executablePath:'/chrome/chrome',args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-background-networking']});
+    const page=await browser.newPage();page.setDefaultTimeout(30000);
+    const requests=[];page.on('response',r=>{if(r.url().endsWith('/api/finding'))requests.push(r.status());});
+    await page.goto(`http://127.0.0.1:${port}`);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    const severity=page.getByLabel('severity for Synthetic fixture');await severity.waitFor();assert.equal(await severity.inputValue(),'LOW');
+    fs.writeFileSync('/runboard/external.json',JSON.stringify({severity:'MEDIUM'}));
+    run('agents/manual_hunter.py',...base,'--edit-finding',fid,'--patch-file','/runboard/external.json');
+    assert.equal(finding().severity,'MEDIUM');assert.equal(await severity.inputValue(),'LOW');
+    await severity.selectOption('HIGH');await page.getByText(/Conflict: finding changed/).waitFor();
+    assert.equal(requests.at(-1),409);assert.equal(finding().severity,'MEDIUM');assert.equal(fs.existsSync(marker),false);
+    assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'HIGH');
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'HIGH');
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM');
+    await page.getByLabel('severity for Synthetic fixture').selectOption('HIGH');
+    await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='HIGH'&&!document.querySelector('[data-metadata=severity]')?.disabled);
+    assert.equal(finding().severity,'HIGH');assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,1);
+    let release, started;const gate=new Promise(r=>{release=r;});const arrived=new Promise(r=>{started=r;});
+    const hold=async route=>{started();await gate;await route.continue();};
+    await page.route('**/api/finding',hold);
+    const cls=page.getByLabel('class for Synthetic fixture');await cls.fill('ssrf');await cls.press('Tab');await arrived;
+    fs.writeFileSync('/runboard/external.json',JSON.stringify({severity:'MEDIUM'}));
+    run('agents/manual_hunter.py',...base,'--edit-finding',fid,'--patch-file','/runboard/external.json');
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();release();
+    await page.getByLabel('Pending class value — copy before leaving').waitFor();
+    assert.equal(await page.getByLabel('Pending class value — copy before leaving').inputValue(),'ssrf');
+    assert.equal(finding().severity,'MEDIUM');assert.equal(finding().class_name,'xss');
+    assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,1);
+    await page.unroute('**/api/finding',hold);await page.getByRole('button',{name:'Refresh'}).click();
+    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('class for Synthetic fixture').fill('ssrf');await page.getByLabel('class for Synthetic fixture').press('Tab');
+    await page.waitForFunction(()=>document.querySelector('[data-metadata=class]')?.value==='ssrf'&&!document.querySelector('[data-metadata=class]')?.disabled);assert.equal(finding().class_name,'ssrf');
+    await page.getByLabel('status for Synthetic fixture').selectOption('dormant');
+    await page.waitForFunction(()=>document.querySelector('[data-metadata=status]')?.value==='dormant'&&!document.querySelector('[data-metadata=status]')?.disabled);assert.equal(finding().current.status,'dormant');
+    await page.getByRole('button',{name:'Edit severity rationale for Synthetic fixture'}).click();await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).fill('Synthetic rationale');
+    await page.getByRole('button',{name:'Save severity rationale for Synthetic fixture'}).click();await page.getByRole('button',{name:'Edit severity rationale for Synthetic fixture'}).waitFor();await page.getByText('Synthetic rationale',{exact:true}).waitFor();
+    assert.equal(finding().severity_rationale,'Synthetic rationale');assert.equal(JSON.stringify(finding().submission),before);
+    assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
+    const forged=await page.evaluate(async fid=>{
+      const data=await (await fetch('/api/data')).json();
+      const f=data.programs[0].lanes[0].findings[0];
+      const body={family:'web_bounty',program:'fictional.example',lane:'web',fid,patch:{severity:'LOW'},root_instance:data.root_instance,expected_revision:f.metadata_revision};
+      const send=b=>fetch('/api/finding',{method:'PATCH',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify(b)}).then(r=>r.status);
+      const {expected_revision,...missing}=body;
+      return [await send(missing),await send({...body,expected_revision:'0'.repeat(64)}),await send({...body,root_instance:'0'.repeat(64)})];
+    },fid);
+    assert.deepEqual(forged,[400,409,409]);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
+    fs.renameSync(root,root+'-away');
+    let received=page.waitForResponse(r=>r.url().endsWith('/api/finding')&&r.status()===409);
+    await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
+    await received;
+    await page.getByLabel('Pending severity value — copy before leaving').waitFor();
+    await page.getByText(/Conflict: source root changed/).waitFor();
+    assert.equal(requests.at(-1),409);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
+    fs.renameSync(root+'-away',root);await page.getByRole('button',{name:'Refresh'}).click();
+    await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM');
+    const original=fs.readFileSync(path,'utf8');const empty=JSON.parse(original);empty.findings=[];fs.writeFileSync(path,JSON.stringify(empty));
+    received=page.waitForResponse(r=>r.url().endsWith('/api/finding')&&r.status()===404);
+    await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
+    await received;await page.getByText(/Finding is no longer available/).waitFor();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    assert.equal(requests.at(-1),404);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
+    fs.writeFileSync(path,original);await page.getByRole('button',{name:'Refresh'}).click();
+    await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM');
+    fs.writeFileSync('/runboard/fail-writer','fail');await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
+    await page.getByText(/Update failed or was not verified/).waitFor();assert.equal(requests.at(-1),502);
+    assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'LOW');assert.equal(finding().severity,'MEDIUM');
+    assert.equal(fs.readFileSync('/runboard/sentinel','utf8'),'untouched');
+    console.log('PASS: real BBH stale/in-flight, missing root/FID, writer error; pending choices retained; refreshed HIGH, class, status, rationale; submission preserved',requests);
+  } finally {if(browser)await browser.close();server.kill('SIGTERM');await once(server,'exit').catch(()=>{});}
+}
+main().catch(e=>{console.error(e);process.exitCode=1;});

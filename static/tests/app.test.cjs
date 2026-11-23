@@ -438,6 +438,62 @@ test('advertised BBH metadata capability sends the actual backend contract', asy
   await page.close();
 });
 
+test('stale BBH metadata keeps the pending value after refresh and navigation', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let payload;
+  data.root_instance='a'.repeat(64);
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',severity:'LOW',metadata_revision:'b'.repeat(64)}];
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();return route.fulfill({status:409,json:{error:'finding_changed'}});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
+    await page.getByText(/Conflict: finding changed/).waitFor();
+    assert.equal(payload.expected_revision,'b'.repeat(64));assert.equal(payload.root_instance,'a'.repeat(64));
+    const pending=page.getByLabel('Pending severity value — copy before leaving');
+    assert.equal(await pending.inputValue(),'HIGH');
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('button',{name:'Refresh'}).click();
+    assert.equal(await pending.inputValue(),'HIGH');
+  } finally {await page.close();}
+});
+
+test('a successful edit on a different root does not discard an earlier pending value', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let attempts=0;
+  data.root_instance='a'.repeat(64);
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',severity:'LOW',metadata_revision:'b'.repeat(64)}];
+  data.capabilities={finding_metadata:true,finding_fields:['severity']};
+  await page.route('**/api/data*',route=>route.fulfill({json:data}));
+  await page.route('**/api/finding',route=>{
+    attempts++;
+    return attempts===1 ? route.fulfill({status:409,json:{error:'finding_changed'}}) : route.fulfill({json:{finding:{fid:'F01',severity:'HIGH',metadata_revision:'e'.repeat(64)}}});
+  });
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
+    await page.getByLabel('Pending severity value — copy before leaving').waitFor();
+    data.root_instance='c'.repeat(64);data.programs[0].lanes[0].findings[0].metadata_revision='d'.repeat(64);
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
+    await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='HIGH'&&!document.querySelector('[data-metadata="severity"]')?.disabled);
+    assert.equal(attempts,2);
+    assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'HIGH');
+  } finally {await page.close();}
+});
+
+test('an explicitly disabled BBH writer cannot be overridden by a legacy capability', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);let writes=0;
+  data.capabilities={finding_metadata:false,findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low']}}};
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  await page.route('**/api/meta',route=>{writes++;return route.fulfill({status:500});});
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    assert.equal(await page.getByLabel('severity for Example finding').isDisabled(),true);
+    assert.equal(writes,0);
+  } finally {await page.close();}
+});
+
 test('BBH class metadata uses the recorded class_name and verified owner ID', async () => {
   const page=await browser.newPage();const data=structuredClone(fixture);let payload;
   data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',class_name:'xss'}];
@@ -523,6 +579,23 @@ test('rationale drafts survive finding switches, navigation and refresh with unl
     const first=page.locator('tr').filter({hasText:'First finding'});
     assert.match(await first.innerText(),/Saved rationale.*Changed at source/s);
     assert.match(await first.innerText(),/Unsaved draft/i);
+  } finally {await page.close();}
+});
+
+test('a rationale draft remains copyable after the source root changes', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.root_instance='a'.repeat(64);
+  data.programs[0].lanes[0].findings=[{fid:'F01',title:'Synthetic BBH finding',severity_rationale:'Original',metadata_revision:'b'.repeat(64)}];
+  data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
+  await page.route('**/api/data*',route=>route.fulfill({json:data}));
+  try {
+    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('button',{name:'Edit severity rationale for Synthetic BBH finding'}).click();
+    await page.getByRole('textbox',{name:'Severity rationale for Synthetic BBH finding'}).fill('Retain this rationale');
+    data.root_instance='c'.repeat(64);data.programs[0].lanes[0].findings=[];
+    await page.getByRole('button',{name:'Refresh'}).click();
+    await page.getByLabel('Pending severity rationale — copy before leaving').waitFor();
+    assert.equal(await page.getByLabel('Pending severity rationale — copy before leaving').inputValue(),'Retain this rationale');
   } finally {await page.close();}
 });
 

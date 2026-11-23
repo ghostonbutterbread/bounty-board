@@ -19,6 +19,8 @@ for name in ('alpha', 'zeta'):
     (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': name, 'title': name + ' finding'}]}))
     (lane / 'recon/maps/map.jsonl').write_text(json.dumps({'title': name + ' map', 'tags': ['gadget']}) + '\n')
     (lane / 'reports/report.md').write_text('# synthetic\n')
+    if os.environ.get('BOARD_COLLAB_MODE'):
+        (lane / 'reports/zz-nav.md').write_text('<!-- generated: bounty-core-report-navigation -->\n# index\n')
     db = sqlite3.connect(lane / 'ledgers/surface_coverage.sqlite')
     db.executescript('''CREATE TABLE surfaces (id TEXT, kind TEXT, host TEXT, surface_key TEXT, input_key TEXT, consumer TEXT, fingerprint TEXT, run_id TEXT);
     CREATE TABLE assessments (surface_id TEXT, class_name TEXT, status TEXT, pressure TEXT, reason TEXT, boundary TEXT, axes_json TEXT, evidence_json TEXT, reopen_when TEXT, assessed_fingerprint TEXT);''')
@@ -44,7 +46,9 @@ def barrier(lane, warnings):
             time.sleep(.01)
     return original(lane, warnings)
 setattr(app, held, barrier)
-server = app.make_server(source, port=0)
+mode = os.environ.get('BOARD_COLLAB_MODE', '')
+options = ({'collaboration_dir': root / 'private', 'report_autosave': mode == 'autosave'} if mode else {})
+server = app.make_server(source, port=0, **options)
 print(server.server_port, flush=True)
 try:
     server.serve_forever()

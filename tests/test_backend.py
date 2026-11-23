@@ -32,6 +32,13 @@ class BackendTests(unittest.TestCase):
         conn.close()
         return result
 
+    def bind_finding(self, payload):
+        data = json.loads(self.request('GET', '/api/data')[2])
+        program = next(p for p in data['programs'] if p['family'] == payload['family'] and p['name'] == payload['program'])
+        lane = next(l for l in program['lanes'] if l['name'] == payload['lane'])
+        finding = next(f for f in lane['findings'] if f['fid'] == payload['fid'])
+        return {**payload, 'root_instance': data['root_instance'], 'expected_revision': finding['metadata_revision']}
+
     def test_missing_writer_disables_writes_but_read_endpoint_works(self):
         server = app.make_server(self.root, port=0, writer=self.root / 'missing-bbh', accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
@@ -123,6 +130,7 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            payload = self.bind_finding(payload)
             status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
             self.assertEqual(status, 200, body)
             self.assertEqual(json.loads(body)['finding']['severity'], 'HIGH')
@@ -146,6 +154,7 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            payload = self.bind_finding(payload)
             self.assertEqual(self.request('PATCH', '/api/finding', json.dumps(payload), headers)[0], 502)
             status, _, body = self.request('GET', '/api/data')
             data = json.loads(body)
@@ -173,6 +182,7 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'severity': 'HIGH'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            payload = self.bind_finding(payload)
             status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
             self.assertEqual(status, 409, body)
             self.assertFalse(marker.exists())
@@ -205,6 +215,7 @@ class BackendTests(unittest.TestCase):
         try:
             payload = {'family': 'web_bounty', 'program': 'fictional', 'lane': 'web', 'fid': 'F01', 'patch': {'status': 'dormant'}}
             headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+            payload = self.bind_finding(payload)
             status, _, body = self.request('PATCH', '/api/finding', json.dumps(payload), headers)
             self.assertEqual(status, 502, body)
             self.assertEqual(json.loads(body)['error'], 'verification_failed')
@@ -248,6 +259,7 @@ class BackendTests(unittest.TestCase):
             try:
                 payload = {'family': 'web_bounty', 'program': 'fictional.example', 'lane': 'web', 'fid': before['fid'], 'patch': {'severity': 'HIGH', 'class_name': 'ssrf', 'status': 'dormant', 'severity_rationale': 'fixture'}}
                 headers = {'Origin': f'http://127.0.0.1:{self.port}', 'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
+                payload = self.bind_finding(payload)
                 for invalid_headers in ({}, {**headers, 'Host': f'evil.test:{self.port}'}, {**headers, 'Origin': 'https://evil.test'}, {**headers, 'Sec-Fetch-Site': 'cross-site'}, {**headers, 'Content-Type': 'text/plain'}):
                     self.assertEqual(self.request('PATCH', '/api/finding', json.dumps(payload), invalid_headers)[0], 403)
                 for key, bad in (('program', '../fictional'), ('fid', before['fid'].lower()), ('fid', '--help')):
@@ -363,10 +375,10 @@ class BackendTests(unittest.TestCase):
         (lane / 'reports/invalid.md').write_bytes(b'\xff')
         (lane / 'reports/registered.md').write_bytes(b'\xff')
         real_read = app.read_file
-        def fail_one(root, relative):
+        def fail_one(root, relative, **kwargs):
             if relative == 'reports/unreadable.md':
                 raise PermissionError('fixture')
-            return real_read(root, relative)
+            return real_read(root, relative, **kwargs)
         with patch.object(app, 'read_file', side_effect=fail_one):
             data = json.loads(self.request('GET', '/api/data')[2])['programs'][0]['lanes'][0]
         items = {item['path']: item for item in data['reports']}

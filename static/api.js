@@ -12,7 +12,8 @@ window.BoardAPI = (() => {
   }
   function capability(data, name) {
     let cap = data?.capabilities?.[name];
-    if (name === 'findingMetadata' && !cap && data?.capabilities?.finding_metadata === true && Array.isArray(data.capabilities.finding_fields)) {
+    if (name === 'findingMetadata' && data?.capabilities?.finding_metadata === false) return null;
+    if (name === 'findingMetadata' && data?.capabilities?.finding_metadata === true && Array.isArray(data.capabilities.finding_fields)) {
       const fields=data.capabilities.finding_fields;
       cap={enabled:true,method:'PATCH',url:'/api/finding',backend:'bbh',options:{}};
       if(fields.includes('severity')) cap.options.severity=['EXCEPTIONAL','CRITICAL','HIGH','MEDIUM','LOW','INFO','UNKNOWN'];
@@ -30,9 +31,9 @@ window.BoardAPI = (() => {
     if (!cap) throw new Error('Write capability unavailable');
     if(cap.backend==='bbh' && name==='findingMetadata') {
       const field=body.field==='class'?'class_name':body.field;
-      const result=await request(cap.url,{method:'PATCH',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({family:body.family,program:body.program,lane:body.lane,fid:body.findingId,patch:{[field]:body.value}})});
+      const result=await request(cap.url,{method:'PATCH',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({family:body.family,program:body.program,lane:body.lane,fid:body.findingId,patch:{[field]:body.value},expected_revision:body.expectedRevision,root_instance:body.rootInstance})});
       if(result?.finding?.fid!==body.findingId) throw new Error('Unverified finding');
-      return {value:result.finding[field]};
+      return {value:result.finding[field],revision:result.finding.metadata_revision};
     }
     const {family,program,...legacyBody}=body;
     return request(cap.url, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(legacyBody)});

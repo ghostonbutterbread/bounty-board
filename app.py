@@ -3,6 +3,7 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Literal, overload
 from urllib.parse import urlsplit, parse_qs
 
 FAMILIES = {'web_bounty': {'web', 'api'}, 'binaries': {'apk', 'exe', 'mac'}}
@@ -13,7 +14,15 @@ METADATA_WRITE_WARNING = ('Uncoordinated metadata writes can overwrite concurren
                           'Stop other writers before editing.')
 
 
-def read_file(root, relative):
+@overload
+def read_file(root, relative, *, include_identity: Literal[False] = False) -> bytes: ...
+
+
+@overload
+def read_file(root, relative, *, include_identity: Literal[True]) -> tuple[bytes, tuple[int, int]]: ...
+
+
+def read_file(root, relative, *, include_identity=False):
     """Open every path component without following symlinks."""
     import os
     parts = Path(relative).parts
@@ -28,14 +37,15 @@ def read_file(root, relative):
         file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         try:
             import stat
-            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            file_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(file_stat.st_mode):
                 raise ValueError('not a regular file')
             with os.fdopen(file_fd, 'rb') as stream:
                 file_fd = -1
                 data = stream.read(5_000_001)
             if len(data) > 5_000_000:
                 raise ValueError('file too large')
-            return data
+            return (data, (file_stat.st_dev, file_stat.st_ino)) if include_identity else data
         finally:
             if file_fd != -1:
                 os.close(file_fd)
@@ -45,7 +55,8 @@ def read_file(root, relative):
 
 def ledger(lane, warnings):
     try:
-        raw = json.loads(read_file(lane, 'ledgers/ledger.json'))
+        contents, identity = read_file(lane, 'ledgers/ledger.json', include_identity=True)
+        raw = json.loads(contents)
         if not isinstance(raw, dict) or not isinstance(raw.get('findings'), list):
             raise ValueError('unsupported ledger shape')
         if any(not isinstance(entry, dict) for entry in raw['findings']):
@@ -56,7 +67,12 @@ def ledger(lane, warnings):
         # Reject unsafe JSON anywhere in this ledger, including fields that are
         # not currently projected, without exposing its contents in a warning.
         json.dumps(raw, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        import hashlib
+        import os
+        lane_stat = lane.stat()
+        source = os.fsencode(f'{lane.resolve()}\0{lane_stat.st_dev}\0{lane_stat.st_ino}\0{identity[0]}\0{identity[1]}\0')
         result = [{**{field: entry.get(field) for field in fields},
+                   'metadata_revision': hashlib.sha256(source + json.dumps(entry, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')).hexdigest(),
                    'status': entry.get('status') or (entry['current'].get('status') if isinstance(entry.get('current'), dict) else None),
                    'title': entry.get('title') or entry.get('type')} for entry in raw['findings']]
         # Account for the actual portfolio nesting at the response boundary.
@@ -335,6 +351,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     collaboration_lock = threading.RLock()
     portfolio_scan = threading.BoundedSemaphore(1)
     lane_reads = threading.BoundedSemaphore(8)
+    # Serialize this server's own metadata requests through precheck and writer.
+    # Other processes and sync peers do not participate in this lock.
+    metadata_write_lock = threading.Lock()
     # Progress is per server: an incomplete sweep never permits a new exchange.
     retained_cursors = {}
     # A completed multi-request sweep can authorize one following write,
@@ -781,10 +800,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if url.path == '/api/data':
                 params = parse_qs(url.query, keep_blank_values=True)
                 phase = params.get('phase', [self.headers.get('X-Bounty-Board-Phase', '')])[0]
-                # Only the read-only server opts in. Existing callers and all
-                # writer configurations retain the synchronous full response.
+                # Metadata and fixture writers retain the synchronous path.
+                # Collaborative report writes validate their source independently.
                 phased = (phase in ('summary', 'complete', 'identity') and not self.server.writer
-                          and collaboration is None and not report_autosave
                           and not experimental_fixture_publish)
                 before = root_snapshot() if phased else None
                 if phased and phase == 'identity':
@@ -795,7 +813,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     if phase == 'complete' and not portfolio_scan.acquire(blocking=False):
                         self.reply(503, {'error': 'portfolio_scan_busy'}); return
                     try:
-                        result: dict = discover(before[0], include_reports=phase != 'summary', inventory_only=phase == 'summary')
+                        result: dict = discover(before[0], report_autosave, include_reports=phase != 'summary', inventory_only=phase == 'summary')
                     finally:
                         if phase == 'complete':
                             portfolio_scan.release()
@@ -806,7 +824,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     result['reports_loading'] = phase == 'summary'
                     result['portfolio_unloaded'] = phase == 'summary'
                 else:
+                    before = root_snapshot() if self.server.writer_enabled else None
                     result = discover(root, report_autosave)
+                    if self.server.writer_enabled:
+                        if not before or root_snapshot() != before:
+                            self.reply(409, {'error': 'root_changed'}); return
+                        result['root_instance'] = before[2]
                 # Identity follows the effective canonical path, not report content.
                 # It is an opaque namespace, not a secret or authentication token.
                 try:
@@ -824,12 +847,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'collaboration': collaboration is not None,
                                           'report_autosave': report_autosave,
                                           'fixture_publish': experimental_fixture_publish}
-                if phased and phase == 'summary' and before:
-                    result['capabilities']['source_authoritative'] = False
+                if phased and before:
+                    result['capabilities']['source_authoritative'] = phase != 'summary'
                 self.reply(200, result)
                 return
             if url.path in ('/api/lane', '/api/lane-reports'):
-                if self.server.writer or collaboration is not None or report_autosave or experimental_fixture_publish:
+                if self.server.writer or experimental_fixture_publish:
                     self.reply(404, {'error': 'not_found'}); return
                 if not lane_reads.acquire(blocking=False):
                     self.reply(503, {'error': 'lane_read_busy'}); return
@@ -852,11 +875,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     warnings = []
                     findings = ledger(lane_dir, warnings)
                     if url.path == '/api/lane-reports':
-                        items = reports(lane_dir, warnings, findings)
+                        items = reports(lane_dir, warnings, findings, report_autosave)
                         if root_snapshot() != before:
                             self.reply(409, {'error': 'root_changed'}); return
                         self.reply(200, {'root_instance': before[2], 'family': family, 'program': program,
-                                         'lane': name, 'reports': items, 'warnings': warnings})
+                                         'lane': name, 'reports': items, 'warnings': warnings,
+                                         'source_authoritative': True})
                         return
                     entries = map_entries(lane_dir, warnings)
                     selected = {'name': name, 'findings': findings, 'map': entries,
@@ -865,7 +889,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                 'warnings': warnings, 'reports_unscanned': True}
                     if root_snapshot() != before:
                         self.reply(409, {'error': 'root_changed'}); return
-                    self.reply(200, {'root_instance': before[2], 'family': family, 'program': program, 'lane': selected})
+                    self.reply(200, {'root_instance': before[2], 'family': family, 'program': program, 'lane': selected,
+                                     'source_authoritative': True})
                 except (OSError, ValueError, UnicodeError):
                     if before and root_snapshot() != before:
                         self.reply(409, {'error': 'root_changed'})
@@ -936,7 +961,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     eligible = not generated_navigation(path, text)
                     self.reply(200, {'content': text, 'revision': revision,
                                      'editable': bool(report_autosave and eligible),
-                                     'collaboration_editable': eligible}, {'ETag': '"' + revision + '"'})
+                                     'collaboration_editable': eligible,
+                                     **({'root_instance': before[2], 'source_authoritative': True} if bound else {})}, {'ETag': '"' + revision + '"'})
                 except (OSError, ValueError, UnicodeError):
                     if bound and before and root_snapshot() != before:
                         self.reply(409, {'error': 'root_changed'})
@@ -969,6 +995,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.do_PUT()
 
         def do_PATCH(self):
+            with metadata_write_lock:
+                return self.patch_finding()
+
+        def patch_finding(self):
             import os
             import re
             import subprocess
@@ -987,9 +1017,11 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 16384:
                     raise ValueError('invalid length')
                 payload = json.loads(self.rfile.read(int(lengths[0])))
-                if not isinstance(payload, dict) or set(payload) != {'family', 'program', 'lane', 'fid', 'patch'}:
+                if not isinstance(payload, dict) or set(payload) != {'family', 'program', 'lane', 'fid', 'patch', 'expected_revision', 'root_instance'}:
                     raise ValueError('invalid payload')
                 family, program, lane, fid, patch = (payload[k] for k in ('family', 'program', 'lane', 'fid', 'patch'))
+                if any(not isinstance(payload[k], str) or not re.fullmatch(r'[a-f0-9]{64}', payload[k]) for k in ('expected_revision', 'root_instance')):
+                    raise ValueError('invalid precondition')
                 if (not isinstance(family, str) or family not in FAMILIES or not isinstance(lane, str) or lane not in FAMILIES[family] or
                     not isinstance(program, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', program) or
                     not isinstance(fid, str) or not re.fullmatch(r'[A-Za-z][0-9]{2,}', fid) or
@@ -1003,6 +1035,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             except (ValueError, UnicodeError, json.JSONDecodeError):
                 return self.reply(400, {'error': 'invalid_finding_patch'})
             lane_path = root / family / program / lane
+            before = root_snapshot()
+            if not before or before[2] != payload['root_instance']:
+                return self.reply(409, {'error': 'root_changed'})
             if any(path.is_symlink() or not path.is_dir() for path in (root, root / family, root / family / program, lane_path)):
                 return self.reply(404, {'error': 'finding_not_found'})
             layout_paths = [lane_path / p for p in (
@@ -1036,6 +1071,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             matches = [f for f in findings or [] if isinstance(f.get('fid'), str) and f['fid'].upper() == fid.upper()]
             if len(matches) != 1 or matches[0]['fid'] != fid:
                 return self.reply(404, {'error': 'finding_not_found'})
+            if root_snapshot() != before or matches[0]['metadata_revision'] != payload['expected_revision']:
+                return self.reply(409, {'error': 'finding_changed', 'message': 'Finding changed since it was loaded. Copy your pending value, refresh, and review before retrying.'})
             try:
                 with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
                     patchfile = Path(temp) / 'patch.json'
