@@ -35,7 +35,7 @@ window.BoardAPI = (() => {
       if(result?.finding?.fid!==body.findingId) throw new Error('Unverified finding');
       return {value:result.finding[field],revision:result.finding.metadata_revision};
     }
-    const {family,program,...legacyBody}=body;
+    const {family,program,expectedRevision,rootInstance,...legacyBody}=body;
     return request(cap.url, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(legacyBody)});
   }
   function normalize(data) {

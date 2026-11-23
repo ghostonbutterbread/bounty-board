@@ -558,6 +558,7 @@ test('coverage and report ownership remain readable across themes on mobile', as
 
 test('rationale drafts survive finding switches, navigation and refresh with unload warning', async () => {
   const page=await browser.newPage();const data=structuredClone(fixture);
+  data.root_instance='a'.repeat(64);
   data.programs[0].lanes[0].findings=[{fid:'F01',title:'First finding',severity_rationale:'First saved'}, {fid:'F02',title:'Second finding',severity_rationale:'Second saved'}];
   data.programs[0].lanes.push({name:'API',findings:[],coverage:[],reports:[],map:[],gadgets:[]});
   data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
@@ -601,6 +602,7 @@ test('a rationale draft remains copyable after the source root changes', async (
 
 test('a source change makes an untouched open rationale draft unsaved', async () => {
   const page=await browser.newPage();const data=structuredClone(fixture);
+  data.root_instance='a'.repeat(64);
   data.programs[0].lanes[0].findings[0].severity_rationale='Old source';
   data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));

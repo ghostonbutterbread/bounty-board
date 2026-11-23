@@ -18,7 +18,9 @@
   const reportsIncomplete = lane => (list(lane?.warnings)||[]).some(w=>typeof w==='string' && w.startsWith('reports_'));
   const reportWarning = warning => typeof warning==='string' && (warning.startsWith('reports_') || warning.startsWith('report_content_'));
   const mergeWarnings = (...groups) => [...new Set(groups.flat())];
-  const reportKey = (program, lane, id) => JSON.stringify([program,lane,String(id)]);
+  // Unknown instances are scoped to the current loaded snapshot, never to a
+  // different refresh. Existing drafts from them remain copy-only afterward.
+  const rationaleKey = (program,lane,id) => JSON.stringify([/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? ['instance',state.data.root_instance] : ['unidentified',state.unidentifiedRoot],program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
   const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
   let unidentifiedSequence=0;
@@ -371,7 +373,7 @@
     return `<select data-metadata="${key}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${cap?'aria-describedby="metadata-warning"':''} ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,v,v===value)).join('')}</select>`;
   }
   function rationale(row) {
-    const label=String(row.title||row.id||'finding'), edit=state.rationaleDrafts.get(reportKey(state.program,state.lane,row.id));
+    const label=String(row.title||row.id||'finding'), edit=state.rationaleDrafts.get(rationaleKey(state.program,state.lane,row.id));
     const writable=BoardAPI.capability(state.data,'findingMetadata')?.textFields?.includes('severity_rationale') && row.id != null;
     if(edit) return `<div class="rationale"><p>Saved rationale: <span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span></p><label>Unsaved draft — Severity rationale for ${esc(label)}<textarea data-rationale-input="${esc(row.id)}" aria-label="Severity rationale for ${esc(label)}" aria-describedby="metadata-warning" rows="3" ${state.metadataPending?'disabled':''}>${esc(edit.text)}</textarea></label>${writable?`<button class="button" data-rationale-save="${esc(row.id)}" aria-label="Save severity rationale for ${esc(label)}" aria-describedby="metadata-warning" ${state.metadataPending?'disabled':''}>Save rationale</button>`:'<p class="hint">Saving unavailable; copy this draft before leaving.</p>'} <button class="button subtle" data-rationale-cancel="${esc(row.id)}" ${state.metadataPending?'disabled':''}>Cancel</button></div>`;
     return `<div class="rationale"><span>Severity rationale: </span><span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span>${writable?` <button class="link-button" data-rationale-edit="${esc(row.id)}" aria-label="Edit severity rationale for ${esc(label)}" ${state.metadataPending?'disabled':''}>Edit rationale</button>`:''}</div>`;
@@ -962,8 +964,9 @@
     if(state.metadataPending && !app.querySelector('#metadata-message')) app.insertAdjacentHTML('afterbegin','<div class="message warning" role="status">Updating metadata; waiting for confirmation. Displayed values are the last loaded or confirmed values.</div>');
     if(state.metadataErrors.length) app.insertAdjacentHTML('afterbegin',state.metadataErrors.map(error=>`<div class="message warning" role="alert">${esc(error)}</div>`).join(''));
     if(state.metadataDrafts.size) app.insertAdjacentHTML('afterbegin',[...state.metadataDrafts.values()].map(d=>`<div class="message warning" role="alert">${esc(d.message)}<label>Pending ${esc(d.field)} value — copy before leaving<textarea readonly rows="2">${esc(d.value)}</textarea></label></div>`).join(''));
-    const hiddenRationales=[...state.rationaleDrafts.values()].filter(d=>state.view!=='program' || state.section!=='findings' || d.program!==state.program || d.lane!==state.lane || (d.rootInstance && d.rootInstance!==state.data?.root_instance) || !(rows('findings')||[]).some(r=>String(r.id)===d.id));
-    if(hiddenRationales.length) app.insertAdjacentHTML('afterbegin',hiddenRationales.map(d=>`<div class="message warning">Unsaved severity rationale for ${esc(d.program)} / ${esc(d.lane)} / ${esc(d.id)} from its original source.<label>Pending severity rationale — copy before leaving<textarea readonly rows="3">${esc(d.text)}</textarea></label></div>`).join(''));
+    const visibleRationales=new Set([...app.querySelectorAll('[data-rationale-input]')].map(el=>rationaleKey(state.program,state.lane,el.dataset.rationaleInput)));
+    const hiddenRationales=[...state.rationaleDrafts.entries()].filter(([key])=>!visibleRationales.has(key)).map(([,draft])=>draft);
+    if(hiddenRationales.length) app.insertAdjacentHTML('afterbegin',hiddenRationales.map(d=>`<div class="message warning">Unsaved severity rationale for ${esc(d.program)} / ${esc(d.lane)} / ${esc(d.id)}; source instance: ${esc(/^[a-f0-9]{64}$/.test(d.rootInstance || '') ? d.rootInstance : 'unknown')}.<label>Pending severity rationale — copy before leaving<textarea readonly rows="3">${esc(d.text)}</textarea></label></div>`).join(''));
     const source=app.querySelector('#report-source');
     if(source && typeof EasyMDE !== 'undefined') {
       // EasyMDE's own autosave removes empty values and clears data on submit;
@@ -1019,11 +1022,11 @@
     else if(target.dataset.section){state.section=target.dataset.section;render();}
     else if(target.hasAttribute('data-rationale-edit')){
       const row=(rows('findings')||[]).find(r=>String(r.id)===target.dataset.rationaleEdit);
-      if(row && !state.metadataPending){const key=reportKey(state.program,state.lane,row.id), text=String(row.severity_rationale??'');if(!state.rationaleDrafts.has(key))state.rationaleDrafts.set(key,{program:state.program,lane:state.lane,id:String(row.id),text,revision:row.metadata_revision,rootInstance:state.data?.root_instance});render();app.querySelector(`[data-rationale-input="${CSS.escape(String(row.id))}"]`)?.focus();}
+      if(row && !state.metadataPending){const key=rationaleKey(state.program,state.lane,row.id), text=String(row.severity_rationale??'');if(!state.rationaleDrafts.has(key))state.rationaleDrafts.set(key,{program:state.program,lane:state.lane,id:String(row.id),text,revision:row.metadata_revision,rootInstance:state.data?.root_instance});render();app.querySelector(`[data-rationale-input="${CSS.escape(String(row.id))}"]`)?.focus();}
     }
-    else if(target.hasAttribute('data-rationale-cancel')){state.rationaleDrafts.delete(reportKey(state.program,state.lane,target.dataset.rationaleCancel));render();}
+    else if(target.hasAttribute('data-rationale-cancel')){state.rationaleDrafts.delete(rationaleKey(state.program,state.lane,target.dataset.rationaleCancel));render();}
     else if(target.hasAttribute('data-rationale-save')){
-      const draftKey=reportKey(state.program,state.lane,target.dataset.rationaleSave), edit=state.rationaleDrafts.get(draftKey), row=(rows('findings')||[]).find(r=>String(r.id)===edit?.id);
+      const draftKey=rationaleKey(state.program,state.lane,target.dataset.rationaleSave), edit=state.rationaleDrafts.get(draftKey), row=(rows('findings')||[]).find(r=>String(r.id)===edit?.id);
       if(!edit || !row || state.metadataPending || edit.program!==state.program || edit.lane!==state.lane || !BoardAPI.capability(state.data,'findingMetadata')?.textFields?.includes('severity_rationale'))return;
       const family=currentProgram()?.family, name=currentProgram()?.name; state.metadataPending=true;render();
       try {
@@ -1050,7 +1053,7 @@
   });
   app.addEventListener('input',event=>{
     const el=event.target;
-    if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(reportKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
+    if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(rationaleKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
     if(el.id==='finding-search'){const pos=el.selectionStart;state.filters.query=el.value;render();const input=document.querySelector('#finding-search');input?.focus();input?.setSelectionRange(pos,pos);}
     if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}
   });

@@ -75,9 +75,10 @@ async function main() {
       const body={family:'web_bounty',program:'fictional.example',lane:'web',fid,patch:{severity:'LOW'},root_instance:data.root_instance,expected_revision:f.metadata_revision};
       const send=b=>fetch('/api/finding',{method:'PATCH',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify(b)}).then(r=>r.status);
       const {expected_revision,...missing}=body;
-      return [await send(missing),await send({...body,expected_revision:'0'.repeat(64)}),await send({...body,root_instance:'0'.repeat(64)})];
+      const {root_instance,...missingRoot}=body;
+      return [await send(missing),await send(missingRoot),await send({...body,expected_revision:'0'.repeat(64)}),await send({...body,root_instance:'0'.repeat(64)})];
     },fid);
-    assert.deepEqual(forged,[400,409,409]);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
+    assert.deepEqual(forged,[400,400,409,409]);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
     fs.renameSync(root,root+'-away');
     let received=page.waitForResponse(r=>r.url().endsWith('/api/finding')&&r.status()===409);
     await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
@@ -94,9 +95,39 @@ async function main() {
     assert.equal(requests.at(-1),404);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
     fs.writeFileSync(path,original);await page.getByRole('button',{name:'Refresh'}).click();
     await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM');
+    // Replace the directory at the same path with an independently copied
+    // synthetic root: same program/lane/FID, different directory inode.
+    const identity=async()=>page.evaluate(async()=>((await (await fetch('/api/data?phase=identity')).json()).root_instance));
+    const firstRoot=await identity(), firstInode=fs.statSync(root).ino, originalBytes=fs.readFileSync(path,'utf8'), writesBeforeSwap=fs.readFileSync(marker,'utf8');
+    await page.getByRole('button',{name:'Edit severity rationale for Synthetic fixture'}).click();
+    const text='</textarea><img src=x onerror="window.__metadata_xss=1">';
+    await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).fill(text);
+    await page.getByLabel('Search findings').fill('no match');
+    assert.equal(await page.getByLabel('Pending severity rationale — copy before leaving').inputValue(),text);
+    assert.equal(await page.evaluate(()=>window.__metadata_xss),undefined);
+    await page.getByLabel('Search findings').fill('');
+    fs.renameSync(root,root+'-old');fs.cpSync(root+'-old',root,{recursive:true});assert.notEqual(fs.statSync(root).ino,firstInode);
+    const secondRoot=await identity();assert.notEqual(firstRoot,secondRoot);assert.equal(finding().fid,fid);
+    await page.getByRole('button',{name:'Save severity rationale for Synthetic fixture'}).click();
+    await page.getByText(/Conflict: source root changed/).first().waitFor();
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),text);
+    assert.equal(fs.readFileSync(marker,'utf8'),writesBeforeSwap);assert.equal(fs.readFileSync(path,'utf8'),originalBytes);
+    await page.getByRole('button',{name:'Refresh'}).click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    assert.equal(await page.getByLabel('Pending severity rationale — copy before leaving').inputValue(),text);
+    assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'LOW');
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).count(),0);
+    await page.getByRole('button',{name:'Edit severity rationale for Synthetic fixture'}).click();
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),'Synthetic rationale');
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(await page.getByLabel('Pending severity rationale — copy before leaving').inputValue(),text);
+    assert.equal(fs.readFileSync(path,'utf8'),originalBytes);
+    fs.renameSync(root,root+'-replacement');fs.renameSync(root+'-old',root);assert.equal(await identity(),firstRoot);
+    await page.getByRole('button',{name:'Refresh'}).click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),text);
+    assert.equal(fs.readFileSync(path,'utf8'),originalBytes);
     fs.writeFileSync('/runboard/fail-writer','fail');await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
     await page.getByText(/Update failed or was not verified/).waitFor();assert.equal(requests.at(-1),502);
     assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'LOW');assert.equal(finding().severity,'MEDIUM');
+    assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),text);
     assert.equal(fs.readFileSync('/runboard/sentinel','utf8'),'untouched');
     console.log('PASS: real BBH stale/in-flight, missing root/FID, writer error; pending choices retained; refreshed HIGH, class, status, rationale; submission preserved',requests);
   } finally {if(browser)await browser.close();server.kill('SIGTERM');await once(server,'exit').catch(()=>{});}
