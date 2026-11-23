@@ -7,8 +7,8 @@
 - **Intended integration target:** `beta` (no merge, push, or deployment authorized here)
 - **Last updated:** 2026-11-23
 - **Owning feature branch/ref:** `fix/board-metadata-stale-edit`
-- **Latest immutable recovery checkpoint:** pending first feature commit
-- **Feature implementation commit(s):** pending first feature commit
+- **Latest immutable recovery checkpoint:** `a90f27640e4177469ba03b2aa68fed0c74b4e0df` (the branch tip includes a later dossier-only handoff commit)
+- **Feature implementation commit(s):** `a90f27640e4177469ba03b2aa68fed0c74b4e0df`
 - **Inspiration:** real browser → real BBH synthetic reproduction of stale LOW → external MEDIUM → stale HIGH overwrite.
 
 ## Intent and implemented contract
@@ -27,7 +27,7 @@ This is **early precondition detection, not atomic CAS**. Another Board process,
 - `python tests/safe_suite.py`: 156 selected tests passed, one skipped because its encoder-boundary fixture requires Python 3.12; exactly `test_backend.BackendTests.test_real_bbh_metadata_write_on_disposable_fixture` was excluded by the runner and identified before execution. Run in isolated network-none tmpfs; the distinct real BBH test above is not the same excluded Python test.
 - `python -m unittest discover -s tests -p test_dashboard_coverage.py -v` on isolated Python 3.12: 7 passed, including the encoder-boundary test skipped by the Python 3.14 suite.
 - Earlier suite attempts were retained in scratch logs: direct host-worktree bind caused unrelated Git merge-file failures due to its host-only Git pointer; extracted task archive resolved them. Later `read_file` signature change broke a browser fixture wrapper; the wrapper was corrected and the full npm selection rerun successfully. An early e2e assertion raced the rationale request; the corrected test waits for the confirmed UI state.
-- `git diff --check`: to be rerun on final staged tree. No upstream fetch: task explicitly pins local beta base and prohibits network in the test workflow; integration parent must reconcile current beta before any merge.
+- `git diff --cached --check` passed for the implementation commit. No upstream fetch: task explicitly pins local beta base and prohibits network in the test workflow; integration parent must reconcile current beta before any merge.
 
 ## Blockers and deferred work
 
@@ -38,9 +38,10 @@ This is **early precondition detection, not atomic CAS**. Another Board process,
 ## Interruption / resume handoff
 
 - **Owning feature branch/ref:** `fix/board-metadata-stale-edit`
-- **Latest immutable recovery checkpoint:** pending feature commit
-- **Exact resume point:** inspect staged diff, commit, record checkpoint, then parent reviews; no merge/push/deploy.
-- **Working-tree state:** task-owned uncommitted changes pending commit.
+- **Latest immutable recovery checkpoint:** `a90f27640e4177469ba03b2aa68fed0c74b4e0df`
+- **Feature implementation commit(s):** `a90f27640e4177469ba03b2aa68fed0c74b4e0df`
+- **Exact resume point:** parent independently reviews the full branch against the pinned base and reconciles beta; no merge/push/deploy authorized to this worker.
+- **Working-tree state at handoff:** clean after the dossier-only commit.
 
 ## Decision gates
 
