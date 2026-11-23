@@ -24,7 +24,12 @@
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
   const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
   let unidentifiedSequence=0;
+  let metadataDraftSequence=0;
+  let recoveryPathSequence=0;
+  const recoveryPaths=new Map();
   const rootIdentity = () => /^[a-f0-9]{64}$/.test(state.data?.root_identity || '') ? state.data.root_identity : null;
+  const recoveryPathKey = () => JSON.stringify([rootIdentity(),/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? ['instance',state.data.root_instance] : ['unidentified',state.unidentifiedRoot],state.program,state.lane]);
+  const validRecoveryPath = path => !!path && !path.startsWith('/') && !path.split('/').some(part=>!part || part==='.' || part==='..');
   const draftKey = (program,lane,id) => JSON.stringify([rootIdentity() || state.unidentifiedRoot,program,lane,String(id)]);
   let tabId, tabReloadRecovery=true, tabLockHeld=false;
   // Cloned sessions may inherit both window.name and sessionStorage, including
@@ -111,7 +116,7 @@
     }
     const draft=state.drafts.get(key);reconcileReport(draft,report);return draft;
   };
-  const hasUnsaved = () => state.metadataPending || state.metadataDrafts.size>0 || [...state.drafts.values()].some(d => d.hasDraft || d.storageError || d.storageBlocked) || state.rationaleDrafts.size>0;
+  const hasUnsaved = () => state.metadataPending || state.metadataDrafts.size>0 || recoveryPaths.size>0 || [...state.drafts.values()].some(d => d.hasDraft || d.storageError || d.storageBlocked) || state.rationaleDrafts.size>0;
   window.addEventListener('beforeunload', event => { if (hasUnsaved()) { event.preventDefault(); event.returnValue = ''; } });
   function applyTheme(value) { if (!['light','dark','dusk'].includes(value)) value = 'light'; document.documentElement.dataset.theme=value; theme.value=value; try { localStorage.setItem('bounty-board-theme',value); } catch {} }
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
@@ -440,7 +445,7 @@
   }
   function savedSharedRecovery() {
     if(!state.data?.capabilities?.collaboration)return '';
-    return `<section class="panel panel-pad"><h2>Recover saved drafts</h2><p class="hint">Deleted or renamed reports disappear from the picker. Enter the original path relative to this lane's reports folder. Find saved local drafts and pending requests in this browser, or look up a previously observed shared draft. Local recovery leaves the original intact; if the source is unavailable, it waits for the source to return. None of this saves a report file.</p><label for="saved-shared-path">Original report path</label> <input id="saved-shared-path" type="text" autocomplete="off"><button type="button" class="button" data-find-shared>Find saved shared draft</button><button type="button" class="button" data-find-local>Find saved local drafts</button><div data-shared-recovery role="status"></div><div data-local-recovery></div></section>`;
+    return `<section class="panel panel-pad"><h2>Recover saved drafts</h2><p class="hint">Deleted or renamed reports disappear from the picker. Enter the original path relative to this lane's reports folder. Find saved local drafts and pending requests in this browser, or look up a previously observed shared draft. Local recovery leaves the original intact; if the source is unavailable, it waits for the source to return. None of this saves a report file.</p><label for="saved-shared-path">Original report path</label> <input id="saved-shared-path" type="text" autocomplete="off" value="${esc(recoveryPaths.get(recoveryPathKey())?.value || '')}"><button type="button" class="button" data-discard-current-path>Discard path</button><button type="button" class="button" data-find-shared>Find saved shared draft</button><button type="button" class="button" data-find-local>Find saved local drafts</button><div data-shared-recovery role="status"></div><div data-local-recovery></div></section>`;
   }
   function reports() {
     const partial=reportsIncomplete(currentLane()) && Array.isArray(rows('reports'));
@@ -493,7 +498,7 @@
   }
   function findSavedDrafts(draft, box=app.querySelector('[data-draft-candidates]'), includeCurrent=false) {
     if(!box || !rootIdentity())return;
-    const scope={root:rootIdentity(),program:state.program,lane:state.lane};
+    const scope={root:rootIdentity(),instance:state.data?.root_instance,program:state.program,lane:state.lane};
     box.replaceChildren();
     const note=document.createElement('p');note.textContent='Saved drafts for this report are retained. A live tab cannot be recovered; copy its text instead. Recovery leaves the original untouched.';box.append(note);
     const base=`bounty-board-report-draft-v2:${draft.key}`, prefix=base+':';
@@ -516,7 +521,8 @@
           if(!navigator.locks || !tabReloadRecovery){status.textContent='Safe recovery is unavailable in this browser. Select and copy the draft text.';return;}
           try {
             await navigator.locks.request('bounty-board-tab:'+namespace,{ifAvailable:true},async lock=>{
-              if(!box.isConnected || rootIdentity()!==scope.root || state.program!==scope.program || state.lane!==scope.lane){status.textContent='Workspace changed. Find saved drafts again.';return;}
+              const identity=await BoardAPI.rootInstance();
+              if(!box.isConnected || identity.root_instance!==scope.instance || rootIdentity()!==scope.root || state.data?.root_instance!==scope.instance || state.program!==scope.program || state.lane!==scope.lane){status.textContent='Workspace changed. Find saved drafts again.';return;}
               if(!lock){status.textContent='This draft belongs to a live tab. Copy the text instead; no data was changed.';return;}
               if(localStorage.getItem('bounty-board-lock-owner:'+namespace)!=='locked'){status.textContent='This older or lockless draft cannot be safely claimed. Select and copy its text.';return;}
               if(localStorage.getItem(key)!==raw){status.textContent='The saved draft changed. Find saved drafts again.';return;}
@@ -951,6 +957,7 @@
   }
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
   function render() {
+    const oldPath=app.querySelector('#saved-shared-path'), focus=oldPath && document.activeElement===oldPath ? {key:oldPath.dataset.recoveryKey,start:oldPath.selectionStart,end:oldPath.selectionEnd,direction:oldPath.selectionDirection} : null;
     ++renderGeneration;
     if(editor){editor.toTextArea();editor=null;}
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
@@ -963,7 +970,11 @@
     else app.innerHTML=state.view==='dashboard'?dashboard():workspace();
     if(state.metadataPending && !app.querySelector('#metadata-message')) app.insertAdjacentHTML('afterbegin','<div class="message warning" role="status">Updating metadata; waiting for confirmation. Displayed values are the last loaded or confirmed values.</div>');
     if(state.metadataErrors.length) app.insertAdjacentHTML('afterbegin',state.metadataErrors.map(error=>`<div class="message warning" role="alert">${esc(error)}</div>`).join(''));
-    if(state.metadataDrafts.size) app.insertAdjacentHTML('afterbegin',[...state.metadataDrafts.values()].map(d=>`<div class="message warning" role="alert">${esc(d.message)}<label>Pending ${esc(d.field)} value — copy before leaving<textarea readonly rows="2">${esc(d.value)}</textarea></label></div>`).join(''));
+    if(state.metadataDrafts.size) app.insertAdjacentHTML('afterbegin',[...state.metadataDrafts.values()].map(d=>`<div class="message warning" role="alert">${esc(d.message)}<label>Pending ${esc(d.field)} value — copy before leaving<textarea readonly rows="2">${esc(d.value)}</textarea></label><button type="button" data-discard-metadata="${d.sequence}">Discard pending value</button></div>`).join(''));
+    const pathInput=app.querySelector('#saved-shared-path'), pathKey=recoveryPathKey();
+    if(pathInput){pathInput.dataset.recoveryKey=pathKey;if(focus?.key===pathKey){pathInput.focus();pathInput.setSelectionRange(focus.start,focus.end,focus.direction);}}
+    const hiddenPaths=[...recoveryPaths.entries()].filter(([key])=>!pathInput || key!==pathKey);
+    if(hiddenPaths.length)app.insertAdjacentHTML('afterbegin',hiddenPaths.map(([,p])=>`<div class="message warning">Recovery path retained for ${esc(p.program)} / ${esc(p.lane)}; source ${esc(p.source)}. Copy it before leaving.<label>Retained recovery path<textarea readonly rows="2">${esc(p.value)}</textarea></label><button type="button" data-discard-path="${p.sequence}">Discard retained path</button></div>`).join(''));
     const visibleRationales=new Set([...app.querySelectorAll('[data-rationale-input]')].map(el=>rationaleKey(state.program,state.lane,el.dataset.rationaleInput)));
     const hiddenRationales=[...state.rationaleDrafts.entries()].filter(([key])=>!visibleRationales.has(key)).map(([,draft])=>draft);
     if(hiddenRationales.length) app.insertAdjacentHTML('afterbegin',hiddenRationales.map(d=>`<div class="message warning">Unsaved severity rationale for ${esc(d.program)} / ${esc(d.lane)} / ${esc(d.id)}; source instance: ${esc(/^[a-f0-9]{64}$/.test(d.rootInstance || '') ? d.rootInstance : 'unknown')}.<label>Pending severity rationale — copy before leaving<textarea readonly rows="3">${esc(d.text)}</textarea></label></div>`).join(''));
@@ -998,11 +1009,15 @@
     }
     else if(target.hasAttribute('data-find-shared')){
       const box=app.querySelector('[data-shared-recovery]'), input=app.querySelector('#saved-shared-path');
-      const program=currentProgram(), lane=state.lane, path=input.value, root=rootIdentity();
-      box.replaceChildren();target.disabled=true;
+      const program=currentProgram(), lane=state.lane, path=input.value, root=rootIdentity(), snapshot=state.data;
+      box.replaceChildren();if(!validRecoveryPath(path)){box.textContent='Enter the original relative report path.';return;}target.disabled=true;
       try {
+        if(!root || !/^[a-f0-9]{64}$/.test(state.data?.root_instance || ''))throw new Error('Unknown source');
+        const identity=await BoardAPI.rootInstance();
+        if(!box.isConnected || input.value!==path || state.data!==snapshot || currentProgram()!==program || state.lane!==lane || identity.root_instance!==snapshot.root_instance)throw new Error('Source changed');
         const result=await BoardAPI.collaborationRead(program,lane,path,root,'recovery',{});
-        if(!box.isConnected)return;
+        const verified=await BoardAPI.rootInstance();
+        if(!box.isConnected || input.value!==path || state.data!==snapshot || currentProgram()!==program || state.lane!==lane || verified.root_instance!==snapshot.root_instance)throw new Error('Source changed');
         const message=document.createElement('p');
         message.textContent=result.source_status==='source_unavailable' ? 'Source unavailable. This is a saved shared draft, not saved to the report. Select and copy it.' : 'Source is available. This is a saved shared draft, not saved to the report. Select and copy it.';
         const label=document.createElement('label');label.textContent='Recovered shared draft';
@@ -1011,12 +1026,19 @@
       finally {if(target.isConnected)target.disabled=false;}
     }
     else if(target.hasAttribute('data-find-local')){
-      const path=app.querySelector('#saved-shared-path').value, box=app.querySelector('[data-local-recovery]');
-      if(!path || path.startsWith('/') || path.split('/').some(part=>!part || part==='.' || part==='..')){box.textContent='Enter the original relative report path.';return;}
+      const input=app.querySelector('#saved-shared-path'), path=input.value, box=app.querySelector('[data-local-recovery]'), snapshot=state.data, program=currentProgram(), lane=state.lane;
+      if(!rootIdentity() || !/^[a-f0-9]{64}$/.test(state.data?.root_instance || '')){box.textContent='Source identity unavailable. Copy the path and refresh before recovery.';return;}
+      if(!validRecoveryPath(path)){box.textContent='Enter the original relative report path.';return;}
+      box.textContent='Verifying source before finding saved drafts…';
+      try {const identity=await BoardAPI.rootInstance();if(!box.isConnected || input.value!==path || state.data!==snapshot || currentProgram()!==program || state.lane!==lane || identity.root_instance!==snapshot.root_instance)throw new Error('Source changed');}
+      catch {if(box.isConnected)box.textContent='Source changed or could not be verified. Copy the path and refresh before recovery.';return;}
       const report=reportById(path) || {id:path,content:null};
       findSavedDrafts(draftFor(report),box,true);
     }
     else if(target.hasAttribute('data-find-drafts')){const report=reportById(state.report);if(report)findSavedDrafts(draftFor(report));}
+    else if(target.hasAttribute('data-discard-metadata')){for(const [key,draft] of state.metadataDrafts)if(String(draft.sequence)===target.dataset.discardMetadata){state.metadataDrafts.delete(key);break;}render();}
+    else if(target.hasAttribute('data-discard-current-path')){recoveryPaths.delete(recoveryPathKey());render();}
+    else if(target.hasAttribute('data-discard-path')){for(const [key,path] of recoveryPaths)if(String(path.sequence)===target.dataset.discardPath){recoveryPaths.delete(key);break;}render();}
     else if(target.hasAttribute('data-go-program')){if(state.dashboardProgram && state.program!==state.dashboardProgram){++laneGeneration;state.program=state.dashboardProgram;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();}state.view='program';render();}
     else if(target.hasAttribute('data-open-program')){++laneGeneration;if(state.program!==target.dataset.openProgram)state.filters={severity:'',class:'',status:'',query:''};state.program=target.dataset.openProgram;state.lane='';state.report='';normalizeSelection();state.view='program';state.section='findings';render();}
     else if(target.dataset.section){state.section=target.dataset.section;render();}
@@ -1045,14 +1067,18 @@
     else if(el.dataset.filter){state.filters[el.dataset.filter]=el.value;render();}
     else if(el.dataset.metadata){
       const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
-      const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;state.metadataPending=true;render();
-      const draftKey=JSON.stringify([rootInstance,program,lane,id,key]);
-      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;state.metadataDrafts.delete(draftKey); state.metadataPending=false;render();}
-      catch (error) {state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);state.metadataDrafts.set(draftKey,{field:key,value,message:`Unsaved value for ${program} / ${lane} / ${id}${typeof rootInstance==='string'?` (source ${rootInstance.slice(0,8)})`:''}; refresh and review before retrying.`});render();}
+      const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
+      const origin=rationaleKey(program,lane,id);state.metadataPending=true;render();
+      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;state.metadataPending=false;render();}
+      catch (error) {const sequence=++metadataDraftSequence;state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);state.metadataDrafts.set(JSON.stringify([origin,key,sequence]),{sequence,field:key,value,message:`Unsaved value for ${program} / ${lane} / ${id}${/^[a-f0-9]{64}$/.test(rootInstance || '')?` (source ${rootInstance.slice(0,8)})`:' (source unknown)'}; refresh and review before retrying.`});render();}
     }
   });
   app.addEventListener('input',event=>{
     const el=event.target;
+    if(el.id==='saved-shared-path'){
+      const key=el.dataset.recoveryKey;if(!el.value)recoveryPaths.delete(key);
+      else {const existing=recoveryPaths.get(key);recoveryPaths.set(key,{sequence:existing?.sequence || ++recoveryPathSequence,value:el.value,program:state.program,lane:state.lane,source:/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? state.data.root_instance : 'unknown'});}
+    }
     if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(rationaleKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
     if(el.id==='finding-search'){const pos=el.selectionStart;state.filters.query=el.value;render();const input=document.querySelector('#finding-search');input?.focus();input?.setSelectionRange(pos,pos);}
     if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}

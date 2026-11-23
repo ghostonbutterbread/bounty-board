@@ -41,6 +41,44 @@ test('missing source: path-scoped local and pending recovery stays durable witho
   assert.equal(fs.readFileSync(report,'utf8'),'source\n');
 }));
 
+test('delayed real report index cannot erase an entered recovery path', {timeout:60000},()=>fixture('example',async({browser,base,report})=>{
+  const context=await browser.newContext(),source=await context.newPage();await open(source,base);await source.getByText(/Shared draft ready/).waitFor();
+  await source.route('**/api/collaboration?*',r=>r.request().method()==='POST'?r.abort():r.continue());
+  await source.locator('.CodeMirror textarea').focus();await source.keyboard.press('Control+A');await source.keyboard.insertText('barrier saved draft');await source.getByText(/Shared save failed/).waitFor();
+  await source.close();fs.renameSync(report,report+'.gone');
+  const page=await context.newPage();let release,releaseFull,arrived;const blocked=new Promise(r=>release=r),fullBlocked=new Promise(r=>releaseFull=r),seen=new Promise(r=>arrived=r);
+  await page.route('**/api/data?phase=complete*',async route=>{await fullBlocked;await route.continue().catch(()=>{});});
+  await page.route('**/api/lane-reports?*',async route=>{const response=await route.fetch();arrived();await blocked;await route.fulfill({response});});
+  try {
+    await open(page,base);await Promise.race([seen,new Promise((_,reject)=>setTimeout(()=>reject(Error('report index barrier not reached')),10000))]);const input=page.getByLabel('Original report path');await input.fill('nested/report.md');await input.focus();await input.evaluate(el=>el.setSelectionRange(3,6));
+    const applied=page.waitForResponse(r=>r.url().includes('/api/data?phase=identity')&&r.status()===200);release();await applied;
+    await page.waitForFunction(()=>!document.body.textContent.includes('Reports are loading.'));
+    assert.equal(await input.inputValue(),'nested/report.md');assert.deepEqual(await input.evaluate(el=>[document.activeElement===el,el.selectionStart,el.selectionEnd]),[true,3,6]);
+    await page.getByRole('button',{name:'Find saved local drafts'}).click();
+    const card=page.locator('[data-local-recovery] [data-recovery-candidate]').filter({hasText:'barrier saved draft'});
+    assert.equal(await card.getByLabel('Saved draft (select and copy if recovery is unavailable)').inputValue(),'barrier saved draft');
+  } finally {release();releaseFull();await context.close();}
+}));
+
+test('recovery paths remain copyable but never follow a replaced root or an in-flight lookup', {timeout:60000},()=>fixture('example',async({browser,base,root})=>{
+  const context=await browser.newContext(),page=await context.newPage();await open(page,base);await page.getByText(/Shared draft ready/).waitFor();
+  await page.evaluate(()=>{for(const name of ['getItem','setItem','removeItem','key'])Object.defineProperty(Storage.prototype,name,{value(){throw new Error('blocked');},configurable:true});});
+  const text='nested/</textarea><img src=x onerror=window.pwned=1>.md', input=page.getByLabel('Original report path');await input.fill(text);
+  let release,arrived;const gate=new Promise(r=>release=r),seen=new Promise(r=>arrived=r),calls=[];
+  await page.route('**/api/collaboration/recovery?*',async route=>{calls.push(route.request().url());const response=await route.fetch();arrived();await gate;await route.fulfill({response}).catch(()=>{});});
+  try {
+    await page.getByRole('button',{name:'Find saved shared draft'}).click();await Promise.race([seen,new Promise((_,reject)=>setTimeout(()=>reject(Error('lookup barrier not reached')),10000))]);
+    fs.renameSync(root,root+'.old');fs.mkdirSync(path.join(root,'web_bounty/example/web/reports/nested'),{recursive:true});fs.writeFileSync(path.join(root,'web_bounty/example/web/reports/nested/report.md'),'replacement\n');
+    await page.getByRole('button',{name:'Find saved local drafts'}).click();await page.locator('[data-local-recovery]').getByText(/source.*changed/i).waitFor();assert.equal(await input.inputValue(),text);
+    await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
+    assert.equal(await input.inputValue(),'');assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);assert.equal(await page.evaluate(()=>window.pwned),undefined);
+    release();await page.getByRole('button',{name:'Find saved shared draft'}).click();assert.equal(calls.length,1,'blank new-root lookup must not send the old path or any request');
+    await page.getByRole('button',{name:'Dashboard',exact:true}).click();assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);
+    await page.getByRole('button',{name:'Programs',exact:true}).click();await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);
+    await page.getByRole('button',{name:'Discard retained path'}).click();assert.equal(await page.getByLabel('Retained recovery path').count(),0);
+  } finally {release();await context.close();}
+}));
+
 test('pre-opt-in unsuffixed v2 drafts appear as copy-only including old shape', {timeout:60000},()=>fixture('example',async({browser,base})=>{
   const context=await browser.newContext(),page=await context.newPage();await open(page,base);await page.getByText(/Shared draft ready/).waitFor();
   const key=await page.evaluate(async()=>{const root=(await (await fetch('/api/data')).json()).root_identity;const key='bounty-board-report-draft-v2:'+JSON.stringify([root,'web_bounty/example','web','nested/report.md']);localStorage.setItem(key,JSON.stringify({version:1,text:'legacy text',original:'source\n',revision:null}));return key;});

@@ -73,3 +73,33 @@ test('storage failure, focused search and navigation retain the in-tab rationale
   await p.getByRole('button',{name:'Dashboard',exact:true}).click();assert.equal(await copy(p).inputValue(),'only in tab');
   await p.getByRole('button',{name:'Programs',exact:true}).click();await p.getByLabel('Search findings').fill('');assert.equal(await editor(p).inputValue(),'only in tab');await p.close();
 });
+
+test('late metadata failures remain individually copyable across navigation until discarded',async()=>{
+  instance='a'.repeat(64);const p=await browser.newPage();let release,arrived;const gate=new Promise(r=>release=r),seen=new Promise(r=>arrived=r);let calls=0;
+  await p.route('**/api/meta',async route=>{calls++;if(calls===1){arrived();await gate;}await route.fulfill({status:409,json:{error:'finding_changed'}}).catch(()=>{});});
+  try {
+    await open(p);await p.getByLabel('severity for Finding').selectOption('HIGH');await seen;
+    await p.getByRole('button',{name:'Dashboard',exact:true}).click();release();
+    const pending=p.getByLabel('Pending severity value — copy before leaving');await pending.waitFor();assert.equal(await pending.inputValue(),'HIGH');
+    await p.getByRole('button',{name:'Programs',exact:true}).click();await p.getByLabel('severity for Finding').selectOption('HIGH');
+    await p.waitForFunction(()=>document.querySelectorAll('[data-discard-metadata]').length===2);assert.deepEqual(await pending.allTextContents(),['HIGH','HIGH']);
+    await p.getByRole('button',{name:'Discard pending value'}).first().click();assert.equal(await pending.count(),1);assert.equal(await pending.inputValue(),'HIGH');
+  } finally {release();await p.close();}
+});
+
+for (const unidentified of [undefined,'malformed']) test(`failed metadata survives a successful edit after unidentified root refresh (${unidentified})`,async()=>{
+  instance=unidentified;const p=await browser.newPage();let count=0;
+  await p.route('**/api/meta',async route=>{
+    const body=route.request().postDataJSON();count++;
+    assert.deepEqual(Object.keys(body).sort(),['field','findingId','lane','programId','value'].sort());
+    await route.fulfill(count===1?{status:409,json:{error:'finding_changed'}}:{json:{value:body.value}});
+  });
+  await p.route('**/api/data*',route=>{const fixture=data();fixture.capabilities.findingMetadata.options.severity.push('MEDIUM');return route.fulfill({json:fixture});});
+  await open(p);await p.getByLabel('severity for Finding').selectOption('HIGH');
+  const pending=p.getByLabel('Pending severity value — copy before leaving');await pending.waitFor();assert.equal(await pending.inputValue(),'HIGH');
+  await refresh(p);assert.equal(await pending.inputValue(),'HIGH');
+  await p.getByLabel('severity for Finding').selectOption('MEDIUM');
+  await p.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM'&&!document.querySelector('[data-metadata=severity]')?.disabled);
+  assert.equal(count,2);assert.equal(await pending.inputValue(),'HIGH');
+  await p.getByLabel('Search findings').fill('not found');assert.equal(await pending.inputValue(),'HIGH');await p.close();
+});
