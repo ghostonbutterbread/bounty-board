@@ -19,7 +19,7 @@ read_lock = threading.Lock()
 read_count = 0
 
 
-def held_report(lane_root, relative):
+def held_report(lane_root, relative, **kwargs):
     global read_count
     if relative == 'reports/example.md':
         with read_lock:
@@ -32,7 +32,7 @@ def held_report(lane_root, relative):
                 if time.monotonic() >= deadline:
                     raise TimeoutError('report barrier not released')
                 time.sleep(.01)
-    return read_file(lane_root, relative)
+    return read_file(lane_root, relative, **kwargs)
 
 
 app.read_file = held_report

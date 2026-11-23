@@ -28,11 +28,11 @@ class PhaseExperiment(unittest.TestCase):
             reads = []
             original = app.read_file
 
-            def slow(lane_root, relative):
+            def slow(lane_root, relative, **kwargs):
                 if relative.startswith('reports/'):
                     reads.append(relative)
                     time.sleep(.005)
-                return original(lane_root, relative)
+                return original(lane_root, relative, **kwargs)
 
             with patch.object(app, 'read_file', side_effect=slow):
                 start = time.monotonic()

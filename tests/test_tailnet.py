@@ -38,6 +38,13 @@ class TailnetBoundaryTests(unittest.TestCase):
             base = {'Host': 'board.example.ts.net', 'Origin': 'https://board.example.ts.net',
                     'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}
             try:
+                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                conn.request('GET', '/api/data', headers={'Host': 'board.example.ts.net'})
+                data = json.loads(conn.getresponse().read()); conn.close()
+                payload = json.loads(body)
+                payload['root_instance'] = data['root_instance']
+                payload['expected_revision'] = data['programs'][0]['lanes'][0]['findings'][0]['metadata_revision']
+                body = json.dumps(payload)
                 for changed in ({'Origin': 'https://evil.test'}, {'Host': 'evil.test'},
                                 {'Sec-Fetch-Site': 'cross-site'}, {'Content-Type': 'text/plain'},
                                 {'X-Requested-With': 'evil'}):
