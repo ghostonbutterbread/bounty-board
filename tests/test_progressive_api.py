@@ -85,16 +85,40 @@ class ProgressiveAPI(unittest.TestCase):
         self.assertEqual(len(result['programs'][0]['lanes'][0]['reports']), 1)
         self.assertEqual(result, self.get())
 
-    def test_collaboration_autosave_mode_ignores_summary_and_remains_full(self):
+    def test_collaboration_autosave_summary_and_selected_reports(self):
         (self.lane / 'reports').mkdir()
         (self.lane / 'reports/test.md').write_text('# Test')
+        (self.lane / 'reports/nav.md').write_text('<!-- generated: bounty-core-report-navigation -->\n# Index')
         self.start(collaboration_dir=Path(self.tmp.name) / 'collaboration', report_autosave=True)
-        result = self.get('?phase=summary')
-        self.assertNotIn('reports_loading', result)
-        self.assertTrue(result['capabilities']['collaboration'])
-        self.assertTrue(result['capabilities']['report_autosave'])
-        self.assertEqual(len(result['programs'][0]['lanes'][0]['reports']), 1)
-        self.assertEqual(result, self.get())
+        summary = self.get('?phase=summary')
+        self.assertTrue(summary['reports_loading'])
+        self.assertFalse(summary['capabilities']['source_authoritative'])
+        self.assertTrue(summary['capabilities']['collaboration'])
+        self.assertTrue(summary['capabilities']['report_autosave'])
+        base = f'http://127.0.0.1:{self.server.server_port}'
+        query = f'root_instance={summary["root_instance"]}&family=web_bounty&program=alpha&lane=web'
+        with urlopen(base + '/api/lane?' + query, timeout=5) as response:
+            selected = json.load(response)
+            self.assertEqual(selected['lane']['findings'][0]['fid'], 'A')
+            self.assertTrue(selected['source_authoritative'])
+        with urlopen(base + '/api/lane-reports?' + query, timeout=5) as response:
+            selected_reports = json.load(response)
+            self.assertTrue(selected_reports['source_authoritative'])
+            indexed = {r['path']: r for r in selected_reports['reports']}
+        self.assertTrue(indexed['test.md']['editable'])
+        self.assertFalse(indexed['nav.md']['editable'])
+        self.assertFalse(indexed['nav.md']['collaboration_editable'])
+        with urlopen(base + '/api/report?' + query + '&path=test.md', timeout=5) as response:
+            body = json.load(response)
+        self.assertTrue(body['source_authoritative'])
+        self.assertTrue(body['editable'])
+        self.assertEqual(body['root_instance'], summary['root_instance'])
+        full = self.get('?phase=complete&root_instance=' + summary['root_instance'])
+        self.assertTrue(full['capabilities']['source_authoritative'])
+        indexed = {r['path']: r for r in full['programs'][0]['lanes'][0]['reports']}
+        self.assertTrue(indexed['test.md']['editable'])
+        self.assertFalse(indexed['nav.md']['editable'])
+        self.assertNotIn('reports_loading', self.get())
 
     def test_missing_root_uses_existing_unavailable_response(self):
         self.root.rename(self.root.with_name('old'))

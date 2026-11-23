@@ -148,7 +148,7 @@
     try {
       const result=await BoardAPI.lane(program,laneName,snapshot.root_instance);
       if(!current())return;
-      if(result.root_instance!==snapshot.root_instance || result.family!==program.family || result.program!==program.name || result.lane?.name!==laneName)throw new Error('Stale lane');
+      if(result.root_instance!==snapshot.root_instance || result.family!==program.family || result.program!==program.name || result.lane?.name!==laneName || (snapshot.capabilities?.collaboration && result.source_authoritative!==true))throw new Error('Stale lane');
       const apply=async()=>{
         if(!current())return;
         const check=++applyGeneration, view=renderGeneration;
@@ -181,7 +181,7 @@
     try {
       const result=await BoardAPI.laneReports(program,laneName,snapshot.root_instance);
       if(!current())return;
-      if(result.root_instance!==snapshot.root_instance || result.family!==program.family || result.program!==program.name || result.lane!==laneName || !(result.reports===null || Array.isArray(result.reports)))throw new Error('Stale report index');
+      if(result.root_instance!==snapshot.root_instance || result.family!==program.family || result.program!==program.name || result.lane!==laneName || !(result.reports===null || Array.isArray(result.reports)) || (snapshot.capabilities?.collaboration && result.source_authoritative!==true))throw new Error('Stale report index');
       const identity=await BoardAPI.rootInstance();
       if(!current())return;
       if(identity.root_instance!==snapshot.root_instance)throw new Error('Root changed');
@@ -206,7 +206,7 @@
     try {
       const full=await BoardAPI.load('complete',summary.root_instance);
       if(generation!==loadGeneration || state.data!==summary)return;
-      if(!full || !Array.isArray(full.programs) || full.reports_loading!==false || full.root_identity!==summary.root_identity || full.root_instance!==summary.root_instance)throw new Error('Stale report snapshot');
+      if(!full || !Array.isArray(full.programs) || full.reports_loading!==false || full.root_identity!==summary.root_identity || full.root_instance!==summary.root_instance || (summary.capabilities?.collaboration && full.capabilities?.source_authoritative!==true))throw new Error('Stale report snapshot');
       const apply=async()=>{
         if(generation!==loadGeneration || state.data!==summary)return;
         const check=++applyGeneration, view=renderGeneration;
@@ -459,6 +459,7 @@
         report.loadState='loading';const program=currentProgram(), lane=state.lane, snapshot=state.data, selection=laneGeneration;
         BoardAPI.report(program,lane,report.path,snapshot?.portfolio_unloaded ? snapshot.root_instance : undefined).then(async result=>{
           if(typeof result.content!=='string')throw new Error('Invalid report');
+          if(snapshot?.portfolio_unloaded && snapshot.capabilities?.collaboration && (result.source_authoritative!==true || result.root_instance!==snapshot.root_instance))throw new Error('Non-authoritative report');
           if(snapshot?.portfolio_unloaded && (await BoardAPI.rootInstance()).root_instance!==snapshot.root_instance)throw new Error('Root changed');
           if(state.data!==snapshot || selection!==laneGeneration){delete report.loadState;return;}
           report.content=result.content;report.revision=result.revision;
@@ -470,6 +471,12 @@
       }
       if(report.loadState!=='error') return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Loading report…</div></section>`;
       if(!draftFor(report).hasDraft) return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">Report could not be loaded. Refresh the workspace to retry.</div></section>`;
+      // A retained local draft is not evidence that the partial report body is
+      // current. Preserve it for copying, but do not start collaborative writes.
+      if(state.data?.portfolio_unloaded && state.data?.capabilities?.collaboration){
+        const draft=draftFor(report);
+        return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="message warning">Report could not be verified. Your retained draft is read-only; copy it and refresh to retry.</div><label for="report-source">Retained draft</label><textarea id="report-source" readonly>${esc(draft.text)}</textarea></section>`;
+      }
     }
     const draft=draftFor(report);
     if(reportReadOnly(draft)) {

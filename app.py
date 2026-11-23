@@ -781,10 +781,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if url.path == '/api/data':
                 params = parse_qs(url.query, keep_blank_values=True)
                 phase = params.get('phase', [self.headers.get('X-Bounty-Board-Phase', '')])[0]
-                # Only the read-only server opts in. Existing callers and all
-                # writer configurations retain the synchronous full response.
+                # Metadata and fixture writers retain the synchronous path.
+                # Collaborative report writes validate their source independently.
                 phased = (phase in ('summary', 'complete', 'identity') and not self.server.writer
-                          and collaboration is None and not report_autosave
                           and not experimental_fixture_publish)
                 before = root_snapshot() if phased else None
                 if phased and phase == 'identity':
@@ -795,7 +794,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     if phase == 'complete' and not portfolio_scan.acquire(blocking=False):
                         self.reply(503, {'error': 'portfolio_scan_busy'}); return
                     try:
-                        result: dict = discover(before[0], include_reports=phase != 'summary', inventory_only=phase == 'summary')
+                        result: dict = discover(before[0], report_autosave, include_reports=phase != 'summary', inventory_only=phase == 'summary')
                     finally:
                         if phase == 'complete':
                             portfolio_scan.release()
@@ -824,12 +823,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'collaboration': collaboration is not None,
                                           'report_autosave': report_autosave,
                                           'fixture_publish': experimental_fixture_publish}
-                if phased and phase == 'summary' and before:
-                    result['capabilities']['source_authoritative'] = False
+                if phased and before:
+                    result['capabilities']['source_authoritative'] = phase != 'summary'
                 self.reply(200, result)
                 return
             if url.path in ('/api/lane', '/api/lane-reports'):
-                if self.server.writer or collaboration is not None or report_autosave or experimental_fixture_publish:
+                if self.server.writer or experimental_fixture_publish:
                     self.reply(404, {'error': 'not_found'}); return
                 if not lane_reads.acquire(blocking=False):
                     self.reply(503, {'error': 'lane_read_busy'}); return
@@ -852,11 +851,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     warnings = []
                     findings = ledger(lane_dir, warnings)
                     if url.path == '/api/lane-reports':
-                        items = reports(lane_dir, warnings, findings)
+                        items = reports(lane_dir, warnings, findings, report_autosave)
                         if root_snapshot() != before:
                             self.reply(409, {'error': 'root_changed'}); return
                         self.reply(200, {'root_instance': before[2], 'family': family, 'program': program,
-                                         'lane': name, 'reports': items, 'warnings': warnings})
+                                         'lane': name, 'reports': items, 'warnings': warnings,
+                                         'source_authoritative': True})
                         return
                     entries = map_entries(lane_dir, warnings)
                     selected = {'name': name, 'findings': findings, 'map': entries,
@@ -865,7 +865,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                 'warnings': warnings, 'reports_unscanned': True}
                     if root_snapshot() != before:
                         self.reply(409, {'error': 'root_changed'}); return
-                    self.reply(200, {'root_instance': before[2], 'family': family, 'program': program, 'lane': selected})
+                    self.reply(200, {'root_instance': before[2], 'family': family, 'program': program, 'lane': selected,
+                                     'source_authoritative': True})
                 except (OSError, ValueError, UnicodeError):
                     if before and root_snapshot() != before:
                         self.reply(409, {'error': 'root_changed'})
@@ -936,7 +937,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     eligible = not generated_navigation(path, text)
                     self.reply(200, {'content': text, 'revision': revision,
                                      'editable': bool(report_autosave and eligible),
-                                     'collaboration_editable': eligible}, {'ETag': '"' + revision + '"'})
+                                     'collaboration_editable': eligible,
+                                     **({'root_instance': before[2], 'source_authoritative': True} if bound else {})}, {'ETag': '"' + revision + '"'})
                 except (OSError, ValueError, UnicodeError):
                     if bound and before and root_snapshot() != before:
                         self.reply(409, {'error': 'root_changed'})

@@ -135,7 +135,9 @@ test('a saved notice is invalidated when reload observes a later external change
 // Adapter injects the policy that the sibling backend will advertise.
 test('backend editability disables collaborative editor and source writes only for denied reports', {timeout:30000},()=>fixture(async({browser,base,report})=>{
   const page=await browser.newPage();page.setDefaultTimeout(6000);let posts=0;
-  await page.route('**/api/data',async route=>{const response=await route.fetch(),body=await response.json();for(const item of body.programs[0].lanes[0].reports)item.kind=item.path==='example.md'?'generated_navigation':'generated_evidence';await route.fulfill({response,json:body});});
+  const classify=items=>{for(const item of items || [])item.kind=item.path==='example.md'?'generated_navigation':'generated_evidence';};
+  await page.route('**/api/data*',async route=>{const response=await route.fetch(),body=await response.json();for(const program of body.programs || [])for(const lane of program.lanes || [])classify(lane.reports);await route.fulfill({response,json:body});});
+  await page.route('**/api/lane-reports?*',async route=>{const response=await route.fetch(),body=await response.json();classify(body.reports);await route.fulfill({response,json:body});});
   await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=!route.request().url().includes('example.md');body.collaboration_editable=body.editable;await route.fulfill({response,json:body});});
   page.on('request',req=>{if(req.method()==='POST'&&req.url().includes('/api/collaboration?'))posts++;});
   await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
