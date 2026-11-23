@@ -31,6 +31,7 @@ async function main() {
     const [chunk]=await once(server.stdout,'data'); const port=Number(String(chunk).trim()); assert(port>0);
     browser=await chromium.launch({headless:true,executablePath:'/chrome/chrome',args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-background-networking']});
     const page=await browser.newPage();page.setDefaultTimeout(30000);
+    const pendingValues=()=>page.getByLabel('Pending severity value — copy before leaving').evaluateAll(nodes=>nodes.map(node=>node.value));
     const requests=[];page.on('response',r=>{if(r.url().endsWith('/api/finding'))requests.push(r.status());});
     await page.goto(`http://127.0.0.1:${port}`);await page.getByRole('button',{name:'Programs',exact:true}).click();
     const severity=page.getByLabel('severity for Synthetic fixture');await severity.waitFor();assert.equal(await severity.inputValue(),'LOW');
@@ -48,6 +49,7 @@ async function main() {
     await page.getByLabel('severity for Synthetic fixture').selectOption('HIGH');
     await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='HIGH'&&!document.querySelector('[data-metadata=severity]')?.disabled);
     assert.equal(finding().severity,'HIGH');assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,1);
+    assert.deepEqual(await pendingValues(),['HIGH']);
     let release, started;const gate=new Promise(r=>{release=r;});const arrived=new Promise(r=>{started=r;});
     const hold=async route=>{started();await gate;await route.continue();};
     await page.route('**/api/finding',hold);
@@ -83,7 +85,8 @@ async function main() {
     let received=page.waitForResponse(r=>r.url().endsWith('/api/finding')&&r.status()===409);
     await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
     await received;
-    await page.getByLabel('Pending severity value — copy before leaving').waitFor();
+    await page.waitForFunction(()=>document.querySelectorAll('[data-discard-metadata]').length>=3);
+    assert.deepEqual(await pendingValues(),['HIGH','LOW']);
     await page.getByText(/Conflict: source root changed/).waitFor();
     assert.equal(requests.at(-1),409);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
     fs.renameSync(root+'-away',root);await page.getByRole('button',{name:'Refresh'}).click();
@@ -114,7 +117,7 @@ async function main() {
     assert.equal(fs.readFileSync(marker,'utf8'),writesBeforeSwap);assert.equal(fs.readFileSync(path,'utf8'),originalBytes);
     await page.getByRole('button',{name:'Refresh'}).click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.equal(await page.getByLabel('Pending severity rationale — copy before leaving').inputValue(),text);
-    assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'LOW');
+    assert.deepEqual(await pendingValues(),['HIGH','LOW','LOW']);
     assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).count(),0);
     await page.getByRole('button',{name:'Edit severity rationale for Synthetic fixture'}).click();
     assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),'Synthetic rationale');
@@ -126,7 +129,7 @@ async function main() {
     assert.equal(fs.readFileSync(path,'utf8'),originalBytes);
     fs.writeFileSync('/runboard/fail-writer','fail');await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
     await page.getByText(/Update failed or was not verified/).waitFor();assert.equal(requests.at(-1),502);
-    assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'LOW');assert.equal(finding().severity,'MEDIUM');
+    assert.deepEqual(await pendingValues(),['HIGH','LOW','LOW','LOW']);assert.equal(finding().severity,'MEDIUM');
     assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),text);
     assert.equal(fs.readFileSync('/runboard/sentinel','utf8'),'untouched');
     console.log('PASS: real BBH stale/in-flight, missing root/FID, writer error; pending choices retained; refreshed HIGH, class, status, rationale; submission preserved',requests);
