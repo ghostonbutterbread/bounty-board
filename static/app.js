@@ -22,9 +22,30 @@
   // different refresh. Existing drafts from them remain copy-only afterward.
   const rationaleKey = (program,lane,id) => JSON.stringify([/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? ['instance',state.data.root_instance] : ['unidentified',state.unidentifiedRoot],program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
+  // Module navigation seam: same invariants as the data-open-program / selector handlers
+  // (laneGeneration bump, filter reset on program or lane change). Returns false for an unknown program or lane.
+  function navigate(target={}) {
+    const wanted=target.program==null?state.program:String(target.program);
+    const program=programs().find(p=>String(p.id)===wanted);
+    if(!program)return false;
+    const lanes=list(program.lanes)||[];
+    if(target.lane!=null && !lanes.some(l=>String(l.name)===String(target.lane)))return false;
+    const freshFilters=()=>({severity:'',class:'',status:'',query:''});
+    if(wanted!==state.program){++laneGeneration;state.program=wanted;state.lane='';state.report='';state.filters=freshFilters();}
+    if(target.lane!=null && String(target.lane)!==state.lane){++laneGeneration;state.lane=String(target.lane);state.report='';state.filters=freshFilters();}
+    normalizeSelection();
+    if(target.section!=null){if(!sections.some(([key])=>key===target.section))return false;state.section=target.section;}
+    else if(target.finding!=null)state.section='findings';
+    else if(target.report!=null)state.section='reports';
+    if(target.report!=null)state.report=String(target.report);
+    if(target.finding!=null)state.filters=freshFilters();
+    state.view=target.view==='dashboard'?'dashboard':'program';
+    render();
+    return true;
+  }
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
   // window.BoardModules and mount into host elements after every render.
-  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, api:window.BoardAPI});
+  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate, api:window.BoardAPI});
   window.BoardModules = window.BoardModules || [];
   window.registerBoardModule = module => {window.BoardModules.push(module);try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}};
   const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
@@ -392,7 +413,7 @@
     const all=rows('findings'); if (!all) return unavailable('Findings ledger');
     const f=state.filters, query=f.query.trim().toLowerCase();
     const filtered=all.filter(r=>['severity','class','status'].every(k=>!f[k]||String(r[k]??'')===f[k]) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query))));
-    const body=filtered.map(r=>`<tr><td><strong>${esc(r.title||'Untitled finding')}</strong><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission?.state ? `<span class="id">Submission state: ${esc(r.submission.state)}</span>` : ''}${r.submission?.result ? `<span class="id">Submission result: ${esc(r.submission.result)}</span>` : ''}${r.submission_status ? `<span class="id">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="id">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}</td><td>${metadataCell(r,'severity')}${rationale(r)}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td></tr>`).join('');
+    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}"><td><strong>${esc(r.title||'Untitled finding')}</strong><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission?.state ? `<span class="id">Submission state: ${esc(r.submission.state)}</span>` : ''}${r.submission?.result ? `<span class="id">Submission result: ${esc(r.submission.result)}</span>` : ''}${r.submission_status ? `<span class="id">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="id">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}</td><td>${metadataCell(r,'severity')}${rationale(r)}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
     return `<section class="panel"><div class="panel-pad"><h2>Findings ledger</h2><p class="hint">Filter the findings in this lane.</p>${cap?'<div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div>':''}</div><div class="filters">${filterControl('severity','severities',all)}${filterControl('class','classes',all)}${filterControl('status','statuses',all)}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}"><span class="muted">${filtered.length} of ${all.length}</span></div>${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr><th>Finding</th><th>Severity</th><th>Class</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></div>`:'<div class="state">No findings match these filters.</div>'}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
   }
