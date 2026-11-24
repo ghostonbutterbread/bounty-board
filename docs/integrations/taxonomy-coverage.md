@@ -45,7 +45,12 @@ Not done because the data does not support it: per-feature rollups beyond host/k
 
 ## Evidence (exact runs, synthetic data only)
 
-See the final section filled in at the end of this file.
+Run in this worktree, synthetic fixtures only, machine shared with other agents:
+
+- `python3 tests/safe_suite.py` (includes the 6 new `tests/test_taxonomy.py` tests): Ran 186, OK, 1 skipped (the excluded real-BBH test is the skip policy of the suite).
+- `npm test` (existing 14 files, concurrency 1): 115 tests, 114 pass, 1 fail. The failure, `manual refresh supersedes an older held full response` in `progressive-races.synthetic.test.cjs`, was a 30 s timeout under load; the same file re-run alone passes 16 of 16. Not caused by this branch as far as shown, but not proven on the base commit.
+- New, run separately: `static/tests/taxonomy.test.cjs` 5 pass; `static/tests/coverage-drilldown.test.cjs` 8 pass; `static/tests/taxonomy-coverage.synthetic.test.cjs` (browser, real server, real SQLite) 1 pass.
+- Real-data check (read-only): rules map 76.7% of 361 finding class occurrences (277); 89.6% of the 309 non-placeholder ones. 99.1% of 5,545 coverage rows.
 
 ## Gaps and follow-ups
 
