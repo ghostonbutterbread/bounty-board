@@ -25,9 +25,27 @@
   // different refresh. Existing drafts from them remain copy-only afterward.
   const rationaleKey = (program,lane,id) => JSON.stringify([/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? ['instance',state.data.root_instance] : ['unidentified',state.unidentifiedRoot],program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
+  // Module navigation seam (ctx.navigate, used by search and other modules).
+  // Validates the target, then goes through the one app navigate() so the URL
+  // hash, back/forward, laneGeneration, filter reset and highlight all apply.
+  // {finding} opens Findings with that row highlighted (filters cleared);
+  // {report} opens Reports on it. Returns false for an unknown target.
+  function moduleNavigate(target={}) {
+    if(!target || typeof target!=='object' || !state.data)return false;
+    if(target.view==='dashboard'){navigate({view:'dashboard'});return true;}
+    const wanted=target.program==null ? state.program : String(target.program);
+    const program=programs().find(p=>String(p.id)===wanted);if(!program)return false;
+    const lanes=list(program.lanes)||[];
+    if(target.lane!=null && !lanes.some(l=>String(l.name)===String(target.lane)))return false;
+    const section=target.section!=null ? String(target.section) : target.finding!=null ? 'findings' : target.report!=null ? 'reports' : undefined;
+    if(section!=null && !sections.some(([key])=>key===section))return false;
+    if(target.finding!=null)state.filters=emptyFilters();
+    navigate({view:'program',program:wanted,lane:target.lane!=null ? String(target.lane) : undefined,section,report:target.report!=null ? String(target.report) : undefined,highlight:target.finding!=null ? String(target.finding) : (target.highlight ?? '')});
+    return true;
+  }
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
   // window.BoardModules and mount into host elements after every render.
-  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, api:window.BoardAPI, ui:window.BoardUI});
+  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, api:window.BoardAPI, ui:window.BoardUI});
   window.BoardModules = window.BoardModules || [];
   window.registerBoardModule = module => {window.BoardModules.push(module);try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}};
   // ---- Presentation helpers (severity scale, badges, submission state) ----
