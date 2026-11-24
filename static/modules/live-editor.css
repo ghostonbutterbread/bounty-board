@@ -1,0 +1,28 @@
+/* Live report editor module. Uses only theme custom properties. */
+.live-editor{display:grid;gap:8px;margin-top:10px}
+.live-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:30px}
+.live-bar-actions{margin-left:auto;display:flex;gap:6px}
+.live-pill{display:inline-block;padding:2px 10px;border:1px solid var(--border);border-radius:999px;font-size:12px;font-weight:700;color:var(--muted);background:var(--panel)}
+.live-pill[data-state="saving"],.live-pill[data-state="unsaved"]{color:var(--accent);border-color:var(--accent)}
+.live-pill[data-state="merged"],.live-pill[data-state="saved"]{color:var(--accent);background:var(--accent-soft)}
+.live-pill[data-state="conflict"],.live-pill[data-state="offline"]{color:var(--warning);background:var(--warning-bg);border-color:var(--warning)}
+.live-note{min-height:1em}
+.live-editor .message{display:block}
+.live-editor .message .button{margin:4px 2px 0 0}
+.live-editor .message textarea{display:block;width:100%;margin:6px 0}
+.live-conflict-list{margin:6px 0;padding-left:20px}
+.live-editor .CodeMirror .live-conflict-marker{background:var(--warning-bg)}
+.live-editor .CodeMirror .live-conflict-mine{background:var(--accent-soft)}
+.live-editor .CodeMirror .live-conflict-saved,.live-editor .CodeMirror .live-conflict-base{background:var(--table)}
+.live-readonly .editor-toolbar{display:none}
+.live-review,.live-history-view{margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
+.live-preview{max-height:320px;overflow:auto;padding:8px 10px;margin:6px 0;border:1px solid var(--border);border-radius:5px;background:var(--panel);color:var(--ink)}
+.live-history{border:1px solid var(--border);border-radius:7px;padding:12px;background:var(--top)}
+.live-history-head{display:flex;justify-content:space-between;align-items:center}
+.live-history-list{list-style:none;margin:6px 0;padding:0;max-height:280px;overflow:auto}
+.live-history-list li{padding:3px 0}
+.live-history-entry{border:0;background:none;padding:2px 4px;color:var(--ink);text-decoration:underline;text-decoration-color:var(--border)}
+.live-history-entry.active{font-weight:700;background:var(--accent-soft);border-radius:4px}
+/* style.css has a global .preview panel rule that also matches EasyMDE's
+   "preview" toolbar button; undo it inside the live editor toolbar. */
+.live-editor .editor-toolbar button.preview{min-height:0;height:30px;padding:0;border:1px solid transparent;border-radius:3px;line-height:normal}
