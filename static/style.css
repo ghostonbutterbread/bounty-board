@@ -32,7 +32,7 @@
   --success:#176c30;--success-soft:#e6f4ea;--warning:#8a5300;--warning-soft:#fdf3e1;--danger:#b42318;--danger-soft:#fdecea;--info:#0b62c4;--info-soft:#e8f1fc;
   --sev-exceptional:#a3175f;--sev-critical:#b42318;--sev-high:#a1400a;--sev-medium:#8a6100;--sev-low:#0b62c4;--sev-info:#4f5965;--sev-na:#58626d;--sev-unknown:#58626d;
   --shadow-sm:0 1px 2px rgba(23,32,44,.05);--shadow-md:0 2px 8px rgba(23,32,44,.07),0 1px 2px rgba(23,32,44,.05);--shadow-lg:0 12px 32px rgba(23,32,44,.14),0 2px 6px rgba(23,32,44,.06);
-  --focus:#2f81f7;--overlay:rgba(23,32,44,.32);--skeleton:#eceef1;--skeleton-hi:#f6f7f9;
+  --focus:#2f81f7;--overlay:rgba(23,32,44,.5);--skeleton:#eceef1;--skeleton-hi:#f6f7f9;
 }
 [data-theme="dark"]{
   color-scheme:dark;
@@ -43,7 +43,7 @@
   --success:#56c271;--success-soft:#14301d;--warning:#e9b04f;--warning-soft:#33280f;--danger:#ff7b72;--danger-soft:#3a1715;--info:#6cb6ff;--info-soft:#132a42;
   --sev-exceptional:#f17ab5;--sev-critical:#ff7b72;--sev-high:#f0954f;--sev-medium:#e3b341;--sev-low:#6cb6ff;--sev-info:#aab3bc;--sev-na:#8f99a3;--sev-unknown:#8f99a3;
   --shadow-sm:0 1px 2px rgba(0,0,0,.3);--shadow-md:0 2px 8px rgba(0,0,0,.35);--shadow-lg:0 14px 36px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.35);
-  --focus:#58a6ff;--overlay:rgba(0,0,0,.5);--skeleton:#1d2328;--skeleton-hi:#252c33;
+  --focus:#58a6ff;--overlay:rgba(0,0,0,.62);--skeleton:#1d2328;--skeleton-hi:#252c33;
 }
 [data-theme="dusk"]{
   color-scheme:dark;
@@ -54,7 +54,7 @@
   --success:#7fd19b;--success-soft:#1d3327;--warning:#f2c072;--warning-soft:#3a2f1c;--danger:#ff8f86;--danger-soft:#3e2027;--info:#8fc1ff;--info-soft:#1f2c47;
   --sev-exceptional:#f58fc4;--sev-critical:#ff8f86;--sev-high:#f5a36a;--sev-medium:#ecc568;--sev-low:#8fc1ff;--sev-info:#b4b3cc;--sev-na:#9c9bb8;--sev-unknown:#9c9bb8;
   --shadow-sm:0 1px 2px rgba(0,0,0,.28);--shadow-md:0 2px 8px rgba(0,0,0,.32);--shadow-lg:0 14px 36px rgba(0,0,0,.45),0 2px 6px rgba(0,0,0,.3);
-  --focus:#a99bff;--overlay:rgba(0,0,0,.45);--skeleton:#262838;--skeleton-hi:#2e3044;
+  --focus:#a99bff;--overlay:rgba(0,0,0,.6);--skeleton:#262838;--skeleton-hi:#2e3044;
 }
 :root{
   --radius-sm:4px;--radius:6px;--radius-lg:10px;--radius-pill:999px;
@@ -369,7 +369,11 @@ input[data-metadata]:disabled{border-color:transparent;background:transparent;pa
 /* Menus, popovers, tooltips, toasts */
 #ui-layer{position:relative;z-index:60}
 .popover{position:fixed;z-index:60;min-width:200px;max-width:min(360px,calc(100vw - 16px));background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);padding:4px;animation:pop-in var(--dur) var(--ease)}
-@keyframes pop-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+/* Motion only: menus and popovers stay fully opaque while they open, so
+   the table behind never shows through. */
+@keyframes pop-in{from{transform:translateY(-3px)}to{transform:none}}
+/* Any modal <dialog> dims the page behind it (--overlay is set per theme). */
+dialog::backdrop{background:var(--overlay)}
 .menu{display:grid;gap:1px;max-height:min(60vh,420px);overflow:auto}
 .menu [role^="menuitem"],.menu .option,.listbox [role="option"]{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--text);font-size:var(--text-md);text-align:left;cursor:pointer;min-height:30px}
 .menu [role^="menuitem"]:hover,.menu [role^="menuitem"]:focus-visible,.menu .option:hover,.listbox [role="option"]:hover,.listbox [role="option"].active{background:var(--surface-3);box-shadow:none}

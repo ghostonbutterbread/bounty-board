@@ -72,9 +72,16 @@ test('dashboard to search, row menu class change, report live edit, outside writ
   await menu.waitFor();
   for(const name of ['Copy finding ID','Change class…','Set submission state…','Move to Gadgets…','Move to MapStore…'])
     assert.equal(await menu.getByRole('menuitem',{name}).count(),1,name);
+  // Menus are opaque from the first frame (the open animation moves, never fades).
+  const menuLook=await page.locator('.popover').evaluate(el=>{const cs=getComputedStyle(el);return {opacity:cs.opacity,bg:cs.backgroundColor};});
+  assert.equal(menuLook.opacity,'1');
+  assert.doesNotMatch(menuLook.bg,/rgba\(.*, 0(\.\d+)?\)$|transparent/,menuLook.bg);
   await menu.getByRole('menuitem',{name:'Change class…'}).click();
   const dialog=page.getByRole('dialog',{name:/Change class: Stored XSS in project description/});
   await dialog.waitFor();
+  // A modal dialog dims the page behind it.
+  const backdrop=await page.locator('dialog[open]').evaluate(el=>getComputedStyle(el,'::backdrop').backgroundColor);
+  assert.match(backdrop,/rgba\(.*, 0\.[3-9]\d*\)/,backdrop);
   await dialog.getByRole('combobox',{name:'Class'}).fill('xss');
   await dialog.getByText('Existing class.').waitFor();
   await dialog.getByRole('button',{name:'Save class'}).click();
