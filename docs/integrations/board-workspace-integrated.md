@@ -129,4 +129,14 @@ Decisions made while fixing:
 - The "copy created no later than the change was seen" check uses the copy's ctime with a 2 s allowance. Syncthing renames the losing file at the moment the winner arrives, so a genuine lost write passes; a stale copy turning up later goes to review.
 - A late non-UTF-8 write wins over the Board save. The user's text stays in the browser and in history (as the board entry), and the report turns read-only until it is valid UTF-8 again.
 
+Evidence on the final tree (TMPDIR under the fixer scratch directory, `--test-concurrency=1`):
+
+- Reviewer repros (copied, repo path updated): `live/test_repro_live.py` 5/5 OK (test 3 adapted to expect the new `NotEditable`; 60 autosaves of a 100 KB report now keep 2 blobs, 0.20 MB of text, DB plus WAL 4.5 MB). `ledger/repro_dash_args.py` with real BBH: `submission` 200 storing `-x`, `title` 200 with entry title `-abc`, `inject` 400, `nel` 200 storing `R-1`; writer stays enabled in all four. `ledger/test_review_retry.py`: retry finishes the move, one map entry. `sec/test_sec_search_budget.py`: indexed chars `[9990, 10989, 10989, 10989, 10989]` with `content_limit` (its bug assertion now fails, as intended). `sec/probe_artifacts.py`: `.netrc`/`.npmrc`/`.pgpass` sensitive, zip without `.netrc`. `sec/test_sec_writer_dash ... test_dash_submission_report_disables_writer`: the real BBH parser now accepts the argument (502 is `verification_failed` because that parse-only writer never writes, no longer `writer_failed` from argparse exit 2).
+- Python feature tests (`test_live_editing test_live_api test_ledger_actions test_search test_search_scale test_report_artifacts test_taxonomy test_dashboard_coverage`): 122 OK, 1 skipped.
+- `python3 tests/safe_suite.py`: 272 OK, 1 skipped.
+- `npm test`: 159/159 pass (a first run failed 1 on the expected `--submission-report=R-1` argv change; the assertion was updated in 2dda88b, then the full run passed).
+- Broad browser suite (all `static/tests/*.test.cjs` except `collaboration` and `collaboration-combined`, skip pattern for the disposable-writer test): 236/236 pass.
+- Real-BBH ledger e2e (`tests/ledger_actions_bbh_e2e.cjs`, disposable snapshot plus `bounty_core`): PASS.
+- Screenshots: `bb-agents/fix/screens/` (row menu, move preview, palette, report view in light and dark; dusk dashboard and report), checked by eye.
+
 Residual limits: the Syncthing timing rule was tested on synthetic files only, as in the review; clients idle for over 14 days whose base was pruned get a whole-document conflict (never a silent overwrite); the eviction window and prune cadence are constants (`EVICT_SECONDS`, `PRUNE_SECONDS`, `BASE_DAYS`).
