@@ -139,9 +139,10 @@ test('delete archives with confirm and undo; archived hidden by default, shown w
   // Dashboard counts exclude archived findings.
   const stat=()=>page.locator('.stat').filter({hasText:'Finding records'}).locator('strong').innerText();
   assert.equal(await stat(),'9');
-  await page.getByText('Archived 1').waitFor();
+  // A07 has status archive and A09 the Bounty Core value archived; both are hidden.
+  await page.getByText('Archived 2').waitFor();
   await page.getByLabel('Show archived').check();
-  assert.equal(await stat(),'10');
+  assert.equal(await stat(),'11');
   await page.getByLabel('Show archived').uncheck();
   await openAlpha(page);
   assert.deepEqual(await tableIds(page),['A01','A02','A03','A04','A05','A06','A08']);
@@ -152,7 +153,7 @@ test('delete archives with confirm and undo; archived hidden by default, shown w
   await dialog.getByText('hidden from the dashboard and lists. The ledger keeps them').waitFor();
   await dialog.getByRole('button',{name:'Cancel'}).click();
   assert.equal(calls().length,writes,'cancel writes nothing');
-  assert.equal(finding('alpha','A04').status,'raw');
+  assert.equal(finding('alpha','A04').status,'pending-review');
   await page.locator('tr[data-finding-id="A04"] .finding-title').click({button:'right'});
   await page.getByRole('menuitem',{name:'Delete…'}).click();
   await dialog.getByRole('button',{name:'Delete (archive)'}).click();
@@ -160,33 +161,42 @@ test('delete archives with confirm and undo; archived hidden by default, shown w
   await until(async()=>!(await tableIds(page)).includes('A04'),'A04 hidden');
   const toast=page.locator('.toast').filter({hasText:'Archived 1 of 1 finding'});
   await toast.getByRole('button',{name:'Undo'}).click();
-  await until(()=>finding('alpha','A04').status==='raw','A04 restored by undo');
+  // Undo writes back the exact previous status, a Bounty Core value.
+  await until(()=>finding('alpha','A04').status==='pending-review','A04 restored by undo');
   await until(async()=>(await tableIds(page)).includes('A04'),'A04 visible again');
-  // Toggle shows archived findings and persists.
-  await page.getByText('Archived 1').waitFor();
+  // Toggle shows archived findings (archive and archived) and persists.
+  await page.getByText('Archived 2').waitFor();
   await page.getByLabel('Show archived').check();
-  await until(async()=>(await tableIds(page)).includes('A07'),'A07 shown');
+  await until(async()=>(await tableIds(page)).includes('A07') && (await tableIds(page)).includes('A09'),'A07 and A09 shown');
   await page.reload();await page.locator('tr[data-finding-id]').first().waitFor();
   assert.ok((await tableIds(page)).includes('A07'),'toggle persists');
-  // Restore: the previous status of A07 is not known in this browser, so pick one.
+  // Restore: nothing is stored for A07 (archived outside the Board), so Previous status falls back to confirmed, with a note.
   await page.locator('tr[data-finding-id="A07"] .finding-title').click({button:'right'});
   const menu=page.getByRole('menu',{name:'Actions for Alpha archived info'});
   assert.deepEqual(await menuNames(menu),['Open finding','Open finding in new tab','No linked report','Open report in new tab','Copy ID','Restore…','Delete permanently…']);
   await menu.getByRole('menuitem',{name:'Restore…'}).click();
   const pills=page.getByRole('menu',{name:'Restore as'});
-  assert.equal(await pills.getByRole('menuitemradio',{name:'Previous status'}).isDisabled(),true);
-  await pills.getByRole('menuitemradio',{name:'confirmed'}).click();
-  await until(()=>finding('alpha','A07').status==='confirmed','A07 restored');
-  // Archive then restore with Previous status.
-  await page.locator('tr[data-finding-id="A03"] .finding-title').click({button:'right'});
+  await page.locator('.pill-popover').getByText('No previous status is stored for this finding; Previous status restores it as confirmed.').waitFor();
+  assert.deepEqual(await pills.getByRole('menuitemradio').evaluateAll(b=>b.map(x=>x.textContent.trim())),['Previous status','raw','confirmed','active','pending-review','dormant','novel','complete']);
+  await pills.getByRole('menuitemradio',{name:'Previous status'}).click();
+  await until(()=>finding('alpha','A07').status==='confirmed','A07 restored as confirmed');
+  await page.locator('.toast').filter({hasText:'1 had no stored previous status and was restored as confirmed.'}).waitFor();
+  // Archive here, restore from another device (a fresh browser context): the server remembers pending-review.
+  await page.locator('tr[data-finding-id="A04"] .finding-title').click({button:'right'});
   await page.getByRole('menuitem',{name:'Delete…'}).click();
   await dialog.getByRole('button',{name:'Delete (archive)'}).click();
-  await until(()=>finding('alpha','A03').status==='archive','A03 archived');
-  await until(async()=>(await page.locator('tr[data-finding-id="A03"]').count())===1,'A03 visible with toggle on');
-  await page.locator('tr[data-finding-id="A03"] .finding-title').click({button:'right'});
-  await page.getByRole('menuitem',{name:'Restore…'}).click();
-  await pills.getByRole('menuitemradio',{name:'Previous status'}).click();
-  await until(()=>finding('alpha','A03').status==='confirmed','A03 back to confirmed');
+  await until(()=>finding('alpha','A04').status==='archive','A04 archived again');
+  const other=await page.context().browser().newContext({viewport:{width:1360,height:900}});
+  try {
+    const page2=await other.newPage();page2.setDefaultTimeout(10000);
+    await page2.goto(page.url());await page2.locator('tr[data-finding-id]').first().waitFor();
+    await page2.getByLabel('Show archived').check();
+    await page2.locator('tr[data-finding-id="A04"] .finding-title').click({button:'right'});
+    await page2.getByRole('menuitem',{name:'Restore…'}).click();
+    await page2.locator('.pill-popover').getByText('Previous status restores the status each finding had when the Board archived it.').waitFor();
+    await page2.getByRole('menu',{name:'Restore as'}).getByRole('menuitemradio',{name:'Previous status'}).click();
+    await until(()=>finding('alpha','A04').status==='pending-review','A04 restored to pending-review from another device');
+  } finally {await other.close();}
 }));
 
 test('shift-click range, ctrl-click, select all and Escape; drill-down select all',{timeout:90000},()=>withBoard('writer',async({page})=>{
@@ -316,6 +326,10 @@ test('report markers, template placeholders, archive then delete permanently',{t
   assert.match(await row('A02').locator('.possible-report').getAttribute('aria-label'),/unlinked/);
   assert.match(await row('A03').locator('.report-missing').getAttribute('data-tip'),/missing or moved/);
   assert.equal(await row('A04').locator('.possible-report').count(),0,'no partial ID matches');
+  // The generated evidence file is linked as Evidence (real anchor), after any possible report.
+  assert.equal(await row('A04').locator('.evidence-report').getAttribute('href'),'#/programs/web_bounty%2Falpha/web/reports/A04%2FEVIDENCE.md');
+  assert.match(await row('A04').locator('.evidence-report').getAttribute('aria-label'),/^Evidence: A04\/EVIDENCE\.md$/);
+  assert.equal(await row('A02').locator('.evidence-report').count(),0);
   await row('A02').locator('.report-missing').focus();
   await page.getByRole('tooltip').getByText(/no report_path/).waitFor();
   assert.equal(await row('A05').locator('.placeholder-badge').innerText(),'Template placeholder');
@@ -337,13 +351,14 @@ test('report markers, template placeholders, archive then delete permanently',{t
   await page.getByRole('button',{name:'Select template placeholders (2)'}).click();
   await bar(page).getByRole('button',{name:'Delete permanently'}).click();
   const dialog=page.getByRole('dialog',{name:'Permanently delete 2 findings?'});
-  await dialog.getByText('It cannot be undone. Archive is the recoverable state; this is not.').waitFor();
+  await dialog.getByText('Delete permanently removes the 2 findings and their generated report files. It cannot be undone.').waitFor();
+  await dialog.getByText('Archive is how to keep something recoverable.').waitFor();
   await dialog.getByRole('button',{name:'Delete permanently'}).click();
   await bar(page).getByRole('status').getByText('Permanently deleted 2 of 2 findings.').waitFor();
-  assert.deepEqual(ledger('alpha').map(f=>f.fid),['A01','A02','A03','A04','A07','A08']);
+  assert.deepEqual(ledger('alpha').map(f=>f.fid),['A01','A02','A03','A04','A07','A08','A09']);
   assert.equal(fs.existsSync(path.join(lanePath('alpha'),'reports/A05/REPORT.md')),false,'generated report deleted');
   assert.equal(fs.existsSync(path.join(lanePath('alpha'),'reports/drafts/A02-notes.md')),true);
-  assert.deepEqual(calls().filter(c=>c.includes('--delete-finding')).map(c=>c.at(-1)),['A05','A06']);
+  assert.deepEqual(calls().filter(c=>c.includes('--delete-finding')).map(c=>c.slice(c.indexOf('--delete-finding'))),[['--delete-finding','A05','--actor','bounty-board'],['--delete-finding','A06','--actor','bounty-board']]);
   assert.equal(await bar(page).getByRole('button',{name:'Undo'}).count(),0,'no undo for permanent delete');
   await until(async()=>(await row('A05').count())===0,'deleted rows gone');
   // A non-archived finding cannot be deleted permanently from the UI.
@@ -362,3 +377,70 @@ test('without the BBH delete feature, archived rows offer Restore but no permane
   assert.equal(await page.getByRole('menuitem',{name:/permanently/}).count(),0);
 }));
 
+
+test('Findings table severity uses the pills with full keyboard support',{timeout:90000},()=>withBoard('writer',async({page,finding})=>{
+  await openAlpha(page);
+  const trigger=page.getByLabel('severity for Alpha high xss');
+  assert.equal(await trigger.getAttribute('value'),'HIGH');
+  await trigger.focus();await page.keyboard.press('Enter');
+  const pills=page.getByRole('menu',{name:'Change severity for Alpha high xss'});await pills.waitFor();
+  assert.deepEqual(await pillNames(pills),[['Exceptional','false',false],['Critical','false',false],['High','true',false],['Medium','false',false],['Low','false',false],['Info','false',false],['Unknown','false',false],['N/A','false',true]]);
+  assert.equal(await pills.getByRole('menuitemradio',{name:'Info'}).getAttribute('title'),'Informational (INFO)');
+  assert.equal(await active(page),'High');
+  await page.keyboard.press('Escape');await pills.waitFor({state:'detached'});
+  assert.match(await active(page),/^severity for Alpha high xss/,'focus returns to the trigger');
+  await page.keyboard.press('Space');await pills.waitFor();
+  await page.keyboard.press('ArrowRight');assert.equal(await active(page),'Medium');
+  await page.keyboard.press('Enter');
+  await until(()=>finding('alpha','A02').severity==='MEDIUM','A02 saved from the table');
+  await until(async()=>(await page.getByLabel('severity for Alpha high xss').getAttribute('value'))==='MEDIUM','table shows MEDIUM');
+  assert.equal(await page.locator('tr[data-finding-id="A02"] [data-metadata="severity"] .sev').getAttribute('data-sev'),'medium');
+}));
+
+test('table severity pills are disabled without the writer',{timeout:60000},()=>withBoard('readonly',async({page})=>{
+  await openAlpha(page);
+  assert.equal(await page.getByLabel('severity for Alpha high xss').isDisabled(),true);
+}));
+
+test('submission pills: one click, ledger-only note shown once per browser',{timeout:60000},()=>withBoard('writer',async({page,finding})=>{
+  await openAlpha(page);
+  const note='Records state in the ledger only. Nothing is sent to a platform.';
+  await page.locator('tr[data-finding-id="A02"] [data-submission-pick]').click();
+  await page.locator('.pill-popover').getByText(note).waitFor();
+  await page.getByRole('menu',{name:'Submission'}).getByRole('menuitemradio',{name:'Dropped'}).click();
+  await until(()=>finding('alpha','A02').submission?.state==='dropped','A02 dropped without a confirmation step');
+  await page.locator('tr[data-finding-id="A03"] [data-submission-pick]').click();
+  await page.getByRole('menu',{name:'Submission'}).waitFor();
+  assert.equal(await page.locator('.pill-popover').getByText(note).count(),0,'note shown once');
+  await page.keyboard.press('Escape');
+}));
+
+test('permanent delete: archived is set to archive first; BBH refusal reason and warnings are shown',{timeout:120000},()=>withBoard('writer',async({page,finding,ledger,calls,base})=>{
+  await openAlpha(page);
+  await page.getByLabel('Show archived').check();
+  await page.locator('tr[data-finding-id="A09"] .finding-title').click({button:'right'});
+  await page.getByRole('menuitem',{name:'Delete permanently…'}).click();
+  const dialog=page.getByRole('dialog',{name:'Permanently delete 1 finding?'});
+  await dialog.getByText('Delete permanently removes the finding and its generated report files. It cannot be undone.').waitFor();
+  await dialog.getByText('It is marked archived; the Board first sets archive, then deletes.').waitFor();
+  await dialog.getByRole('button',{name:'Delete permanently'}).click();
+  await until(()=>!ledger('alpha').some(f=>f.fid==='A09'),'A09 deleted');
+  const mine=calls().filter(c=>c.includes('A09'));
+  assert.equal(mine.length,2);
+  assert.ok(mine[0].includes('--edit-finding'),'archive set first through the edit path');
+  assert.deepEqual(mine[1].slice(mine[1].indexOf('--delete-finding')),['--delete-finding','A09','--actor','bounty-board']);
+  // BBH refuses the highest FID of a prefix: the reason is shown plainly and the finding stays selected.
+  fs.writeFileSync(path.join(base,'mode'),'delete-highest');
+  await page.getByRole('checkbox',{name:'Select finding A07'}).click();
+  await bar(page).getByRole('button',{name:'Delete permanently'}).click();
+  await page.getByRole('dialog',{name:'Permanently delete 1 finding?'}).getByRole('button',{name:'Delete permanently'}).click();
+  await bar(page).getByRole('status').getByText(/A07 BBH refused: refusing to delete A07: it is the highest FID of its prefix; delete it after a newer finding exists/).waitFor();
+  assert.equal(finding('alpha','A07').status,'archive');
+  await bar(page).getByText('1 selected').waitFor();
+  // Exit 3: deleted, with a non-blocking warning notice.
+  fs.writeFileSync(path.join(base,'mode'),'delete-warn');
+  await bar(page).getByRole('button',{name:'Delete permanently'}).click();
+  await page.getByRole('dialog',{name:'Permanently delete 1 finding?'}).getByRole('button',{name:'Delete permanently'}).click();
+  await page.locator('.toast.warning').filter({hasText:'BBH warnings: A07: could not delete reports/notes.md (kept)'}).waitFor();
+  assert.equal(ledger('alpha').some(f=>f.fid==='A07'),false);
+}));

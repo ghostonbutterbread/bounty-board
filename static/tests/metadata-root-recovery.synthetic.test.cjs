@@ -4,6 +4,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const {chromium} = require('playwright');
+// Severity is a pill picker: open it from the trigger, then pick the value's pill.
+const pickSeverity=async(trigger,value,options={})=>{await trigger.click(options);await trigger.page().locator(`.pill-popover [data-value="${value}"]`).click(options);};
 
 const root = path.resolve(__dirname,'..');
 let instance='a'.repeat(64), writes=[];
@@ -41,7 +43,7 @@ test('replacement at the same logical root never attaches the old draft to the n
 });
 
 test('strict legacy writer receives exactly the documented own keys',async()=>{
-  instance='a'.repeat(64);writes=[];const p=await browser.newPage();await open(p);await p.getByLabel('severity for Finding').selectOption('HIGH');await p.waitForFunction(()=>!document.querySelector('[data-metadata=severity]')?.disabled);assert.deepEqual(writes,[{programId:'p',lane:'web',findingId:'same',field:'severity',value:'HIGH'}]);assert.equal(await p.getByLabel('severity for Finding').inputValue(),'HIGH');await p.close();
+  instance='a'.repeat(64);writes=[];const p=await browser.newPage();await open(p);await pickSeverity(p.getByLabel('severity for Finding'),'HIGH');await p.waitForFunction(()=>!document.querySelector('[data-metadata=severity]')?.disabled);assert.deepEqual(writes,[{programId:'p',lane:'web',findingId:'same',field:'severity',value:'HIGH'}]);assert.equal(await p.getByLabel('severity for Finding').getAttribute('value'),'HIGH');await p.close();
 });
 
 for(const unidentified of [null,'malformed']) test(`unidentified instance ${unidentified} becomes copy-only after refresh`,async()=>{
@@ -78,10 +80,10 @@ test('late metadata failures remain individually copyable across navigation unti
   instance='a'.repeat(64);const p=await browser.newPage();let release,arrived;const gate=new Promise(r=>release=r),seen=new Promise(r=>arrived=r);let calls=0;
   await p.route('**/api/meta',async route=>{calls++;if(calls===1){arrived();await gate;}await route.fulfill({status:409,json:{error:'finding_changed'}}).catch(()=>{});});
   try {
-    await open(p);await p.getByLabel('severity for Finding').selectOption('HIGH');await seen;
+    await open(p);await pickSeverity(p.getByLabel('severity for Finding'),'HIGH');await seen;
     await p.getByRole('button',{name:'Dashboard',exact:true}).click();release();
     const pending=p.getByLabel('Pending severity value — copy before leaving');await pending.waitFor();assert.equal(await pending.inputValue(),'HIGH');
-    await p.getByRole('button',{name:'Programs',exact:true}).click();await p.getByLabel('severity for Finding').selectOption('HIGH');
+    await p.getByRole('button',{name:'Programs',exact:true}).click();await pickSeverity(p.getByLabel('severity for Finding'),'HIGH');
     await p.waitForFunction(()=>document.querySelectorAll('[data-discard-metadata]').length===2);assert.deepEqual(await pending.allTextContents(),['HIGH','HIGH']);
     await p.getByRole('button',{name:'Discard pending value'}).first().click();assert.equal(await pending.count(),1);assert.equal(await pending.inputValue(),'HIGH');
   } finally {release();await p.close();}
@@ -95,10 +97,10 @@ for (const unidentified of [undefined,'malformed']) test(`failed metadata surviv
     await route.fulfill(count===1?{status:409,json:{error:'finding_changed'}}:{json:{value:body.value}});
   });
   await p.route('**/api/data*',route=>{const fixture=data();fixture.capabilities.findingMetadata.options.severity.push('MEDIUM');return route.fulfill({json:fixture});});
-  await open(p);await p.getByLabel('severity for Finding').selectOption('HIGH');
+  await open(p);await pickSeverity(p.getByLabel('severity for Finding'),'HIGH');
   const pending=p.getByLabel('Pending severity value — copy before leaving');await pending.waitFor();assert.equal(await pending.inputValue(),'HIGH');
   await refresh(p);assert.equal(await pending.inputValue(),'HIGH');
-  await p.getByLabel('severity for Finding').selectOption('MEDIUM');
+  await pickSeverity(p.getByLabel('severity for Finding'),'MEDIUM');
   await p.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM'&&!document.querySelector('[data-metadata=severity]')?.disabled);
   assert.equal(count,2);assert.equal(await pending.inputValue(),'HIGH');
   await p.getByLabel('Search findings').fill('not found');assert.equal(await pending.inputValue(),'HIGH');await p.close();

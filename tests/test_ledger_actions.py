@@ -24,6 +24,8 @@ if '--help' in args:
 with log.open('a') as f:
     f.write(json.dumps(args) + '\n')
 mode = Path(os.environ['FAKE_MODE']).read_text().strip() if Path(os.environ['FAKE_MODE']).exists() else 'ok'
+if mode == 'usage':
+    sys.exit(2)  # argparse usage error
 if mode == 'fail' or (mode == 'fail-edit' and '--edit-finding' in args):
     sys.exit(3)
 def opt(name):
@@ -86,8 +88,11 @@ elif '--delete-finding' in args:
     fid = opt('--delete-finding')
     match = [f for f in data['findings'] if f['fid'] == fid]
     status = (match[0].get('status') or (match[0].get('current') or {}).get('status')) if match else None
+    if mode == 'delete-highest':
+        print(f'[manual_hunter] refusing to delete {fid}: it is the highest FID of its prefix; delete it after a newer finding exists', file=sys.stderr)
+        sys.exit(1)
     if mode == 'delete-refuse' or status != 'archive':
-        print(f'refusing to delete {fid}', file=sys.stderr)
+        print(f"[manual_hunter] refusing to delete {fid}: status is {status!r}, not 'archive'", file=sys.stderr)
         sys.exit(1)
     if mode != 'delete-keep':
         data['findings'] = [f for f in data['findings'] if f['fid'] != fid]
@@ -106,6 +111,7 @@ tmp = path.with_name('ledger.json.tmp')
 tmp.write_text(json.dumps(data))
 tmp.replace(path)
 if mode == 'delete-warn' and '--delete-finding' in args:
+    print('Warning: could not delete reports/notes.md (kept)', file=sys.stderr)
     sys.exit(3)
 '''.replace('PYTHON', sys.executable)
 

@@ -27,15 +27,19 @@ programs = {
             {'fid': 'A02', 'title': 'Alpha high xss', 'class_name': 'xss', 'severity': 'HIGH', 'status': 'raw'},
             {'fid': 'A03', 'title': 'Alpha medium xss', 'class_name': 'xss', 'severity': 'MEDIUM', 'status': 'confirmed',
              'report_path': str(alpha_lane / 'reports/A03/missing.md')},
-            {'fid': 'A04', 'title': 'Alpha low ssrf', 'class_name': 'ssrf', 'severity': 'LOW', 'status': 'raw'},
+            {'fid': 'A04', 'title': 'Alpha low ssrf', 'class_name': 'ssrf', 'severity': 'LOW', 'status': 'pending-review',
+             'evidence_path': str(alpha_lane / 'reports/A04/EVIDENCE.md')},
             {'fid': 'A05', 'title': 'short vulnerability label', 'type': 'short vulnerability label', 'class_name': 'xss', 'severity': TEMPLATE, 'status': 'raw'},
             {'fid': 'A06', 'title': 'short novel pattern label', 'type': 'short novel pattern label', 'class_name': 'idor', 'severity': TEMPLATE, 'status': 'raw'},
             {'fid': 'A07', 'title': 'Alpha archived info', 'class_name': 'xss', 'severity': 'INFO', 'status': 'archive'},
             {'fid': 'A08', 'title': 'Alpha submitted high', 'class_name': 'idor', 'severity': 'HIGH', 'status': 'confirmed',
              'submission': {'state': 'submitted', 'result': 'valid'}},
+            # Bounty Core lifecycle value for an archived finding.
+            {'fid': 'A09', 'title': 'Alpha archived by bounty core', 'class_name': 'ssrf', 'severity': 'LOW', 'status': 'archived'},
         ],
         'reports': {'A01/REPORT.md': '# Alpha critical idor report\n', 'drafts/A02-notes.md': '# Draft notes\n',
-                    'A05/REPORT.md': GENERATED, 'A010/REPORT.md': '# Unrelated id prefix\n'},
+                    'A05/REPORT.md': GENERATED, 'A010/REPORT.md': '# Unrelated id prefix\n',
+                    'A04/EVIDENCE.md': '# Evidence\n'},
     },
     'beta': {
         'findings': [
@@ -66,7 +70,8 @@ if mode != 'readonly':
     os.environ['FAKE_MODE'] = str(base / 'mode')
     help_text = ('--edit-finding --patch-file --root --family --lane --from-file --set-submission '
                  '--submission-state --submission-result --submission-report')
-    os.environ['FAKE_HELP'] = help_text if mode == 'nodelete' else help_text + ' --delete-finding'
-server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None)
+    os.environ['FAKE_HELP'] = help_text if mode == 'nodelete' else help_text + ' --delete-finding --actor'
+# Private Board state (previous status of archived findings), outside the data root.
+server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None, state_dir=base / 'state')
 print(server.server_port, flush=True)
 server.serve_forever()

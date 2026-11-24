@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const {spawn, spawnSync} = require('node:child_process');
 const {once} = require('node:events');
 const {chromium} = require('playwright');
+// Severity is a pill picker: open it from the trigger, then pick the value's pill.
+const pickSeverity=async(trigger,value,options={})=>{await trigger.click(options);await trigger.page().locator(`.pill-popover [data-value="${value}"]`).click(options);};
 
 async function main() {
   assert.equal(process.env.HOME, '/runboard');
@@ -34,11 +36,11 @@ async function main() {
     const pendingValues=()=>page.getByLabel('Pending severity value — copy before leaving').evaluateAll(nodes=>nodes.map(node=>node.value));
     const requests=[];page.on('response',r=>{if(r.url().endsWith('/api/finding'))requests.push(r.status());});
     await page.goto(`http://127.0.0.1:${port}`);await page.getByRole('button',{name:'Programs',exact:true}).click();
-    const severity=page.getByLabel('severity for Synthetic fixture');await severity.waitFor();assert.equal(await severity.inputValue(),'LOW');
+    const severity=page.getByLabel('severity for Synthetic fixture');await severity.waitFor();assert.equal(await severity.getAttribute('value'),'LOW');
     fs.writeFileSync('/runboard/external.json',JSON.stringify({severity:'MEDIUM'}));
     run('agents/manual_hunter.py',...base,'--edit-finding',fid,'--patch-file','/runboard/external.json');
-    assert.equal(finding().severity,'MEDIUM');assert.equal(await severity.inputValue(),'LOW');
-    await severity.selectOption('HIGH');await page.getByText(/Conflict: finding changed/).waitFor();
+    assert.equal(finding().severity,'MEDIUM');assert.equal(await severity.getAttribute('value'),'LOW');
+    await pickSeverity(severity,'HIGH');await page.getByText(/Conflict: finding changed/).waitFor();
     assert.equal(requests.at(-1),409);assert.equal(finding().severity,'MEDIUM');assert.equal(fs.existsSync(marker),false);
     assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'HIGH');
     await page.getByRole('button',{name:'Dashboard',exact:true}).click();
@@ -46,7 +48,7 @@ async function main() {
     await page.getByRole('button',{name:'Refresh'}).click();
     await page.getByRole('button',{name:'Programs',exact:true}).click();
     await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM');
-    await page.getByLabel('severity for Synthetic fixture').selectOption('HIGH');
+    await pickSeverity(page.getByLabel('severity for Synthetic fixture'),'HIGH');
     await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='HIGH'&&!document.querySelector('[data-metadata=severity]')?.disabled);
     assert.equal(finding().severity,'HIGH');assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,1);
     assert.deepEqual(await pendingValues(),['HIGH']);
@@ -83,7 +85,7 @@ async function main() {
     assert.deepEqual(forged,[400,400,409,409]);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
     fs.renameSync(root,root+'-away');
     let received=page.waitForResponse(r=>r.url().endsWith('/api/finding')&&r.status()===409);
-    await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
+    await pickSeverity(page.getByLabel('severity for Synthetic fixture'),'LOW');
     await received;
     await page.waitForFunction(()=>document.querySelectorAll('[data-discard-metadata]').length>=3);
     assert.deepEqual(await pendingValues(),['HIGH','LOW']);
@@ -93,7 +95,7 @@ async function main() {
     await page.waitForFunction(()=>document.querySelector('[data-metadata=severity]')?.value==='MEDIUM');
     const original=fs.readFileSync(path,'utf8');const empty=JSON.parse(original);empty.findings=[];fs.writeFileSync(path,JSON.stringify(empty));
     received=page.waitForResponse(r=>r.url().endsWith('/api/finding')&&r.status()===404);
-    await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
+    await pickSeverity(page.getByLabel('severity for Synthetic fixture'),'LOW');
     await received;await page.getByText(/Finding is no longer available/).waitFor();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.equal(requests.at(-1),404);assert.equal(fs.readFileSync(marker,'utf8').trim().split('\n').length,4);
     fs.writeFileSync(path,original);await page.getByRole('button',{name:'Refresh'}).click();
@@ -127,7 +129,7 @@ async function main() {
     await page.getByRole('button',{name:'Refresh'}).click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),text);
     assert.equal(fs.readFileSync(path,'utf8'),originalBytes);
-    fs.writeFileSync('/runboard/fail-writer','fail');await page.getByLabel('severity for Synthetic fixture').selectOption('LOW');
+    fs.writeFileSync('/runboard/fail-writer','fail');await pickSeverity(page.getByLabel('severity for Synthetic fixture'),'LOW');
     await page.getByText(/Update failed or was not verified/).waitFor();assert.equal(requests.at(-1),502);
     assert.deepEqual(await pendingValues(),['HIGH','LOW','LOW','LOW']);assert.equal(finding().severity,'MEDIUM');
     assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Synthetic fixture'}).inputValue(),text);

@@ -11,7 +11,7 @@ import unittest
 import test_ledger_actions
 
 HELP_WITH_DELETE = ('--edit-finding --patch-file --root --family --lane --from-file --set-submission '
-                    '--submission-state --submission-result --submission-report --delete-finding')
+                    '--submission-state --submission-result --submission-report --delete-finding --actor')
 GENERATED = '<!-- generated: bounty-core-finding-report -->\n# Synthetic generated report\n'
 
 
@@ -65,7 +65,7 @@ class FindingDeleteTests(test_ledger_actions.LedgerActionTests):
         self.assertFalse(body['warnings'])
         self.assertEqual(self.fids(), ['D02'])
         self.assertEqual(self.invocations(), [['agents/manual_hunter.py', 'fictional', '--family', 'web_bounty', '--lane', 'web',
-                                               '--root', str(self.root), '--delete-finding', 'D01']])
+                                               '--root', str(self.root), '--delete-finding', 'D01', '--actor', 'bounty-board']])
         reports = self.ledger.parent.parent / 'reports'
         self.assertFalse((reports / 'D01/REPORT.md').exists())
         self.assertTrue((reports / 'D01/notes.md').exists(), 'hand written files are not BBH generated')
@@ -109,6 +109,7 @@ class FindingDeleteTests(test_ledger_actions.LedgerActionTests):
         self.mode.write_text('delete-refuse')
         status, body = self.request('POST', '/api/finding/delete', self.payload())
         self.assertEqual((status, body['error']), (409, 'delete_refused'))
+        self.assertEqual(body['reason'], "refusing to delete D01: status is 'archive', not 'archive'")
         self.assertEqual(self.fids(), ['D01', 'D02'])
         self.assertTrue(self.data()['capabilities']['finding_metadata'])
 
@@ -118,8 +119,31 @@ class FindingDeleteTests(test_ledger_actions.LedgerActionTests):
         status, body = self.request('POST', '/api/finding/delete', self.payload())
         self.assertEqual(status, 200, body)
         self.assertTrue(body['warnings'])
+        self.assertEqual(body['warning_text'], ['could not delete reports/notes.md (kept)'])
         self.assertIn('D02', body['revisions'])
         self.assertEqual(self.fids(), ['D02'])
+
+    def test_delete_highest_fid_refusal_reason_is_relayed(self):
+        self.start()
+        self.mode.write_text('delete-highest')
+        status, body = self.request('POST', '/api/finding/delete', self.payload())
+        self.assertEqual((status, body['error']), (409, 'delete_refused'))
+        self.assertIn('it is the highest FID of its prefix', body['reason'])
+        self.assertTrue(self.data()['capabilities']['ledger_actions']['delete']['enabled'])
+
+    def test_delete_without_actor_option_omits_it(self):
+        os.environ['FAKE_HELP'] = HELP_WITH_DELETE.replace(' --actor', '')
+        self.start()
+        self.assertEqual(self.request('POST', '/api/finding/delete', self.payload())[0], 200)
+        self.assertEqual(self.invocations()[-1][-2:], ['--delete-finding', 'D01'])
+
+    def test_delete_usage_error_disables_writer(self):
+        self.start()
+        self.mode.write_text('usage')
+        status, body = self.request('POST', '/api/finding/delete', self.payload())
+        self.assertEqual((status, body['error']), (502, 'writer_failed'))
+        self.assertEqual(self.fids(), ['D01', 'D02'])
+        self.assertFalse(self.data()['capabilities']['finding_metadata'])
 
     def test_delete_unverified_disables_writer(self):
         self.start()

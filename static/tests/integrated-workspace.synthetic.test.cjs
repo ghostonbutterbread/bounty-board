@@ -10,6 +10,8 @@ const path=require('node:path');
 const os=require('node:os');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
+// Severity is a pill picker: open it from the trigger, then pick the value's pill.
+const pickSeverity=async(trigger,value,options={})=>{await trigger.click(options);await trigger.page().locator(`.pill-popover [data-value="${value}"]`).click(options);};
 
 const repo=path.resolve(__dirname,'../..');
 
@@ -90,7 +92,7 @@ test('dashboard to search, row menu class change, report live edit, outside writ
   await dialog.getByRole('button',{name:'Cancel'}).click();
   assert.equal(await page.getByLabel('class for Stored XSS in project description').inputValue(),'xss');
   // A sibling row stays writable after the write (revision rebase).
-  await page.getByLabel('severity for CSRF on notification preferences').selectOption('HIGH');
+  await pickSeverity(page.getByLabel('severity for CSRF on notification preferences'),'HIGH');
   await waitFor(()=>env.ledger().find(f=>f.fid==='A105').severity==='HIGH','sibling inline edit');
   assert.equal(await page.getByText(/Conflict/).count(),0);
 

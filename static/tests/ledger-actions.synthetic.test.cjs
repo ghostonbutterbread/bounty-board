@@ -6,6 +6,8 @@ const path=require('node:path');
 const os=require('node:os');
 const {spawn}=require('node:child_process');
 const {chromium}=require('playwright');
+// Severity is a pill picker: open it from the trigger, then pick the value's pill.
+const pickSeverity=async(trigger,value,options={})=>{await trigger.click(options);await trigger.page().locator(`.pill-popover [data-value="${value}"]`).click(options);};
 
 const repo=path.resolve(__dirname,'../..');
 const shots=process.env.LEDGER_SCREENSHOTS || '';
@@ -77,9 +79,12 @@ test('sorts by severity and date, filters by date, labels severities',{timeout:6
   await pickFilter(page,'severities',['INFO']);
   assert.deepEqual(await order(page),['D03']);
   await page.getByRole('button',{name:'Clear all'}).click();
-  const labels=await page.getByLabel('severity for Alpha critical').locator('option').evaluateAll(o=>o.map(x=>[x.value,x.textContent,x.disabled]));
-  assert.deepEqual(labels.find(([v])=>v==='INFO'),['INFO','Informational (INFO)',false]);
-  assert.deepEqual(labels.find(([v])=>v==='N/A'),['N/A','N/A (not supported by BBH yet)',true]);
+  // Severity pills: INFO is labelled informational; N/A is shown but not writable.
+  await page.getByLabel('severity for Alpha critical').click();
+  const labels=await page.locator('.pill-popover [role=menuitemradio]').evaluateAll(o=>o.map(x=>[x.dataset.value,x.textContent.trim(),x.title,x.disabled]));
+  assert.deepEqual(labels.find(([v])=>v==='INFO'),['INFO','Info','Informational (INFO)',false]);
+  assert.deepEqual(labels.find(([v])=>v==='N/A'),['N/A','N/A','Not supported by BBH yet',true]);
+  await page.keyboard.press('Escape');
   assert.match(await page.locator('tr[data-finding-id="D02"] td.date').innerText(),/^\d{4}-\d{2}-\d{2}\s+Last seen \d{4}-\d{2}-\d{2}$/);
   const ranks=await page.evaluate(()=>['exceptional','Critical','informational','na','N/A','none','bogus',''].map(window.BoardLedgerActions.severityKey));
   assert.deepEqual(ranks,['EXCEPTIONAL','CRITICAL','INFO','N/A','N/A','N/A','UNKNOWN','UNKNOWN']);
@@ -219,9 +224,9 @@ test('non-drag Move to MapStore and dashboard class review at scale',{timeout:60
   await page.locator('.breakdown-row[data-class-name="stored-xss"]').waitFor();
   // Back-to-back inline edit in the same lane after module writes: no false conflict.
   await page.getByRole('button',{name:'Programs',exact:true}).click();
-  await page.getByLabel('severity for Alpha high').selectOption('MEDIUM');
+  await pickSeverity(page.getByLabel('severity for Alpha high'),'MEDIUM');
   await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="D05"] [data-metadata=severity]')?.value==='MEDIUM' && !document.querySelector('tr[data-finding-id="D05"] [data-metadata=severity]').disabled);
-  await page.getByLabel('severity for Alpha critical').selectOption('HIGH');
+  await pickSeverity(page.getByLabel('severity for Alpha critical'),'HIGH');
   await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="D02"] [data-metadata=severity]')?.value==='HIGH' && !document.querySelector('tr[data-finding-id="D02"] [data-metadata=severity]').disabled);
   assert.equal(ledger('alpha').find(f=>f.fid==='D02').severity,'HIGH');
   assert.equal(await page.getByText(/Conflict/).count(),0);
