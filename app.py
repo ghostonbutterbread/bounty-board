@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Literal, overload
 from urllib.parse import urlsplit, parse_qs
 
+from taxonomy import annotate_finding
+
 FAMILIES = {'web_bounty': {'web', 'api'}, 'binaries': {'apk', 'exe', 'mac'}}
 SEVERITIES = ('EXCEPTIONAL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', 'UNKNOWN')
 STATUSES = ('raw', 'confirmed', 'dormant', 'novel', 'complete', 'archive')
@@ -79,6 +81,8 @@ def ledger(lane, warnings, canonical_out=None):
         lane_stat = lane.stat()
         source = os.fsencode(f'{lane.resolve()}\0{lane_stat.st_dev}\0{lane_stat.st_ino}\0{identity[0]}\0{identity[1]}\0')
         result = [{**{field: entry.get(field) for field in fields},
+                   # Additive display-time classification (taxonomy.py); raw class_name is unchanged.
+                   **annotate_finding(entry),
                    'metadata_revision': hashlib.sha256(source + json.dumps(entry, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')).hexdigest(),
                    'status': entry.get('status') or (entry['current'].get('status') if isinstance(entry.get('current'), dict) else None),
                    'title': entry.get('title') or entry.get('type')} for entry in raw['findings']]
@@ -139,14 +143,20 @@ def coverage(lane, warnings):
         try:
             db.row_factory = sqlite3.Row
             db.execute('BEGIN')
+            def extra(table, alias, names):
+                # Optional provenance columns: older databases may lack them (shown as null).
+                have = {r[1] for r in db.execute(f'PRAGMA table_info({table})')}
+                return ', '.join(f'{alias}.{n}' if n in have else f'NULL AS {n}' for n in names)
             rows = db.execute('''SELECT s.id, s.kind, s.host, s.surface_key, s.input_key,
                 s.consumer, s.fingerprint, s.run_id, a.class_name, a.status, a.pressure,
                 a.reason, a.boundary, a.axes_json, a.evidence_json, a.reopen_when,
-                a.assessed_fingerprint FROM assessments a JOIN surfaces s ON s.id=a.surface_id''').fetchall()
+                a.assessed_fingerprint, {a_extra} FROM assessments a JOIN surfaces s ON s.id=a.surface_id'''.format(
+                a_extra=extra('assessments', 'a', ('updated_at', 'agent', 'assessment_run_id')) + ', ' + extra('surfaces', 's', ('first_seen', 'last_seen')))).fetchall()
             kind_rows = db.execute('SELECT kind, COUNT(*) AS n FROM surfaces GROUP BY kind').fetchall()
             unassessed = [dict(row) for row in db.execute('''SELECT s.id AS surface_id, s.kind, s.host,
-                s.surface_key, s.input_key, s.consumer, s.fingerprint, s.run_id FROM surfaces s
-                WHERE NOT EXISTS (SELECT 1 FROM assessments a WHERE a.surface_id=s.id)''')]
+                s.surface_key, s.input_key, s.consumer, s.fingerprint, s.run_id, {s_extra}
+                FROM surfaces s WHERE NOT EXISTS (SELECT 1 FROM assessments a WHERE a.surface_id=s.id)'''.format(
+                s_extra=extra('surfaces', 's', ('first_seen', 'last_seen'))))]
             unclassified = len(unassessed)
         finally:
             db.close()
@@ -178,6 +188,7 @@ def coverage(lane, warnings):
         for row in rows:
             item = dict(row)
             item['surface_id'] = item.pop('id')
+            item['class_category'] = annotate_finding({'class_name': item['class_name']})['class_category']
             axes_json, evidence_json = item.pop('axes_json'), item.pop('evidence_json')
             validate_scalars(item.values())
             if not isinstance(axes_json, (str, bytes, bytearray)) or not isinstance(evidence_json, (str, bytes, bytearray)):

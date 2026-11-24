@@ -46,6 +46,19 @@
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
   // window.BoardModules and mount into host elements after every render.
   const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, api:window.BoardAPI, ui:window.BoardUI});
+  // Taxonomy seam (static/modules/taxonomy.js): display-time labels only; the raw
+  // class and severity stay as recorded and remain what filters and edits use.
+  const taxonomy = () => window.BoardTaxonomy?.ready?.() ? window.BoardTaxonomy : null;
+  const classNote = row => {
+    const t = taxonomy(); if (!t || row.class == null || row.class === '') return '';
+    const c = t.normalizeClass(row.class);
+    return `<span class="id" data-class-category="${esc(c.category)}">${c.category==='unclassified' ? 'Category: Unclassified' : `Category: ${esc(c.label)}${c.confidence==='low' ? ' (low confidence)' : ''}`}</span>`;
+  };
+  const severityNote = row => {
+    const t = taxonomy(); if (!t || row.severity == null || row.severity === '') return '';
+    const s = t.normalizeSeverity(row.severity);
+    return s.kind === 'canonical' ? '' : `<span class="id" data-severity-note="${esc(s.kind)}">Shown as ${esc(s.value)}${s.note ? `. ${esc(s.note)}` : ''}</span>`;
+  };
   window.BoardModules = window.BoardModules || [];
   window.registerBoardModule = module => {window.BoardModules.push(module);try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}};
   // ---- Presentation helpers (severity scale, badges, submission state) ----
@@ -776,7 +789,7 @@
     if(typeof view?.filter==='function')filtered=filtered.filter(r=>{try{return view.filter(r)!==false;}catch{return true;}});
     if(typeof view?.compare==='function'){try{filtered.sort(view.compare);}catch{}}
     const program=currentProgram(), laneName=state.lane;
-    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${rationale(r)}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
+    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
     const chips=FILTERS.flatMap(([k,label])=>(f[k]||[]).map(v=>`<span class="chip" data-filter-chip><span class="chip-key">${esc(label)}</span><span>${esc(v)}</span><button type="button" data-remove-filter="${k}" data-value="${esc(v)}" aria-label="Remove filter ${esc(label)} ${esc(v)}">${icon('times')}</button></span>`));
     const anyFilter=chips.length || query;
@@ -828,7 +841,7 @@
     const counts=value.counts && typeof value.counts==='object' && !Array.isArray(value.counts) ? `<section class="panel panel-pad"><h2>Assessment counts</h2><p class="hint">Recorded assessment questions${value.total == null ? '' : `: ${esc(display(value.total))} total`}.</p>${Object.entries(value.counts).map(([status,count])=>`<div class="record"><strong>${esc(status)}</strong>: ${esc(display(count))}</div>`).join('') || '<p class="hint">No assessment counts reported.</p>'}</section>` : '';
     const assessments=items ? (items.length ? records('coverage','Assessment questions','Recorded questions and boundaries, not proof of complete testing.') : '<section class="panel panel-pad"><h2>Assessment questions</h2><div class="state">No assessment questions recorded in this lane.</div></section>') : unavailable('Assessment questions');
     const unassessed=recordList(list(value.unassessed_surfaces),'Surfaces without assessment questions','Mapped inventory only; no assessment question recorded for these surfaces.');
-    return `<div class="stack"><section class="panel panel-pad"><h2>Mapped inventory</h2><p class="hint">Mapped surfaces are inventory, not assessed coverage.</p>${mapped}<p class="hint">${esc(unclassified)}</p></section>${unassessed}${counts}${assessments}</div>`;
+    return `<div class="stack"><div id="coverage-drilldown-host"></div><section class="panel panel-pad"><h2>Mapped inventory</h2><p class="hint">Mapped surfaces are inventory, not assessed coverage.</p>${mapped}<p class="hint">${esc(unclassified)}</p></section>${unassessed}${counts}${assessments}</div>`;
   }
   // Deliberately small Markdown subset; all source is escaped before formatting.
   // Links/images remain text. No HTML, navigation, external images or scripts.
