@@ -26,7 +26,16 @@ with log.open('a') as f:
 mode = Path(os.environ['FAKE_MODE']).read_text().strip() if Path(os.environ['FAKE_MODE']).exists() else 'ok'
 if mode == 'fail' or (mode == 'fail-edit' and '--edit-finding' in args):
     sys.exit(3)
-opt = lambda name: args[args.index(name) + 1] if name in args else None
+def opt(name):
+    for arg in args:
+        if arg.startswith(name + '='):
+            return arg[len(name) + 1:]
+    if name not in args:
+        return None
+    value = args[args.index(name) + 1]
+    if value.startswith('-'):
+        sys.exit(2)  # argparse: "expected one argument"
+    return value
 if args[0] == 'agents/map_store.py':
     maps = Path(opt('--root')) / opt('--family') / opt('--program') / opt('--lane') / 'recon/maps'
     rel = f"{opt('--surface')}/_surface/{opt('--run-id')}/index.md"
@@ -51,7 +60,7 @@ if '--set-submission' in args:
             sub['state'] = 'dropped' if mode == 'wrong' else opt('--submission-state')
             for key, flag in (('result', '--submission-result'), ('report', '--submission-report')):
                 if opt(flag):
-                    sub[key] = opt(flag)
+                    sub[key] = opt(flag).strip()
             f['submission'] = sub
 elif '--edit-finding' in args:
     patch = json.loads(Path(opt('--patch-file')).read_text())
@@ -192,7 +201,7 @@ class LedgerActionTests(unittest.TestCase):
         self.assertEqual(args[:2], ['agents/manual_hunter.py', 'fictional'])
         self.assertEqual(args[args.index('--set-submission'):],
                          ['--set-submission', 'D01', '--submission-state', 'submitted',
-                          '--submission-result', 'duplicate', '--submission-report', 'R-17'])
+                          '--submission-result', 'duplicate', '--submission-report=R-17'])
         self.assertEqual(args[args.index('--root') + 1], str(self.root.absolute()))
         # Revision moved on: the old payload is now stale and refused.
         self.assertEqual(self.request('POST', '/api/finding/submission', payload)[1]['error'], 'finding_changed')
@@ -386,6 +395,56 @@ class LedgerActionTests(unittest.TestCase):
         self.assertIn('xss/_surface/', body['map_entry']['path'])
         self.assertEqual(len(self.invocations()), 1)
         self.assertNotIn('review_notes', json.loads(self.ledger.read_text())['findings'][0])
+
+    def test_reclassify_retry_finishes_a_half_finished_move(self):
+        self.start()
+        self.mode.write_text('touch-ledger')
+        self.assertEqual(self.request('POST', '/api/finding/reclassify', self.reclassify_payload())[1]['error'], 'partial_reclassify')
+        self.mode.write_text('ok')
+        # A retry to the other store is not folded into the existing entry.
+        self.assertEqual(self.request('POST', '/api/finding/reclassify', self.reclassify_payload('map'))[1]['error'], 'already_reclassified')
+        status, body = self.request('POST', '/api/finding/reclassify', self.reclassify_payload())
+        self.assertEqual(status, 200, body)
+        finding = json.loads(self.ledger.read_text())['findings'][0]
+        self.assertIn(f"recon/maps/{body['map_entry']['path']}", finding['review_notes'])
+        self.assertEqual(len(self.data()['programs'][0]['lanes'][0]['gadgets']), 1, 'no second entry')
+        self.assertEqual([c[0] for c in self.invocations()], ['agents/map_store.py', 'agents/manual_hunter.py'])
+        # Once annotated, a further move is a real duplicate.
+        self.assertEqual(self.request('POST', '/api/finding/reclassify', self.reclassify_payload())[1]['error'], 'already_reclassified')
+        self.assertEqual(len(self.invocations()), 2)
+
+    def test_values_starting_with_a_dash_reach_the_writer_intact(self):
+        self.start()
+        status, body = self.request('POST', '/api/finding/submission', self.submission_payload(state='submitted', report='-x'))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['finding']['submission']['report'], '-x')
+        status, body = self.request('POST', '/api/finding/reclassify', self.reclassify_payload('map', title='-abc'))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['map_entry']['title'], '-abc')
+        self.assertTrue(self.data()['capabilities']['finding_metadata'])
+
+    def test_unicode_line_breaks_are_refused_in_single_line_values(self):
+        self.start()
+        good = self.add_payload()['finding']
+        for sep in ('\x85', '\u2028', '\u2029'):
+            for field in ('title', 'file', 'description'):
+                with self.subTest(sep=repr(sep), field=field):
+                    body = {**self.add_payload(), 'finding': {**good, field: f'abc{sep}Severity: CRITICAL'}}
+                    self.assertEqual(self.request('POST', '/api/finding/new', body)[0], 400)
+            with self.subTest(sep=repr(sep), field='report'):
+                payload = self.submission_payload(state='submitted', report=f'R{sep}1')
+                self.assertEqual(self.request('POST', '/api/finding/submission', payload)[0], 400)
+            with self.subTest(sep=repr(sep), field='move title'):
+                self.assertEqual(self.request('POST', '/api/finding/reclassify', self.reclassify_payload('map', title=f'abc{sep}x'))[0], 400)
+        self.assertEqual(self.invocations(), [])
+
+    def test_submission_report_is_stripped_before_writing_and_checking(self):
+        self.start()
+        status, body = self.request('POST', '/api/finding/submission', self.submission_payload(state='submitted', report=' R-1\x85'))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['finding']['submission']['report'], 'R-1')
+        self.assertIn('--submission-report=R-1', self.invocations()[-1])
+        self.assertTrue(self.data()['capabilities']['finding_metadata'])
 
     def test_reclassify_annotation_failure_disables_writer(self):
         self.start()

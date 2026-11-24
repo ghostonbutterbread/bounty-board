@@ -13,6 +13,9 @@ SEVERITIES = ('EXCEPTIONAL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', 'UNKNO
 STATUSES = ('raw', 'confirmed', 'dormant', 'novel', 'complete', 'archive')
 # Local submission bookkeeping accepted by BBH manual_hunter --set-submission.
 SUBMISSION_STATES = ('not_submitted', 'submitted', 'dropped')
+# One character of a single-line ledger value. BBH splits notes with
+# str.splitlines(), which also breaks on U+0085, U+2028 and U+2029.
+LINE_CHAR = r'[^\x00-\x1f\x7f\x85\u2028\u2029]'
 SUBMISSION_RESULTS = ('valid', 'duplicate')
 RECLASSIFY_UNSUPPORTED = 'Unavailable: the BBH writer does not offer agents/map_store.py write.'
 GADGET_CHAIN_STATUSES = ('ready', 'deferred', 'watch')
@@ -1584,11 +1587,14 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if not payload:
                 return
             submission = payload['submission']
+            if isinstance(submission, dict) and isinstance(submission.get('report'), str):
+                # BBH stores the stripped value; compare against the same.
+                submission = {**submission, 'report': submission['report'].strip()}
             if (not isinstance(submission, dict) or not submission.get('state') or set(submission) - {'state', 'result', 'report'} or
                     submission['state'] not in SUBMISSION_STATES or
                     submission.get('result') not in (None, *SUBMISSION_RESULTS) or
                     not (submission.get('report') is None or (isinstance(submission['report'], str) and
-                         re.fullmatch(r'[^\x00-\x1f\x7f]{1,200}', submission['report'])))):
+                         re.fullmatch(LINE_CHAR + r'{1,200}', submission['report'])))):
                 return self.reply(400, {'error': 'invalid_ledger_action'})
             family, program, lane, fid = (payload[k] for k in ('family', 'program', 'lane', 'fid'))
             checked = self.finding_precheck(family, program, lane, fid, payload['root_instance'], payload['expected_revision'])
@@ -1599,7 +1605,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if submission.get('result'):
                 args += ['--submission-result', submission['result']]
             if submission.get('report'):
-                args += ['--submission-report', submission['report']]
+                # One argument, so a value starting with '-' is not read as an option.
+                args += [f"--submission-report={submission['report']}"]
 
             def verify(_result):
                 updated = [f for f in ledger(lane_path, []) or [] if f.get('fid') == fid]
@@ -1617,7 +1624,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if not payload:
                 return
             finding = payload['finding']
-            line = r'[^\x00-\x1f\x7f]'
+            line = LINE_CHAR
             if (not isinstance(finding, dict) or set(finding) != {'title', 'class_name', 'severity', 'file', 'description'} or
                     any(not isinstance(v, str) for v in finding.values()) or
                     not re.fullmatch(line + r'{3,200}', finding['title'].strip()) or
@@ -1675,7 +1682,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             payload = self.ledger_action_payload({'fid', 'expected_revision', 'destination', 'details'}, 'reclassify')
             if not payload:
                 return
-            line = r'[^\x00-\x1f\x7f]'
+            line = LINE_CHAR
             destination, details = payload['destination'], payload['details']
             try:
                 if destination not in ('gadgets', 'map') or not isinstance(details, dict):
@@ -1725,61 +1732,72 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if 'map_unavailable_or_invalid' in warnings:
                 return self.reply(409, {'error': 'unsafe_writer_tree'})
             marker = f'finding-{fid.lower()}'
-            if any(marker in (entry.get('tags') or []) for entry in before):
-                return self.reply(409, {'error': 'already_reclassified', 'message': 'A MapStore entry for this finding already exists. Refresh and review it.'})
             now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-            store_tags = (['gadget'] + (['residual'] if details.get('tier') == 'residual' else []) if destination == 'gadgets' else []) + [marker, 'from-ledger', *tags]
-
-            def lane_relative(value):
-                if not isinstance(value, str) or not value:
-                    return 'Not recorded'
-                try:
-                    return Path(value).relative_to(lane_path).as_posix() if Path(value).is_absolute() else value
-                except ValueError:
-                    return value
-            body = '\n'.join([
-                f'## Reclassified from ledger finding {fid}', '',
-                f'- Source finding: {fid} ({family}/{program}/{lane})',
-                f'- Finding title: {finding.get("title") or "Not recorded"}',
-                f'- Finding class: {finding.get("class_name") or "Not recorded"}',
-                f'- Severity as recorded on the finding: {finding.get("severity") or "Not recorded"}',
-                f'- Evidence: {lane_relative(finding.get("evidence_path"))}',
-                f'- Report: {lane_relative(finding.get("report_path") or finding.get("report_dir"))}',
-                f'- Reclassified by: bounty-board at {now}', '',
-                'The original ledger entry, its evidence and its report files are kept.', '',
-                *([note.strip(), ''] if note.strip() else []),
-                *(['Capability:', *[f'- {k}: {v}' for k, v in capability], ''] if capability else []),
-            ])
-            run_id = f'board-{fid.lower()}-{now.replace("-", "").replace(":", "").lower()}'
-            store_argv = ['agents/map_store.py', 'write', '--program', program, '--family', family, '--lane', lane,
-                          '--root', str(root), '--surface', surface, '--scope', 'surface', '--tags', ','.join(store_tags),
-                          '--title', title.strip(), '--agent', 'bounty-board', '--run-id', run_id]
             created = {}
+            existing = [entry for entry in before if marker in (entry.get('tags') or [])]
+            if existing:
+                # A move whose second step (annotating the finding) did not
+                # happen is finished instead of refused. Anything else is a
+                # real duplicate.
+                raw = self.raw_finding(lane_path, fid)
+                notes = raw.get('review_notes') if isinstance(raw, dict) and isinstance(raw.get('review_notes'), str) else ''
+                entry = existing[0]
+                kind = 'gadgets' if 'gadget' in (entry.get('tags') or []) else 'map'
+                if len(existing) != 1 or kind != destination or not entry.get('path') or f'recon/maps/{entry["path"]}' in notes:
+                    return self.reply(409, {'error': 'already_reclassified', 'message': 'A MapStore entry for this finding already exists. Refresh and review it.'})
+                created.update(entry)
+            if not created:  # step 1: create the MapStore entry
+                store_tags = (['gadget'] + (['residual'] if details.get('tier') == 'residual' else []) if destination == 'gadgets' else []) + [marker, 'from-ledger', *tags]
 
-            def verify_store(_result):
-                after = map_entries(lane_path, []) or []
-                known = {entry.get('path') for entry in before}
-                added = [entry for entry in after if entry.get('path') not in known]
-                if (len(after) != len(before) + 1 or len(added) != 1 or added[0].get('title') != title.strip() or
-                        not {marker, *(['gadget'] if destination == 'gadgets' else [])} <= set(added[0].get('tags') or []) or
-                        (destination == 'map' and 'gadget' in (added[0].get('tags') or []))):
-                    return None
-                created.update(added[0])
-                return 200, {}
-            with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
-                bodyfile = Path(temp) / 'board-observation.md'
-                bodyfile.write_text(body, encoding='utf-8')
-                import subprocess
-                try:
-                    result = subprocess.run([str(self.server.writer), *store_argv, '--body-file', str(bodyfile)],
-                                            capture_output=True, text=True, timeout=60)
-                except (OSError, subprocess.SubprocessError):
+                def lane_relative(value):
+                    if not isinstance(value, str) or not value:
+                        return 'Not recorded'
+                    try:
+                        return Path(value).relative_to(lane_path).as_posix() if Path(value).is_absolute() else value
+                    except ValueError:
+                        return value
+                body = '\n'.join([
+                    f'## Reclassified from ledger finding {fid}', '',
+                    f'- Source finding: {fid} ({family}/{program}/{lane})',
+                    f'- Finding title: {finding.get("title") or "Not recorded"}',
+                    f'- Finding class: {finding.get("class_name") or "Not recorded"}',
+                    f'- Severity as recorded on the finding: {finding.get("severity") or "Not recorded"}',
+                    f'- Evidence: {lane_relative(finding.get("evidence_path"))}',
+                    f'- Report: {lane_relative(finding.get("report_path") or finding.get("report_dir"))}',
+                    f'- Reclassified by: bounty-board at {now}', '',
+                    'The original ledger entry, its evidence and its report files are kept.', '',
+                    *([note.strip(), ''] if note.strip() else []),
+                    *(['Capability:', *[f'- {k}: {v}' for k, v in capability], ''] if capability else []),
+                ])
+                run_id = f'board-{fid.lower()}-{now.replace("-", "").replace(":", "").lower()}'
+                store_argv = ['agents/map_store.py', 'write', '--program', program, '--family', family, '--lane', lane,
+                              '--root', str(root), '--surface', surface, '--scope', 'surface', '--tags', ','.join(store_tags),
+                              f'--title={title.strip()}', '--agent', 'bounty-board', '--run-id', run_id]
+
+                def verify_store(_result):
+                    after = map_entries(lane_path, []) or []
+                    known = {entry.get('path') for entry in before}
+                    added = [entry for entry in after if entry.get('path') not in known]
+                    if (len(after) != len(before) + 1 or len(added) != 1 or added[0].get('title') != title.strip() or
+                            not {marker, *(['gadget'] if destination == 'gadgets' else [])} <= set(added[0].get('tags') or []) or
+                            (destination == 'map' and 'gadget' in (added[0].get('tags') or []))):
+                        return None
+                    created.update(added[0])
+                    return 200, {}
+                with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
+                    bodyfile = Path(temp) / 'board-observation.md'
+                    bodyfile.write_text(body, encoding='utf-8')
+                    import subprocess
+                    try:
+                        result = subprocess.run([str(self.server.writer), *store_argv, '--body-file', str(bodyfile)],
+                                                capture_output=True, text=True, timeout=60)
+                    except (OSError, subprocess.SubprocessError):
+                        self.server.writer_enabled = False
+                        return self.reply(503, {'error': 'writer_unavailable', 'message': 'Update may be incomplete; refresh before retrying.'})
+                if result.returncode != 0 or verify_store(result) is None:
                     self.server.writer_enabled = False
-                    return self.reply(503, {'error': 'writer_unavailable', 'message': 'Update may be incomplete; refresh before retrying.'})
-            if result.returncode != 0 or verify_store(result) is None:
-                self.server.writer_enabled = False
-                return self.reply(502, {'error': 'writer_failed' if result.returncode else 'verification_failed',
-                                        'message': 'MapStore update may be incomplete; refresh and review before retrying.'})
+                    return self.reply(502, {'error': 'writer_failed' if result.returncode else 'verification_failed',
+                                            'message': 'MapStore update may be incomplete; refresh and review before retrying.'})
             # Step 2: annotate the original finding. Refuse if it changed meanwhile.
             current = [f for f in ledger(lane_path, []) or [] if f.get('fid') == fid]
             entry_path = f'recon/maps/{created["path"]}'
