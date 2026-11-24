@@ -976,7 +976,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             relative, _ = self.live_relative()
             if not self.server.live_streams.acquire(blocking=False):
                 return self.reply(503, {'error': 'too_many_streams'}, {'Retry-After': '5'})
-            subscriber = live.subscribe(relative)
+            try:
+                # Refuses missing or unreadable reports (answered as 404).
+                subscriber = live.subscribe(relative)
+            except BaseException:
+                self.server.live_streams.release()
+                raise
             try:
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream; charset=utf-8')

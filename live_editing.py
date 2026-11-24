@@ -43,6 +43,12 @@ EDIT_LABELS = (f'your edit {MARKER_TAG}', f'saved version {MARKER_TAG}')
 COPY_LABELS = (f'current file {MARKER_TAG}', f'Syncthing conflict copy {MARKER_TAG}')
 HISTORY_PAGE = 50
 COALESCE_SECONDS = 120
+# A revision handed to a client stays usable as a merge base this long after
+# its last use; history entries themselves are kept until removed by hand.
+BASE_DAYS = 14
+PRUNE_SECONDS = 3600
+# Documents with no live editor are forgotten after this long.
+EVICT_SECONDS = 600
 SUBSCRIBER_QUEUE = 64
 _CONFLICT_STAMP = re.compile(r'\.sync-conflict-(\d{8})-(\d{6})-([A-Z0-9]{7})')
 _DRAFT_KINDS = "('conflict_draft','sync_conflict')"
@@ -230,28 +236,58 @@ def _replace(dir_fd, name, data, expected, hook=None):
 
 
 class History:
-    """Private revision store: blobs by content hash plus per-report events."""
+    """Private revision store: blobs by content hash plus per-report events.
+
+    ``bases`` records every revision a client may still send back as the base
+    of a save: texts handed out by ``open`` (client ``''``, shared), and the
+    revision and sent text returned to one client by ``save``. Written heads
+    are kept through their events. A blob is dropped only when no event and no
+    base row still refers to it.
+    """
 
     def __init__(self, path):
         self.lock = threading.Lock()
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=10)
         with self.lock:
             self.db.execute('PRAGMA journal_mode=WAL')
+            # Each autosave writes a full copy; keep the WAL from staying large.
+            self.db.execute('PRAGMA journal_size_limit=4194304')
             self.db.executescript('''
                 CREATE TABLE IF NOT EXISTS blobs (sha TEXT PRIMARY KEY, content TEXT NOT NULL, created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, key TEXT NOT NULL, sha TEXT NOT NULL,
                     kind TEXT NOT NULL, author TEXT NOT NULL, client TEXT, created REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_key ON events (key, id);
-                CREATE TABLE IF NOT EXISTS bases (key TEXT NOT NULL, sha TEXT NOT NULL, PRIMARY KEY (key, sha));
+                CREATE INDEX IF NOT EXISTS events_sha ON events (sha);
             ''')
+            columns = [row[1] for row in self.db.execute('PRAGMA table_info(bases)')]
+            if columns and 'client' not in columns:
+                # Earlier layout (key, sha): keep its rows as shared bases.
+                self.db.execute('ALTER TABLE bases RENAME TO bases_old')
+            self.db.execute('CREATE TABLE IF NOT EXISTS bases (key TEXT NOT NULL, sha TEXT NOT NULL, client TEXT NOT NULL, '
+                            'used REAL NOT NULL, PRIMARY KEY (key, sha, client))')
+            self.db.execute('CREATE INDEX IF NOT EXISTS bases_sha ON bases (sha)')
+            if columns and 'client' not in columns:
+                self.db.execute("INSERT OR IGNORE INTO bases SELECT key, sha, '', ? FROM bases_old", (time.time(),))
+                self.db.execute('DROP TABLE bases_old')
 
-    def put(self, text, key=None):
+    def put(self, text, key=None, client=''):
+        """Store ``text``; with ``key``, mark it as a base handed to ``client``."""
         sha = revision_of(text)
+        now = time.time()
         with self.lock:
-            self.db.execute('INSERT OR IGNORE INTO blobs VALUES (?,?,?)', (sha, text, time.time()))
+            self.db.execute('INSERT OR IGNORE INTO blobs VALUES (?,?,?)', (sha, text, now))
             if key is not None:
-                self.db.execute('INSERT OR IGNORE INTO bases VALUES (?,?)', (key, sha))
+                self._use(key, sha, client, now)
         return sha
+
+    def hand_out(self, key, sha, client=''):
+        if sha:
+            with self.lock:
+                self._use(key, sha, client or '', time.time())
+
+    def _use(self, key, sha, client, now):
+        self.db.execute('INSERT INTO bases VALUES (?,?,?,?) ON CONFLICT (key, sha, client) DO UPDATE SET used=excluded.used',
+                        (key, sha, client, now))
 
     def text(self, key, sha):
         """Content of a revision this report has seen, or None."""
@@ -261,17 +297,44 @@ class History:
                 'OR EXISTS (SELECT 1 FROM bases WHERE key=? AND sha=?))', (sha, key, sha, key, sha)).fetchone()
         return row[0] if row else None
 
+    def last(self, key):
+        with self.lock:
+            row = self.db.execute(f'SELECT sha FROM events WHERE key=? AND kind NOT IN {_DRAFT_KINDS} '
+                                  'ORDER BY id DESC LIMIT 1', (key,)).fetchone()
+        return row[0] if row else None
+
+    def _drop_if_unused(self, sha):
+        self.db.execute('DELETE FROM blobs WHERE sha=? AND NOT EXISTS (SELECT 1 FROM events WHERE sha=?) '
+                        'AND NOT EXISTS (SELECT 1 FROM bases WHERE sha=?)', (sha, sha, sha))
+
+    def release_client(self, key, client, keep):
+        """Forget bases only ``client`` held for ``key``, except ``keep``.
+
+        Called after a successful save: the client has moved on to the
+        returned revision, so its older private bases cannot come back.
+        """
+        if not client:
+            return
+        keep = tuple(keep)
+        with self.lock:
+            rows = self.db.execute(f'SELECT sha FROM bases WHERE key=? AND client=? AND sha NOT IN ({",".join("?" * len(keep))})',
+                                   (key, client, *keep)).fetchall()
+            for (sha,) in rows:
+                self.db.execute('DELETE FROM bases WHERE key=? AND client=? AND sha=?', (key, client, sha))
+                self._drop_if_unused(sha)
+
     def record(self, key, sha, kind, author, client=None, coalesce=False):
         now = time.time()
         with self.lock:
-            last = self.db.execute('SELECT id, kind, client, created FROM events WHERE key=? ORDER BY id DESC LIMIT 1',
+            last = self.db.execute('SELECT id, kind, client, created, sha FROM events WHERE key=? ORDER BY id DESC LIMIT 1',
                                    (key,)).fetchone()
             if (coalesce and last and last[1] == kind == 'board' and client and last[2] == client
                     and now - last[3] < COALESCE_SECONDS):
-                # One typing session becomes one history entry; its earlier
-                # blobs stay available as merge bases.
+                # One typing session becomes one history entry. The replaced
+                # text stays only while something can still use it as a base.
                 self.db.execute('UPDATE events SET sha=?, created=? WHERE id=?', (sha, now, last[0]))
-                self.db.execute('INSERT OR IGNORE INTO bases VALUES (?,?)', (key, sha))
+                if last[4] != sha:
+                    self._drop_if_unused(last[4])
                 return last[0]
             return self.db.execute('INSERT INTO events (key, sha, kind, author, client, created) VALUES (?,?,?,?,?,?)',
                                    (key, sha, kind, author, client, now)).lastrowid
@@ -285,8 +348,13 @@ class History:
         return [{'id': r[0], 'revision': r[1], 'kind': r[2], 'author': r[3], 'client': r[4], 'created': r[5],
                  'length': r[6]} for r in rows]
 
-    def written_parent(self, key, sha):
-        """For a revision the Board wrote, the head it replaced; else None."""
+    def copy_relation(self, key, sha):
+        """How a conflict copy's text relates to what the Board wrote.
+
+        Returns None when ``sha`` is not a Board write for this report, else
+        ``(parent, later)``: the head that write replaced and the
+        ``(kind, sha, created)`` of every history entry after it.
+        """
         with self.lock:
             row = self.db.execute(f'SELECT id FROM events WHERE key=? AND sha=? AND kind IN {_WRITE_KINDS} '
                                   'ORDER BY id DESC LIMIT 1', (key, sha)).fetchone()
@@ -294,7 +362,9 @@ class History:
                 return None
             parent = self.db.execute(f'SELECT sha FROM events WHERE key=? AND id<? AND kind NOT IN {_DRAFT_KINDS} '
                                      'ORDER BY id DESC LIMIT 1', (key, row[0])).fetchone()
-        return parent[0] if parent else None
+            later = self.db.execute(f'SELECT kind, sha, created FROM events WHERE key=? AND id>? AND kind NOT IN {_DRAFT_KINDS} '
+                                    'ORDER BY id', (key, row[0])).fetchall()
+        return (parent[0] if parent else None), later
 
     def likely_base(self, key, until):
         """Best guess at the version an unknown concurrent edit started from.
@@ -313,12 +383,14 @@ class History:
                                       'ORDER BY id DESC LIMIT 1', (key, until)).fetchone()
         return row[0] if row else None
 
-    def prune(self, older_than_days=14):
-        """Drop merge-base blobs no history entry uses once they are old."""
-        cutoff = time.time() - older_than_days * 86400
+    def prune(self, base_days=BASE_DAYS):
+        """Forget bases unused for ``base_days`` and blobs nothing refers to."""
+        cutoff = time.time() - base_days * 86400
         with self.lock:
-            self.db.execute('DELETE FROM blobs WHERE created<? AND sha NOT IN (SELECT sha FROM events)', (cutoff,))
-            self.db.execute('DELETE FROM bases WHERE sha NOT IN (SELECT sha FROM blobs)')
+            self.db.execute('DELETE FROM bases WHERE used<?', (cutoff,))
+            # Blobs younger than an hour may belong to an event being recorded.
+            self.db.execute('DELETE FROM blobs WHERE created<? AND NOT EXISTS (SELECT 1 FROM events e WHERE e.sha=blobs.sha) '
+                            'AND NOT EXISTS (SELECT 1 FROM bases b WHERE b.sha=blobs.sha)', (time.time() - 3600,))
 
     def close(self):
         with self.lock:
@@ -340,10 +412,12 @@ class _Doc:
         self.subscribers = set()
         self.touched = 0.0
         self.copies = ()
+        self.tried = ()
 
 
 class LiveReports:
-    def __init__(self, root, state_dir, *, editable=None, poll_interval=1.0, idle_seconds=30, hook=None):
+    def __init__(self, root, state_dir, *, editable=None, poll_interval=1.0, idle_seconds=30, hook=None,
+                 evict_seconds=EVICT_SECONDS):
         self.root = Path(root).resolve(strict=True)
         state = Path(state_dir).expanduser().absolute()
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -358,6 +432,8 @@ class LiveReports:
         self.workdir.mkdir(mode=0o700, exist_ok=True)
         self.history = History(state / 'history.sqlite3')
         self.history.prune()
+        self.pruned = time.monotonic()
+        self.evict_seconds = evict_seconds
         self.editable = editable or (lambda relative, text: True)
         self.hook = hook
         self.poll_interval = poll_interval
@@ -374,7 +450,16 @@ class LiveReports:
             doc = self.docs.get(relative)
             if doc is None:
                 doc = self.docs[relative] = _Doc(relative)
+            # Set under docs_lock so the watcher never evicts a document a
+            # request has just picked up.
+            doc.touched = time.monotonic()
             return doc
+
+    def _forget_unopened(self, doc):
+        """Drop a document entry created for a path that never opened."""
+        with self.docs_lock:
+            if doc.head is None and not doc.subscribers and self.docs.get(doc.relative) is doc:
+                del self.docs[doc.relative]
 
     def _observe(self, doc):
         """Read the file; record and announce any version not seen before."""
@@ -403,8 +488,15 @@ class LiveReports:
             raise ReportUnavailable('not UTF-8') from exc
         first = doc.head is None
         sha = self.history.put(text)
-        if sha != doc.head:
-            self.history.record(doc.relative, sha, 'observed' if first else 'external', 'File on disk' if first else 'Changed outside the Board')
+        if first:
+            # After a restart or eviction, only record what history lacks.
+            last = self.history.last(doc.relative)
+            if last is None:
+                self.history.record(doc.relative, sha, 'observed', 'File on disk')
+            elif last != sha:
+                self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
+        elif sha != doc.head:
+            self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
         changed = sha != doc.head and not first
         doc.raw, doc.text, doc.head, doc.crlf = data, text, sha, _crlf(data)
         doc.editable = bool(self.editable(doc.relative, text))
@@ -423,7 +515,11 @@ class LiveReports:
             self._observe(doc)
             if doc.missing:
                 raise ReportUnavailable('missing')
-            self._refresh_copies(doc)
+            if doc.reason == 'not_utf8':
+                raise ReportUnavailable('not UTF-8')
+            # Opening only lists conflict copies; the watcher resolves them.
+            self._refresh_copies(doc, resolve=False)
+            self.history.hand_out(doc.relative, doc.head)
             return self._snapshot(doc)
 
     # -- writing ---------------------------------------------------------
@@ -456,7 +552,12 @@ class LiveReports:
                 return target, False
             # A write slipped in between the check and the exchange. It is no
             # longer on disk: keep it in history and merge it back.
-            theirs = _normalize(displaced.decode('utf-8', 'replace'))
+            try:
+                theirs = _normalize(displaced.decode('utf-8'))
+            except UnicodeDecodeError:
+                # Bytes this server cannot merge: put them back untouched.
+                doc.text, doc.head = previous, revision_of(previous)
+                self._put_back(doc, displaced)
             self.history.record(doc.relative, self.history.put(theirs), 'external', 'Changed outside the Board')
             merged, conflicted = merge3(previous, target, theirs, self.workdir)
             if conflicted:
@@ -486,7 +587,10 @@ class LiveReports:
             if again is None:
                 return merge3(previous, target, doc.text, self.workdir)
             # Yet another late write: keep it too and merge it with theirs.
-            later = _normalize(again.decode('utf-8', 'replace'))
+            try:
+                later = _normalize(again.decode('utf-8'))
+            except UnicodeDecodeError:
+                self._put_back(doc, again)
             self.history.record(doc.relative, self.history.put(later), 'external', 'Changed outside the Board')
             combined, clash = merge3(previous, theirs, later, self.workdir)
             if clash:
@@ -494,19 +598,52 @@ class LiveReports:
             displaced, theirs = _encode(combined, doc.crlf), combined
         raise ReportUnavailable('report keeps changing; retry')
 
+    def _put_back(self, doc, data):
+        """Return non-UTF-8 bytes displaced by a write to disk, then refuse edits.
+
+        Always raises: NotEditable when the bytes are back on disk, or
+        ReportUnavailable when yet another writer replaced them meanwhile.
+        """
+        original = data
+        for _ in range(5):
+            dir_fd, name = _open_parent(self.root, doc.relative)
+            try:
+                again = _replace(dir_fd, name, data, doc.raw)
+            except _Changed:
+                break  # a newer write is on disk; the next observation reads it
+            finally:
+                os.close(dir_fd)
+            doc.raw = data
+            if again is None:
+                break
+            data = again  # an even later write was displaced: keep that one
+        doc.identity = None
+        if doc.raw == original:
+            doc.editable, doc.reason = False, 'not_utf8'
+            raise NotEditable('not_utf8')
+        doc.raw = None
+        raise ReportUnavailable('report keeps changing; retry')
+
     def _adopt(self, doc, data):
-        text = _normalize(data.decode('utf-8', 'replace'))
+        try:
+            text = _normalize(data.decode('utf-8'))
+        except UnicodeDecodeError:
+            # Nothing was written; leave the bytes alone and stop editing.
+            doc.raw, doc.editable, doc.reason, doc.identity = data, False, 'not_utf8', None
+            raise NotEditable('not_utf8') from None
         sha = self.history.put(text)
         self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
         doc.raw, doc.text, doc.head, doc.crlf = data, text, sha, _crlf(data)
         self._refresh_identity(doc)
         self._broadcast(doc, {'type': 'changed', 'revision': sha, 'author': 'Changed outside the Board'})
 
-    def _refresh_identity(self, doc):
-        try:
-            doc.identity = _identity(os.stat(self.root / doc.relative, follow_symlinks=False))
-        except OSError:
-            doc.identity = None
+    @staticmethod
+    def _refresh_identity(doc):
+        # Do not stat the path after a write: an outside rename landing right
+        # after the exchange would be taken for our own file and never
+        # announced. Clearing the identity makes the watcher read the file
+        # once more; if it still holds what we wrote, nothing is announced.
+        doc.identity = None
 
     def save(self, relative, base, content, *, author='Board editor', client=None, kind='board'):
         """Merge ``content`` (based on revision ``base``) into the report."""
@@ -524,7 +661,7 @@ class LiveReports:
             if not doc.editable:
                 raise NotEditable(doc.reason or 'not_editable')
             before = doc.head
-            sent = self.history.put(content, relative)
+            sent = self.history.put(content, relative, client or '')
             if base == doc.head:
                 target, conflicted = content, False
             else:
@@ -535,9 +672,13 @@ class LiveReports:
                 self._broadcast(doc, {'type': 'changed', 'revision': doc.head,
                                       'author': author if not conflicted else 'Changed outside the Board',
                                       **({'client': client} if not conflicted else {})})
+            # The client may send any revision returned here back as a base.
+            self.history.hand_out(relative, doc.head, client)
             if conflicted:
                 self.history.record(relative, sent, 'conflict_draft', author, client)
                 return {'status': 'conflict', 'revision': doc.head, 'content': target, 'sent_revision': sent}
+            # It has moved on from its older private bases.
+            self.history.release_client(relative, client, (doc.head, sent))
             return {'status': 'saved' if doc.text == content else 'merged', 'revision': doc.head,
                     'content': doc.text, 'sent_revision': sent}
 
@@ -614,26 +755,25 @@ class LiveReports:
     def _merge_preview(self, doc, text, info):
         sha = revision_of(text)
         if sha == doc.head:
-            return {'merged': doc.text, 'conflicted': False, 'known': True}
-        base = self.history.written_parent(doc.relative, sha)
-        known = base is not None
-        if base is None:
-            base = self.history.likely_base(doc.relative, info.st_mtime_ns / 1e9 + 1)
+            return {'merged': doc.text, 'conflicted': False}
+        relation = self.history.copy_relation(doc.relative, sha)
+        base = relation[0] if relation else self.history.likely_base(doc.relative, info.st_mtime_ns / 1e9 + 1)
         base_text = self.history.text(doc.relative, base) if base else None
         merged, conflicted = merge3(base_text, doc.text, text, self.workdir, COPY_LABELS)
-        return {'merged': merged, 'conflicted': conflicted, 'known': known}
+        return {'merged': merged, 'conflicted': conflicted}
 
-    def _refresh_copies(self, doc):
+    def _refresh_copies(self, doc, resolve):
         copies = self._copy_names(doc)
+        if resolve and copies and copies != doc.tried:
+            for name, _, _ in copies:
+                try:
+                    self._auto_resolve(doc, name)
+                except (OSError, KeyError, ReportUnavailable, NotEditable, UnicodeError):
+                    continue
+            copies = doc.tried = self._copy_names(doc)
         if copies == doc.copies:
             return
         doc.copies = copies
-        for name, _, _ in copies:
-            try:
-                self._auto_resolve(doc, name)
-            except (OSError, KeyError, ReportUnavailable, UnicodeError):
-                continue
-        doc.copies = self._copy_names(doc)
         self._broadcast(doc, {'type': 'sync_conflicts', 'copies': [self._copy_info(c) for c in doc.copies]})
 
     def _archive_copy(self, doc, name, text):
@@ -641,19 +781,48 @@ class LiveReports:
         self.history.record(doc.relative, sha, 'sync_conflict', f'Syncthing conflict copy {name}')
 
     def _auto_resolve(self, doc, name):
-        """Silently fold back a Board write that lost a Syncthing conflict."""
+        """Fold back a Board write that lost a Syncthing conflict.
+
+        Only two cases are handled without review; every other copy stays
+        listed for the person editing:
+
+        * the copy holds the newest Board write and the only change after it
+          is the one Syncthing put in its place (the copy was created no later
+          than that change was seen): merge it from the head it replaced;
+        * the copy holds a Board write that later Board saves built on, with
+          no outside change since: the head already contains it, so it is
+          archived and removed without merging. Merging there could bring
+          back text a later save deleted on purpose.
+        """
         if not doc.editable or doc.missing:
             return
         text, info = self._read_copy(doc, name)
-        preview = self._merge_preview(doc, text, info)
-        if not preview['known'] or preview['conflicted']:
-            return
-        self._archive_copy(doc, name, text)
-        if preview['merged'] != doc.text:
-            target, conflicted = self._write(doc, preview['merged'], 'merged', 'Merged a Syncthing conflict copy', None)
-            if conflicted:
+        sha = revision_of(text)
+        if sha != doc.head:
+            relation = self.history.copy_relation(doc.relative, sha)
+            if relation is None:
                 return
-            self._broadcast(doc, {'type': 'changed', 'revision': doc.head, 'author': 'Merged a Syncthing conflict copy'})
+            parent, later = relation
+            writes = [kind in ('board', 'merged', 'restore') for kind, _, _ in later]
+            if not later or not all(writes):
+                if len(later) != 1 or any(writes):
+                    return
+                _, head, seen = later[0]
+                if head != doc.head or info.st_ctime_ns / 1e9 > seen + 2:
+                    return
+                base_text = self.history.text(doc.relative, parent) if parent else None
+                merged, conflicted = merge3(base_text, doc.text, text, self.workdir, COPY_LABELS)
+                if conflicted:
+                    return
+                self._archive_copy(doc, name, text)
+                if merged != doc.text:
+                    _, conflicted = self._write(doc, merged, 'merged', 'Merged a Syncthing conflict copy', None)
+                    if conflicted:
+                        return
+                    self._broadcast(doc, {'type': 'changed', 'revision': doc.head, 'author': 'Merged a Syncthing conflict copy'})
+                self._remove_copy(doc, name, info)
+                return
+        self._archive_copy(doc, name, text)
         self._remove_copy(doc, name, info)
 
     def sync_conflict(self, relative, name):
@@ -679,7 +848,7 @@ class LiveReports:
                 raise ValueError('invalid action')
             self._archive_copy(doc, name, text)
             removed = self._remove_copy(doc, name, info)
-            doc.copies = self._copy_names(doc)
+            doc.copies = doc.tried = self._copy_names(doc)
             self._broadcast(doc, {'type': 'sync_conflicts', 'copies': [self._copy_info(c) for c in doc.copies]})
             return {**(result or {'status': 'discarded', 'revision': doc.head}), 'copy_removed': removed}
 
@@ -688,6 +857,13 @@ class LiveReports:
         doc = self._doc(relative)
         subscriber = queue.Queue(SUBSCRIBER_QUEUE)
         with doc.lock:
+            try:
+                self._observe(doc)
+                if doc.missing or doc.reason == 'not_utf8':
+                    raise ReportUnavailable('missing or not UTF-8')
+            except ReportUnavailable:
+                self._forget_unopened(doc)
+                raise
             doc.subscribers.add(subscriber)
             doc.touched = time.monotonic()
         return subscriber
@@ -711,23 +887,40 @@ class LiveReports:
 
     def _watch(self):
         while not self.stopped.wait(self.poll_interval):
-            now = time.monotonic()
-            with self.docs_lock:
-                docs = list(self.docs.values())
-            for doc in docs:
-                if not doc.subscribers and now - doc.touched > self.idle_seconds:
+            self._tick()
+
+    def _tick(self):
+        now = time.monotonic()
+        if now - self.pruned > PRUNE_SECONDS:
+            self.pruned = now
+            try:
+                self.history.prune()
+            except sqlite3.Error:
+                pass
+        with self.docs_lock:
+            for relative, doc in list(self.docs.items()):
+                if doc.subscribers or now - doc.touched <= self.evict_seconds or not doc.lock.acquire(blocking=False):
                     continue
                 try:
-                    current = _identity(os.stat(self.root / doc.relative, follow_symlinks=False))
-                except OSError:
-                    current = None
-                try:
-                    with doc.lock:
-                        if current != doc.identity:
-                            self._observe(doc)
-                        self._refresh_copies(doc)
-                except (OSError, ReportUnavailable, sqlite3.Error):
-                    continue
+                    if not doc.subscribers:
+                        del self.docs[relative]
+                finally:
+                    doc.lock.release()
+            docs = list(self.docs.values())
+        for doc in docs:
+            if not doc.subscribers and now - doc.touched > self.idle_seconds:
+                continue
+            try:
+                current = _identity(os.stat(self.root / doc.relative, follow_symlinks=False))
+            except OSError:
+                current = None
+            try:
+                with doc.lock:
+                    if current != doc.identity:
+                        self._observe(doc)
+                    self._refresh_copies(doc, resolve=True)
+            except (OSError, ReportUnavailable, NotEditable, sqlite3.Error):
+                continue
 
     def close(self):
         self.stopped.set()

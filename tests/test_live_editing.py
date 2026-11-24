@@ -203,6 +203,10 @@ class LiveEngineTests(unittest.TestCase):
         copy = self.report.parent / 'report.sync-conflict-20261123-133814-UQMO6NK.md'
         os.rename(self.report, copy)
         self.report.write_text(BASE.replace('closing', 'closing (other device)'))
+        listed = self.live.open(REL)
+        self.assertTrue(copy.exists(), 'opening a report only lists copies')
+        self.assertEqual([c['name'] for c in listed['sync_conflicts']], [copy.name])
+        self.live._tick()  # the watcher resolves it
         result = self.live.open(REL)
         text = self.report.read_text()
         self.assertIn('intro (board)', text)
@@ -278,6 +282,130 @@ class LiveEngineTests(unittest.TestCase):
                 break
         self.assertIn(None, drained)
 
+
+    # -- review round 1 regressions ------------------------------------------
+    def test_stale_board_copy_never_brings_back_a_deleted_line(self):
+        opened = self.live.open(REL)
+        added = self.live.save(REL, opened['revision'], BASE.replace('middle line\n', 'middle line\nADDED\n'), client='a')
+        self.live.save(REL, added['revision'], added['content'].replace('ADDED\n', ''), client='b')
+        copy = self.report.parent / 'report.sync-conflict-20261124-101010-ABCDEFG.md'
+        copy.write_text(added['content'])  # an older Board write turns up as a copy
+        self.live.open(REL)
+        self.live._tick()
+        self.assertNotIn('ADDED', self.report.read_text())
+        self.assertFalse(copy.exists(), 'a copy the head already builds on is archived and removed')
+        self.assertIn('sync_conflict', [e['kind'] for e in self.live.history_page(REL)])
+
+    def test_copy_turning_up_after_a_later_outside_change_needs_review(self):
+        opened = self.live.open(REL)
+        added = self.live.save(REL, opened['revision'], BASE.replace('middle line\n', 'middle line\nADDED\n'), client='a')
+        self.report.write_text(BASE.replace('closing', 'closing (agent)'))  # an agent deleted ADDED on purpose
+        self.live.open(REL)
+        time.sleep(2.2)
+        copy = self.report.parent / 'report.sync-conflict-20261124-101011-ABCDEFG.md'
+        copy.write_text(added['content'])  # created well after that change was seen
+        self.live._tick()
+        self.assertNotIn('ADDED', self.report.read_text())
+        self.assertTrue(copy.exists())
+        self.assertEqual([c['name'] for c in self.live.open(REL)['sync_conflicts']], [copy.name])
+
+    def test_open_never_writes_for_a_conflict_copy(self):
+        opened = self.live.open(REL)
+        mine = self.live.save(REL, opened['revision'], BASE.replace('intro', 'intro (board)'), client='a')
+        copy = self.report.parent / 'report.sync-conflict-20261124-101012-ABCDEFG.md'
+        os.rename(self.report, copy)
+        self.report.write_text(BASE.replace('closing', 'closing (other device)'))
+        before = self.report.read_bytes()
+        self.live.open(REL)
+        self.assertEqual(self.report.read_bytes(), before)
+        self.assertEqual(copy.read_text(), mine['content'])
+
+    def test_coalesced_merged_revision_stays_a_merge_base(self):
+        h0 = self.live.open(REL)['revision']
+        self.report.write_text(BASE.replace('closing', 'closing (agent)'))
+        first = self.live.save(REL, h0, BASE.replace('intro', 'intro A'), client='a')
+        self.assertEqual(first['status'], 'merged')
+        tab_b = self.live.open(REL)
+        self.assertEqual(tab_b['revision'], first['revision'])
+        self.live.save(REL, first['revision'], first['content'].replace('title', 'title A'), client='a')  # coalesced
+        result = self.live.save(REL, tab_b['revision'], tab_b['content'].replace('middle', 'middle B'), client='b')
+        self.assertEqual(result['status'], 'merged')
+        text = self.report.read_text()
+        for expected in ('intro A', 'title A', 'middle B', 'closing (agent)'):
+            self.assertIn(expected, text)
+
+    def test_autosaves_keep_only_blobs_that_can_still_be_used(self):
+        rev = self.live.open(REL)['revision']
+        text = BASE
+        for i in range(30):
+            text += f'typed {i}\n'
+            rev = self.live.save(REL, rev, text, client='a')['revision']
+        count = self.live.history.db.execute('SELECT count(*) FROM blobs').fetchone()[0]
+        self.assertLessEqual(count, 3, 'one coalesced typing session must not keep a copy per save')
+        self.assertEqual(self.live.history.text(REL, rev), text)
+        # Periodic pruning forgets bases unused for the retention window but
+        # keeps every history entry.
+        self.live.history.db.execute('UPDATE bases SET used=0')
+        self.live.history.db.execute('UPDATE blobs SET created=0')
+        self.live.pruned = -1e9
+        self.live._tick()
+        self.assertEqual(self.live.history.db.execute('SELECT count(*) FROM bases').fetchone()[0], 0)
+        self.assertEqual(self.live.revision(REL, rev), text, 'history entries survive pruning')
+
+    def test_non_utf8_late_write_is_put_back_and_editing_stops(self):
+        raw = BASE.replace('closing', 'caf\xe9').encode('latin-1')
+        for point in ('before_check', 'before_exchange'):
+            with self.subTest(point=point):
+                self.report.write_text(BASE)
+                live = self.make(evict_seconds=0)
+                opened = live.open(REL)
+                self.hooks[point] = lambda: self.report.write_bytes(raw)
+                with self.assertRaises(NotEditable):
+                    live.save(REL, opened['revision'], BASE.replace('intro', 'intro (me)'), client='a')
+                self.assertEqual(self.report.read_bytes(), raw)
+                with self.assertRaises(NotEditable):
+                    live.save(REL, opened['revision'], BASE.replace('intro', 'intro again'), client='a')
+                with self.assertRaises(ReportUnavailable):
+                    live.open(REL)
+                live.close()
+
+    def test_outside_write_right_after_a_save_is_announced(self):
+        opened = self.live.open(REL)
+        events = self.live.subscribe(REL)
+        agent = BASE.replace('closing', 'closing (agent)')
+        original = self.live._refresh_identity
+
+        def agent_renames_in_then_refresh(doc):
+            # An agent's temp-file-and-rename lands right after the exchange.
+            self.live._refresh_identity = original
+            temp = self.report.with_name('agent.tmp')
+            temp.write_text(agent)
+            os.replace(temp, self.report)
+            original(doc)
+        self.live._refresh_identity = agent_renames_in_then_refresh
+        self.live.save(REL, opened['revision'], BASE.replace('intro', 'intro (me)'), client='a')
+        while not events.empty():
+            events.get_nowait()
+        self.live._tick()
+        self.assertEqual(events.get_nowait()['revision'], revision_of(agent))
+
+    def test_events_for_a_missing_report_are_refused_and_idle_documents_evicted(self):
+        with self.assertRaises(ReportUnavailable):
+            self.live.subscribe('web_bounty/alpha/web/reports/nope.md')
+        self.assertNotIn('web_bounty/alpha/web/reports/nope.md', self.live.docs)
+        live = self.make(evict_seconds=0)
+        live.open(REL)
+        subscriber = live.subscribe(REL)
+        time.sleep(0.01)
+        live._tick()
+        self.assertIn(REL, live.docs, 'documents with an open editor stay')
+        live.unsubscribe(REL, subscriber)
+        time.sleep(0.01)
+        live._tick()
+        self.assertNotIn(REL, live.docs)
+        kinds = [e['kind'] for e in live.history_page(REL)]
+        live.open(REL)
+        self.assertEqual([e['kind'] for e in live.history_page(REL)], kinds, 'reopening does not duplicate history')
 
 if __name__ == '__main__':
     unittest.main()

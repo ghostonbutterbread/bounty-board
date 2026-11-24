@@ -116,6 +116,12 @@ class LiveAPITests(unittest.TestCase):
         self.assertEqual(lines[0], b'event: changed\n')
         self.assertIn(b'Changed outside the Board', lines[1])
 
+    def test_event_stream_for_missing_report_is_refused_without_leaking_a_slot(self):
+        for _ in range(40):  # more than the stream limit: a leaked slot would turn into 503
+            status, payload = self.request('GET', f'/api/live/events?{QUERY}missing.md')
+            self.assertEqual((status, payload['error']), (404, 'report_not_found_or_unavailable'))
+        self.assertNotIn(f'{LANE}/reports/missing.md', self.server.live.docs)
+
     def test_live_edit_excludes_old_publication_modes(self):
         state = Path(self.tmp.name) / 'other'
         with self.assertRaises(ValueError):
