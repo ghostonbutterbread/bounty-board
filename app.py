@@ -9,6 +9,12 @@ from urllib.parse import urlsplit, parse_qs
 FAMILIES = {'web_bounty': {'web', 'api'}, 'binaries': {'apk', 'exe', 'mac'}}
 SEVERITIES = ('EXCEPTIONAL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', 'UNKNOWN')
 STATUSES = ('raw', 'confirmed', 'dormant', 'novel', 'complete', 'archive')
+# Local submission bookkeeping accepted by BBH manual_hunter --set-submission.
+SUBMISSION_STATES = ('not_submitted', 'submitted', 'dropped')
+SUBMISSION_RESULTS = ('valid', 'duplicate')
+RECLASSIFY_UNSUPPORTED = 'Unavailable: the BBH writer does not offer agents/map_store.py write.'
+GADGET_CHAIN_STATUSES = ('ready', 'deferred', 'watch')
+RESIDUAL_CLASSES = ('reachability', 'format', 'enforcement-point', 'trust-anchor', 'oracle', 'capability')
 METADATA_WRITE_WARNING = ('Uncoordinated metadata writes can overwrite concurrent edits, including edits '
                           'on other hosts or from sync clients; no shared compare-and-swap exists. '
                           'Stop other writers before editing.')
@@ -53,7 +59,7 @@ def read_file(root, relative, *, include_identity=False):
         os.close(fd)
 
 
-def ledger(lane, warnings):
+def ledger(lane, warnings, canonical_out=None):
     try:
         contents, identity = read_file(lane, 'ledgers/ledger.json', include_identity=True)
         raw = json.loads(contents)
@@ -63,7 +69,8 @@ def ledger(lane, warnings):
             raise ValueError('unsupported finding shape')
         fields = ('fid', 'type', 'title', 'class_name', 'severity', 'status',
                   'review_tier', 'submission', 'submission_status', 'platform_outcome', 'file',
-                  'severity_rationale', 'report_path', 'evidence_path', 'report_dir', 'current')
+                  'severity_rationale', 'report_path', 'evidence_path', 'report_dir', 'current',
+                  'first_seen', 'last_seen')
         # Reject unsafe JSON anywhere in this ledger, including fields that are
         # not currently projected, without exposing its contents in a warning.
         json.dumps(raw, ensure_ascii=False, allow_nan=False).encode('utf-8')
@@ -75,6 +82,10 @@ def ledger(lane, warnings):
                    'metadata_revision': hashlib.sha256(source + json.dumps(entry, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')).hexdigest(),
                    'status': entry.get('status') or (entry['current'].get('status') if isinstance(entry.get('current'), dict) else None),
                    'title': entry.get('title') or entry.get('type')} for entry in raw['findings']]
+        if canonical_out is not None:
+            # Same parsed bytes as the revisions above (used by ledger_snapshot).
+            canonical_out.extend(json.dumps(entry, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+                                 for entry in raw['findings'])
         # Account for the actual portfolio nesting at the response boundary.
         json.dumps({'programs': [{'lanes': [{'findings': result}]}]},
                    ensure_ascii=False, allow_nan=False).encode('utf-8')
@@ -84,6 +95,15 @@ def ledger(lane, warnings):
     except (OSError, ValueError, UnicodeError, RecursionError):
         warnings.append('ledger_unavailable_or_invalid')
     return None
+
+
+def ledger_snapshot(lane):
+    """{fid: (metadata_revision, canonical entry JSON)} for unique FIDs, from one read."""
+    canonical = []
+    projected = ledger(lane, [], canonical) or []
+    fids = [f.get('fid') for f in projected]
+    return {f['fid']: (f['metadata_revision'], text) for f, text in zip(projected, canonical)
+            if isinstance(f.get('fid'), str) and fids.count(f['fid']) == 1}
 
 
 def map_entries(lane, warnings):
@@ -298,6 +318,49 @@ def writer_available(writer):
             ('--edit-finding', '--patch-file', '--root', '--family', '--lane'))
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def writer_features(writer):
+    """Ledger actions the BBH writer advertises in its --help output."""
+    import re
+    import subprocess
+    if not writer:
+        return frozenset()
+    try:
+        result = subprocess.run([str(writer), 'agents/manual_hunter.py', '--help'],
+                                capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    if result.returncode != 0:
+        return frozenset()
+    required = {'submission': ('--set-submission', '--submission-state', '--submission-result', '--submission-report'),
+                'add_finding': ('--from-file',)}
+    features = {name for name, options in required.items() if all(o in result.stdout for o in options)}
+    try:
+        # Probe with --help as the second argument, like every other probe, so
+        # wrappers that log writes can tell probes apart. Subcommand flags are
+        # a compatibility assumption; a failing write disables the writer.
+        store = subprocess.run([str(writer), 'agents/map_store.py', '--help'],
+                               capture_output=True, text=True, timeout=15)
+        commands = re.search(r'\{([a-z,-]+)\}', store.stdout or '')
+        if store.returncode == 0 and commands and 'write' in commands.group(1).split(','):
+            features.add('reclassify')
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return frozenset(features)
+
+
+def ledger_action_capabilities(server):
+    """Advertise ledger actions; unsupported actions stay visibly disabled."""
+    enabled = bool(server.writer_enabled)
+    features = server.writer_features if enabled else frozenset()
+    return {
+        'submission': {'enabled': 'submission' in features, 'states': list(SUBMISSION_STATES),
+                       'results': list(SUBMISSION_RESULTS), 'local_only': True},
+        'add_finding': {'enabled': 'add_finding' in features},
+        'reclassify': {store: ({'enabled': True} if 'reclassify' in features else {'enabled': False, 'reason': RECLASSIFY_UNSUPPORTED})
+                       for store in ('gadgets', 'map')},
+    }
 
 
 def valid_tailnet_host(host):
@@ -990,6 +1053,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'finding_fields': ['severity', 'class_name', 'status', 'severity_rationale'] if self.server.writer_enabled else [],
                                           'finding_options': {'severity': SEVERITIES, 'status': STATUSES} if self.server.writer_enabled else {},
                                           'finding_metadata_warning': METADATA_WRITE_WARNING,
+                                          'ledger_actions': ledger_action_capabilities(self.server),
                                           'report_edit': False,
                                           'collaboration': collaboration is not None,
                                           'report_autosave': report_autosave,
@@ -1144,11 +1208,68 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.live_request('POST')
             if urlsplit(self.path).path == '/api/collaboration':
                 return self.collaboration_admitted(write=True)
+            # Ledger actions share the metadata lock with PATCH /api/finding.
+            action = {'/api/finding/submission': self.set_submission, '/api/finding/new': self.add_finding,
+                      '/api/finding/reclassify': self.reclassify_finding}.get(urlsplit(self.path).path)
+            if action:
+                with metadata_write_lock:
+                    return action()
             self.do_PUT()
 
         def do_PATCH(self):
             with metadata_write_lock:
                 return self.patch_finding()
+
+        def finding_precheck(self, family, program, lane, fid, root_instance, expected_revision):
+            """Shared pre-write checks for every BBH finding writer.
+
+            Returns (lane_path, finding) or None after replying with the refusal.
+            With expected_revision=None only the lane/root/tree checks run and
+            finding is None (used to add a new finding)."""
+            import os
+            lane_path = root / family / program / lane
+            before = root_snapshot()
+            if not before or before[2] != root_instance:
+                return self.reply(409, {'error': 'root_changed'})
+            if any(path.is_symlink() or not path.is_dir() for path in (root, root / family, root / family / program, lane_path)):
+                return self.reply(404, {'error': 'finding_not_found'})
+            layout_paths = [lane_path / p for p in (
+                'context', 'context/target_profile.json', 'context/me_context.md', 'context/session_handoff.md',
+                'notes', 'notes/index.md', 'notes/faq', 'notes/hypotheses', 'notes/handoffs', 'notes/timeline',
+                'working', 'working/scratch', 'recon', 'recon/urls', 'recon/params', 'recon/js',
+                'recon/maps', 'recon/artifacts', 'input', 'input/original', 'input/extracted', 'input/metadata')]
+            layout_paths.append(root / family / program / 'shared')
+            if any(path.is_symlink() for path in layout_paths):
+                return self.reply(409, {'error': 'unsafe_writer_tree'})
+            # BBH refresh touches generated paths; reject escaping symlinks.
+            for directory in (lane_path / 'ledgers', lane_path / 'reports'):
+                if directory.is_symlink() or not directory.is_dir():
+                    return self.reply(409, {'error': 'unsafe_writer_tree'})
+                walk_errors = []
+                for current, dirs, files in os.walk(directory, followlinks=False, onerror=walk_errors.append):
+                    if any((Path(current) / name).is_symlink() for name in dirs):
+                        return self.reply(409, {'error': 'unsafe_writer_tree'})
+                    for name in files:
+                        path = Path(current) / name
+                        if path.is_symlink():
+                            try:
+                                target = path.resolve(strict=True)
+                                if directory.name != 'reports' or not target.is_relative_to(directory.resolve()):
+                                    raise ValueError('escaping link')
+                            except (OSError, ValueError, RuntimeError):
+                                return self.reply(409, {'error': 'unsafe_writer_tree'})
+                if walk_errors:
+                    return self.reply(409, {'error': 'unsafe_writer_tree'})
+            self.pre_write = ledger_snapshot(lane_path)
+            if expected_revision is None:
+                return (lane_path, None) if root_snapshot() == before else self.reply(409, {'error': 'root_changed'})
+            findings = ledger(lane_path, [])
+            matches = [f for f in findings or [] if isinstance(f.get('fid'), str) and f['fid'].upper() == fid.upper()]
+            if len(matches) != 1 or matches[0]['fid'] != fid:
+                return self.reply(404, {'error': 'finding_not_found'})
+            if root_snapshot() != before or matches[0]['metadata_revision'] != expected_revision:
+                return self.reply(409, {'error': 'finding_changed', 'message': 'Finding changed since it was loaded. Copy your pending value, refresh, and review before retrying.'})
+            return lane_path, matches[0]
 
         def patch_finding(self):
             import os
@@ -1186,45 +1307,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     raise ValueError('invalid value')
             except (ValueError, UnicodeError, json.JSONDecodeError):
                 return self.reply(400, {'error': 'invalid_finding_patch'})
-            lane_path = root / family / program / lane
-            before = root_snapshot()
-            if not before or before[2] != payload['root_instance']:
-                return self.reply(409, {'error': 'root_changed'})
-            if any(path.is_symlink() or not path.is_dir() for path in (root, root / family, root / family / program, lane_path)):
-                return self.reply(404, {'error': 'finding_not_found'})
-            layout_paths = [lane_path / p for p in (
-                'context', 'context/target_profile.json', 'context/me_context.md', 'context/session_handoff.md',
-                'notes', 'notes/index.md', 'notes/faq', 'notes/hypotheses', 'notes/handoffs', 'notes/timeline',
-                'working', 'working/scratch', 'recon', 'recon/urls', 'recon/params', 'recon/js',
-                'recon/maps', 'recon/artifacts', 'input', 'input/original', 'input/extracted', 'input/metadata')]
-            layout_paths.append(root / family / program / 'shared')
-            if any(path.is_symlink() for path in layout_paths):
-                return self.reply(409, {'error': 'unsafe_writer_tree'})
-            # BBH refresh touches generated paths; reject escaping symlinks.
-            for directory in (lane_path / 'ledgers', lane_path / 'reports'):
-                if directory.is_symlink() or not directory.is_dir():
-                    return self.reply(409, {'error': 'unsafe_writer_tree'})
-                walk_errors = []
-                for current, dirs, files in os.walk(directory, followlinks=False, onerror=walk_errors.append):
-                    if any((Path(current) / name).is_symlink() for name in dirs):
-                        return self.reply(409, {'error': 'unsafe_writer_tree'})
-                    for name in files:
-                        path = Path(current) / name
-                        if path.is_symlink():
-                            try:
-                                target = path.resolve(strict=True)
-                                if directory.name != 'reports' or not target.is_relative_to(directory.resolve()):
-                                    raise ValueError('escaping link')
-                            except (OSError, ValueError, RuntimeError):
-                                return self.reply(409, {'error': 'unsafe_writer_tree'})
-                if walk_errors:
-                    return self.reply(409, {'error': 'unsafe_writer_tree'})
-            findings = ledger(lane_path, [])
-            matches = [f for f in findings or [] if isinstance(f.get('fid'), str) and f['fid'].upper() == fid.upper()]
-            if len(matches) != 1 or matches[0]['fid'] != fid:
-                return self.reply(404, {'error': 'finding_not_found'})
-            if root_snapshot() != before or matches[0]['metadata_revision'] != payload['expected_revision']:
-                return self.reply(409, {'error': 'finding_changed', 'message': 'Finding changed since it was loaded. Copy your pending value, refresh, and review before retrying.'})
+            checked = self.finding_precheck(family, program, lane, fid, payload['root_instance'], payload['expected_revision'])
+            if not checked:
+                return
+            lane_path = checked[0]
             try:
                 with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
                     patchfile = Path(temp) / 'patch.json'
@@ -1241,10 +1327,321 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                      updated[0]['current'].get('status') != patch['status'])):
                     self.server.writer_enabled = False
                     return self.reply(502, {'error': 'verification_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
-                return self.reply(200, {'finding': updated[0]})
+                return self.reply(200, {'finding': updated[0], 'revisions': self.rebased_revisions(lane_path)})
             except (OSError, subprocess.SubprocessError):
                 self.server.writer_enabled = False
                 return self.reply(503, {'error': 'writer_unavailable', 'message': 'Update may be incomplete; refresh before retrying.'})
+
+        # --- Ledger actions (feat/board-ledger-actions) -------------------------
+        # Every action runs a supported BBH manual_hunter command, mirrors
+        # patch_finding's safety (same-origin JSON, root/revision preconditions,
+        # read-back verification) and disables the writer after a failure.
+        def ledger_action_payload(self, keys, feature):
+            import re
+            if (not self.trusted_request(require_origin=True) or
+                self.headers.get('X-Requested-With') != 'Bounty-Board' or
+                self.headers.get('Content-Type', '').lower() != 'application/json' or
+                self.headers.get('Transfer-Encoding')):
+                return self.reply(403, {'error': 'untrusted_origin'})
+            if not self.server.writer_enabled or (feature is not None and feature not in self.server.writer_features):
+                return self.reply(503, {'error': 'writer_unavailable'})
+            try:
+                lengths = self.headers.get_all('Content-Length', [])
+                if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 16384:
+                    raise ValueError('invalid length')
+                payload = json.loads(self.rfile.read(int(lengths[0])))
+                if not isinstance(payload, dict) or set(payload) != {'family', 'program', 'lane', 'root_instance', *keys}:
+                    raise ValueError('invalid payload')
+                family, program, lane = (payload[k] for k in ('family', 'program', 'lane'))
+                if any(not isinstance(payload[k], str) or not re.fullmatch(r'[a-f0-9]{64}', payload[k])
+                       for k in ('root_instance', 'expected_revision') if k in payload):
+                    raise ValueError('invalid precondition')
+                if (not isinstance(family, str) or family not in FAMILIES or not isinstance(lane, str) or lane not in FAMILIES[family] or
+                        not isinstance(program, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', program) or
+                        ('fid' in payload and (not isinstance(payload['fid'], str) or not re.fullmatch(r'[A-Za-z][0-9]{2,}', payload['fid'])))):
+                    raise ValueError('invalid fields')
+                return payload
+            except (ValueError, UnicodeError, json.JSONDecodeError):
+                return self.reply(400, {'error': 'invalid_ledger_action'})
+
+        def hunter_args(self, program, family, lane, *args):
+            return ['agents/manual_hunter.py', program, '--family', family, '--lane', lane, '--root', str(root), *args]
+
+        def run_writer(self, argv, verify, refused=None, lane_path=None):
+            """Run one BBH command, verify the read-back and reply.
+
+            refused(result) may classify a non-zero exit that BBH documents as
+            a no-op (for example a duplicate note); any other failure disables
+            the writer because the update may be partial."""
+            import subprocess
+            try:
+                result = subprocess.run([str(self.server.writer), *argv], capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    outcome = refused(result) if refused else None
+                    if outcome is not None:
+                        return self.reply(*outcome)
+                    self.server.writer_enabled = False
+                    return self.reply(502, {'error': 'writer_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
+                outcome = verify(result)
+                if outcome is None:
+                    self.server.writer_enabled = False
+                    return self.reply(502, {'error': 'verification_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
+                if outcome[0] == 200 and lane_path is not None:
+                    outcome[1]['revisions'] = self.rebased_revisions(lane_path)
+                return self.reply(*outcome)
+            except (OSError, subprocess.SubprocessError):
+                self.server.writer_enabled = False
+                return self.reply(503, {'error': 'writer_unavailable', 'message': 'Update may be incomplete; refresh before retrying.'})
+
+        def set_submission(self):
+            """Record local submission state via BBH --set-submission.
+
+            This only edits the ledger entry; nothing is sent to any platform."""
+            import re
+            payload = self.ledger_action_payload({'fid', 'expected_revision', 'submission'}, 'submission')
+            if not payload:
+                return
+            submission = payload['submission']
+            if (not isinstance(submission, dict) or not submission.get('state') or set(submission) - {'state', 'result', 'report'} or
+                    submission['state'] not in SUBMISSION_STATES or
+                    submission.get('result') not in (None, *SUBMISSION_RESULTS) or
+                    not (submission.get('report') is None or (isinstance(submission['report'], str) and
+                         re.fullmatch(r'[^\x00-\x1f\x7f]{1,200}', submission['report'])))):
+                return self.reply(400, {'error': 'invalid_ledger_action'})
+            family, program, lane, fid = (payload[k] for k in ('family', 'program', 'lane', 'fid'))
+            checked = self.finding_precheck(family, program, lane, fid, payload['root_instance'], payload['expected_revision'])
+            if not checked:
+                return
+            lane_path = checked[0]
+            args = ['--set-submission', fid, '--submission-state', submission['state']]
+            if submission.get('result'):
+                args += ['--submission-result', submission['result']]
+            if submission.get('report'):
+                args += ['--submission-report', submission['report']]
+
+            def verify(_result):
+                updated = [f for f in ledger(lane_path, []) or [] if f.get('fid') == fid]
+                recorded = updated[0].get('submission') if len(updated) == 1 else None
+                if not isinstance(recorded, dict) or any(recorded.get(k) != v for k, v in submission.items() if v is not None):
+                    return None
+                return 200, {'finding': updated[0]}
+            return self.run_writer(self.hunter_args(program, family, lane, *args), verify, lane_path=lane_path)
+
+        def add_finding(self):
+            """Add one finding through BBH --from-file using a generated note."""
+            import re
+            import tempfile
+            payload = self.ledger_action_payload({'finding'}, 'add_finding')
+            if not payload:
+                return
+            finding = payload['finding']
+            line = r'[^\x00-\x1f\x7f]'
+            if (not isinstance(finding, dict) or set(finding) != {'title', 'class_name', 'severity', 'file', 'description'} or
+                    any(not isinstance(v, str) for v in finding.values()) or
+                    not re.fullmatch(line + r'{3,200}', finding['title'].strip()) or
+                    not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,99}', finding['class_name']) or
+                    finding['severity'] not in SEVERITIES or
+                    not re.fullmatch(line + r'{1,300}', finding['file'].strip()) or
+                    not re.fullmatch(line + r'{1,2000}', finding['description'].strip())):
+                return self.reply(400, {'error': 'invalid_ledger_action'})
+            family, program, lane = (payload[k] for k in ('family', 'program', 'lane'))
+            checked = self.finding_precheck(family, program, lane, '', payload['root_instance'], None)
+            if not checked:
+                return
+            lane_path = checked[0]
+            ledger_path = lane_path / 'ledgers/ledger.json'
+            try:
+                original = ledger_path.read_bytes()
+            except OSError:
+                return self.reply(409, {'error': 'unsafe_writer_tree'})
+            known = {f.get('fid') for f in ledger(lane_path, []) or []}
+            title = finding['title'].strip()
+            note = ''.join(f'{label}: {value.strip()}\n' for label, value in (
+                ('Title', title), ('Class', finding['class_name']), ('Severity', finding['severity']),
+                ('File', finding['file']), ('Description', finding['description'])))
+
+            def verify(_result):
+                added = [f for f in ledger(lane_path, []) or [] if f.get('fid') not in known]
+                if len(added) != 1 or added[0].get('title') != title or added[0].get('class_name') != finding['class_name']:
+                    return None
+                return 200, {'finding': added[0]}
+
+            def refused(result):
+                # BBH prints "Duplicate: <fid>", writes nothing and exits 1.
+                try:
+                    unchanged = ledger_path.read_bytes() == original
+                except OSError:
+                    unchanged = False
+                if result.returncode == 1 and 'Duplicate:' in (result.stdout or '') and unchanged:
+                    return 409, {'error': 'not_added', 'message': 'BBH did not add a new finding: it matches an existing one.'}
+                return None
+            with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
+                notefile = Path(temp) / 'board-note.md'
+                notefile.write_text(note, encoding='utf-8')
+                return self.run_writer(self.hunter_args(program, family, lane, '--from-file', str(notefile)), verify, refused, lane_path=lane_path)
+
+        def reclassify_finding(self):
+            """Copy a finding into MapStore (optionally as a gadget) via BBH.
+
+            Step 1 runs ``agents/map_store.py write``; step 2 runs
+            ``manual_hunter --edit-finding`` to append a provenance note (and
+            optionally set status ``archive``) on the original finding. The
+            finding, its evidence and report files are never removed."""
+            import re
+            import tempfile
+            from datetime import datetime, timezone
+            payload = self.ledger_action_payload({'fid', 'expected_revision', 'destination', 'details'}, 'reclassify')
+            if not payload:
+                return
+            line = r'[^\x00-\x1f\x7f]'
+            destination, details = payload['destination'], payload['details']
+            try:
+                if destination not in ('gadgets', 'map') or not isinstance(details, dict):
+                    raise ValueError('invalid destination')
+                allowed = {'title', 'surface', 'note', 'tags', 'archive_original'} | ({'tier', 'capability'} if destination == 'gadgets' else set())
+                if set(details) - allowed or not {'title', 'surface'} <= set(details):
+                    raise ValueError('invalid details')
+                title, surface = details['title'], details['surface']
+                note, tags = details.get('note', ''), details.get('tags', [])
+                archive = details.get('archive_original', False)
+                if (not isinstance(title, str) or not re.fullmatch(line + r'{3,200}', title.strip()) or
+                        not isinstance(surface, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', surface) or
+                        not isinstance(note, str) or not re.fullmatch(r'[^\x00-\x09\x0b-\x1f\x7f]{0,4000}', note) or
+                        not isinstance(tags, list) or len(tags) > 8 or
+                        any(not isinstance(t, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,40}', t) for t in tags) or
+                        {'gadget', 'residual'} & set(tags) or any(t.startswith('finding-') for t in tags) or
+                        type(archive) is not bool):
+                    raise ValueError('invalid details')
+                capability = []
+                if destination == 'gadgets':
+                    tier, cap = details.get('tier'), details.get('capability')
+                    fields = ['grants', 'requires', 'crosses', 'crosses_detail', 'chain_status', 'chain_watch']
+                    residual_fields = ['residual_class', 'disclosed_by', 'composes_with']
+                    if tier not in ('confirmed', 'residual') or not isinstance(cap, dict):
+                        raise ValueError('invalid gadget')
+                    expected = fields + (residual_fields if tier == 'residual' else [])
+                    if set(cap) - set(expected) or any(not isinstance(v, str) or not re.fullmatch(line + r'{0,300}', v) for v in cap.values()):
+                        raise ValueError('invalid capability')
+                    required = ['grants', 'requires', 'crosses', 'chain_status'] + (residual_fields if tier == 'residual' else [])
+                    if any(not cap.get(k, '').strip() for k in required):
+                        raise ValueError('missing capability')
+                    if cap['chain_status'] not in GADGET_CHAIN_STATUSES or (tier == 'residual' and cap['residual_class'] not in RESIDUAL_CLASSES):
+                        raise ValueError('invalid capability value')
+                    capability = [(k, cap[k].strip()) for k in expected if cap.get(k, '').strip()]
+            except (ValueError, KeyError, TypeError):
+                return self.reply(400, {'error': 'invalid_ledger_action'})
+            family, program, lane, fid = (payload[k] for k in ('family', 'program', 'lane', 'fid'))
+            checked = self.finding_precheck(family, program, lane, fid, payload['root_instance'], payload['expected_revision'])
+            if not checked:
+                return
+            lane_path, finding = checked
+            maps = lane_path / 'recon/maps'
+            if maps.is_symlink() or (maps.exists() and not maps.is_dir()):
+                return self.reply(409, {'error': 'unsafe_writer_tree'})
+            warnings = []
+            before = map_entries(lane_path, warnings) or []
+            if 'map_unavailable_or_invalid' in warnings:
+                return self.reply(409, {'error': 'unsafe_writer_tree'})
+            marker = f'finding-{fid.lower()}'
+            if any(marker in (entry.get('tags') or []) for entry in before):
+                return self.reply(409, {'error': 'already_reclassified', 'message': 'A MapStore entry for this finding already exists. Refresh and review it.'})
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            store_tags = (['gadget'] + (['residual'] if details.get('tier') == 'residual' else []) if destination == 'gadgets' else []) + [marker, 'from-ledger', *tags]
+
+            def lane_relative(value):
+                if not isinstance(value, str) or not value:
+                    return 'Not recorded'
+                try:
+                    return Path(value).relative_to(lane_path).as_posix() if Path(value).is_absolute() else value
+                except ValueError:
+                    return value
+            body = '\n'.join([
+                f'## Reclassified from ledger finding {fid}', '',
+                f'- Source finding: {fid} ({family}/{program}/{lane})',
+                f'- Finding title: {finding.get("title") or "Not recorded"}',
+                f'- Finding class: {finding.get("class_name") or "Not recorded"}',
+                f'- Severity as recorded on the finding: {finding.get("severity") or "Not recorded"}',
+                f'- Evidence: {lane_relative(finding.get("evidence_path"))}',
+                f'- Report: {lane_relative(finding.get("report_path") or finding.get("report_dir"))}',
+                f'- Reclassified by: bounty-board at {now}', '',
+                'The original ledger entry, its evidence and its report files are kept.', '',
+                *([note.strip(), ''] if note.strip() else []),
+                *(['Capability:', *[f'- {k}: {v}' for k, v in capability], ''] if capability else []),
+            ])
+            run_id = f'board-{fid.lower()}-{now.replace("-", "").replace(":", "").lower()}'
+            store_argv = ['agents/map_store.py', 'write', '--program', program, '--family', family, '--lane', lane,
+                          '--root', str(root), '--surface', surface, '--scope', 'surface', '--tags', ','.join(store_tags),
+                          '--title', title.strip(), '--agent', 'bounty-board', '--run-id', run_id]
+            created = {}
+
+            def verify_store(_result):
+                after = map_entries(lane_path, []) or []
+                known = {entry.get('path') for entry in before}
+                added = [entry for entry in after if entry.get('path') not in known]
+                if (len(after) != len(before) + 1 or len(added) != 1 or added[0].get('title') != title.strip() or
+                        not {marker, *(['gadget'] if destination == 'gadgets' else [])} <= set(added[0].get('tags') or []) or
+                        (destination == 'map' and 'gadget' in (added[0].get('tags') or []))):
+                    return None
+                created.update(added[0])
+                return 200, {}
+            with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
+                bodyfile = Path(temp) / 'board-observation.md'
+                bodyfile.write_text(body, encoding='utf-8')
+                import subprocess
+                try:
+                    result = subprocess.run([str(self.server.writer), *store_argv, '--body-file', str(bodyfile)],
+                                            capture_output=True, text=True, timeout=60)
+                except (OSError, subprocess.SubprocessError):
+                    self.server.writer_enabled = False
+                    return self.reply(503, {'error': 'writer_unavailable', 'message': 'Update may be incomplete; refresh before retrying.'})
+            if result.returncode != 0 or verify_store(result) is None:
+                self.server.writer_enabled = False
+                return self.reply(502, {'error': 'writer_failed' if result.returncode else 'verification_failed',
+                                        'message': 'MapStore update may be incomplete; refresh and review before retrying.'})
+            # Step 2: annotate the original finding. Refuse if it changed meanwhile.
+            current = [f for f in ledger(lane_path, []) or [] if f.get('fid') == fid]
+            entry_path = f'recon/maps/{created["path"]}'
+            store_name = 'Gadgets' if destination == 'gadgets' else 'MapStore'
+            if len(current) != 1 or current[0]['metadata_revision'] != finding['metadata_revision']:
+                return self.reply(409, {'error': 'partial_reclassify', 'map_entry': created,
+                                        'message': f'Created {store_name} entry {entry_path}, but the finding changed, so it was not annotated. Refresh and review.'})
+            raw = self.raw_finding(lane_path, fid)
+            previous = raw.get('review_notes') if isinstance(raw, dict) and isinstance(raw.get('review_notes'), str) else ''
+            appended = f'Reclassified to {store_name} on {now[:10]} by Bounty Board: {entry_path}. Ledger entry and evidence kept.'
+            patch = {'review_notes': f'{previous.rstrip()}\n\n{appended}' if previous.strip() else appended}
+            if archive:
+                patch['status'] = 'archive'
+
+            def verify_finding(_result):
+                updated = [f for f in ledger(lane_path, []) or [] if f.get('fid') == fid]
+                notes = self.raw_finding(lane_path, fid)
+                if (len(updated) != 1 or not isinstance(notes, dict) or notes.get('review_notes') != patch['review_notes'] or
+                        (archive and updated[0].get('status') != 'archive')):
+                    return None
+                return 200, {'finding': updated[0], 'map_entry': created}
+            with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
+                patchfile = Path(temp) / 'patch.json'
+                patchfile.write_text(json.dumps(patch), encoding='utf-8')
+                return self.run_writer(self.hunter_args(program, family, lane, '--edit-finding', fid, '--patch-file', str(patchfile)), verify_finding, lane_path=lane_path)
+
+        def rebased_revisions(self, lane_path):
+            """Old->new revisions for entries this write left byte-for-byte unchanged.
+
+            BBH replaces ledger.json atomically, so every revision changes even
+            for untouched entries. A client may roll a row forward only if it
+            holds exactly the pre-write revision; other changes stay conflicts."""
+            before, after = getattr(self, 'pre_write', None) or {}, ledger_snapshot(lane_path)
+            return {fid: [old[0], after[fid][0]] for fid, old in before.items()
+                    if fid in after and after[fid][1] == old[1] and after[fid][0] != old[0]}
+
+        def raw_finding(self, lane_path, fid):
+            """Unprojected ledger entry (review_notes is not part of the board projection)."""
+            try:
+                raw = json.loads(read_file(lane_path, 'ledgers/ledger.json'))
+                matches = [f for f in raw.get('findings', []) if isinstance(f, dict) and f.get('fid') == fid]
+                return matches[0] if len(matches) == 1 else None
+            except (OSError, ValueError, UnicodeError, AttributeError):
+                return None
 
         def do_DELETE(self):
             self.do_PUT()
@@ -1265,6 +1662,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     server.static_root = Path(__file__).parent / 'static'
     server.writer = Path(writer).absolute() if writer else None
     server.writer_enabled = bool(accept_uncoordinated_writes and writer_available(server.writer))
+    server.writer_features = writer_features(server.writer) if server.writer_enabled else frozenset()
     return server
 
 
