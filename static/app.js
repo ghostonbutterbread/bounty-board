@@ -750,7 +750,11 @@
   function findings() {
     const all=rows('findings'); if (!all) return unavailable('Findings ledger');
     const f=state.filters, query=f.query.trim().toLowerCase();
-    const filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
+    let filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
+    // Module seam (ledger-actions): optional extra filter and sort order.
+    const view=window.BoardFindingView;
+    if(typeof view?.filter==='function')filtered=filtered.filter(r=>{try{return view.filter(r)!==false;}catch{return true;}});
+    if(typeof view?.compare==='function'){try{filtered.sort(view.compare);}catch{}}
     const program=currentProgram(), laneName=state.lane;
     const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${rationale(r)}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
@@ -1514,7 +1518,7 @@
       try {
         const response=await BoardAPI.write(state.data,'findingMetadata',{programId:edit.program,program:name,family,lane:edit.lane,findingId:edit.id,field:'severity_rationale',value:edit.text,expectedRevision:edit.revision,rootInstance:edit.rootInstance});
         if(response?.value!==edit.text)throw new Error('Unverified value');
-        row.severity_rationale=response.value;row.metadata_revision=response.revision;state.rationaleDrafts.delete(draftKey);state.metadataPending=false;render();
+        row.severity_rationale=response.value;row.metadata_revision=response.revision;window.BoardFindingView?.rebase?.(row,response.revisions);state.rationaleDrafts.delete(draftKey);state.metadataPending=false;render();
       } catch (error) {state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${edit.program} / ${edit.lane} / ${edit.id} (severity rationale). The source may have changed; refresh before retrying. Your rationale draft remains in this tab.`);render();}
     }
   });
@@ -1528,7 +1532,7 @@
       const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
       const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
       const origin=rationaleKey(program,lane,id);state.metadataPending=true;render();
-      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;state.metadataPending=false;render();}
+      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;window.BoardFindingView?.rebase?.(row,response.revisions);/* ledger-actions: roll untouched rows forward */state.metadataPending=false;render();}
       catch (error) {const sequence=++metadataDraftSequence;state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);state.metadataDrafts.set(JSON.stringify([origin,key,sequence]),{sequence,field:key,value,message:`Unsaved value for ${program} / ${lane} / ${id}${/^[a-f0-9]{64}$/.test(rootInstance || '')?` (source ${rootInstance.slice(0,8)})`:' (source unknown)'}; refresh and review before retrying.`});render();}
     }
   });
