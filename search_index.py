@@ -332,8 +332,13 @@ class SearchIndex:
         return 'partial' if self._warnings else 'ready'
 
     # ---- search ----------------------------------------------------------
-    def search(self, query, *, limit=8, program=None, kinds=KINDS):
-        started = time.perf_counter()
+    def _activate(self, fresh_wait=0.0):
+        """Mark the index as in use and wake the refresher when it is stale.
+
+        A cold index gets a short grace period so the first request is useful.
+        With `fresh_wait`, a pass older than the refresh interval is redone
+        first (bounded wait), so a view opened after an idle period is current.
+        """
         self._last_search = time.monotonic()
         snapshot = self._root_snapshot()
         if snapshot is None or snapshot[2] != self._instance:
@@ -342,12 +347,23 @@ class SearchIndex:
             self._wake.set()
             self.start()
         elif time.monotonic() - self._last_pass > self.interval / 2:
+            passes = self.passes
+            stale = fresh_wait and self._built and time.monotonic() - self._last_pass > self.interval
             self._wake.set()
+            self.start()
+            if stale:
+                deadline = time.monotonic() + fresh_wait
+                while self.passes == passes and time.monotonic() < deadline and not self._stopped.is_set():
+                    time.sleep(0.02)
         self.start()
         if not self._built:
-            # A cold index gets a short grace period so the first query is useful.
             self._first_pass.wait(1.5)
             snapshot = self._root_snapshot()
+        return snapshot
+
+    def search(self, query, *, limit=8, program=None, kinds=KINDS):
+        started = time.perf_counter()
+        snapshot = self._activate()
         terms = parse_terms(query)
         lanes = list(self._lanes.values())
         groups = {'programs': [], 'findings': [], 'reports': []}
@@ -432,6 +448,66 @@ class SearchIndex:
         return {'query': plain(query), 'index_state': self.state(), 'root_instance': self._instance,
                 'limit': limit, 'counts': counts, 'results': groups, 'warnings': list(self._warnings),
                 'took_ms': round((time.perf_counter() - started) * 1000, 2)}
+
+    # ---- recent reports ----------------------------------------------------
+    def recent(self, *, limit=50, offset=0, within=None, programs=(), lane=None, query='',
+               order='newest', include_navigation=False, fresh_wait=2.0):
+        """Reports across every program and lane ordered by file modification time.
+
+        Filters: `within` (seconds before now), `programs` (ids "family/name"),
+        `lane`, `query` (every term must occur in the title or path) and
+        generated navigation (excluded unless `include_navigation`). Facet
+        counts for programs and lanes each ignore their own filter.
+        """
+        started = time.perf_counter()
+        snapshot = self._activate(fresh_wait)
+        now = time.time()
+        since = now - within if within is not None else None
+        terms = parse_terms(query)
+        wanted = set(programs)
+        matches = []
+        program_counts, lane_counts, names = {}, {}, {}
+        total_reports = 0
+        if self._instance is not None and snapshot is not None and snapshot[2] == self._instance:
+            for l in list(self._lanes.values()):
+                pid = f"{l['family']}/{l['program']}"
+                names[pid] = (l['program'], l['family'])
+                in_program = not wanted or pid in wanted
+                in_lane = lane is None or l['lane'] == lane
+                findings = None
+                for rel, r in l['reports'].items():
+                    if r['nav'] and not include_navigation:
+                        continue
+                    total_reports += 1
+                    if since is not None and r['mtime'] < since:
+                        continue
+                    if terms and not all(t in r['title_low'] or t in r['path_low'] for t in terms):
+                        continue
+                    if in_lane:
+                        program_counts[pid] = program_counts.get(pid, 0) + 1
+                    if in_program:
+                        lane_counts[l['lane']] = lane_counts.get(l['lane'], 0) + 1
+                    if in_program and in_lane:
+                        if findings is None:
+                            findings = {f['fid']: f for f in l['findings']}
+                        matches.append((r['mtime'], pid, l['lane'], rel, r, findings))
+        matches.sort(key=lambda m: m[:4], reverse=order != 'oldest')
+        items = []
+        for mtime, pid, lane_name, rel, r, findings in matches[offset:offset + limit]:
+            owner = next((findings[fid] for fid in r['owner_fids'] if fid in findings), None)
+            items.append({'path': rel, 'name': rel.rsplit('/', 1)[-1], 'title': r['title'], 'program': pid,
+                          'program_name': names[pid][0], 'family': names[pid][1], 'lane': lane_name,
+                          'modified': mtime, 'report_kind': 'generated_navigation' if r['nav'] else r['report_kind'],
+                          'owner_fids': r['owner_fids'][:5],
+                          'finding': {'fid': owner['fid'], 'severity': owner['severity'], 'title': owner['title']} if owner else None,
+                          'target': {'program': pid, 'lane': lane_name, 'section': 'reports', 'report': rel}})
+        return {'index_state': self.state(), 'root_instance': self._instance, 'now': now,
+                'total': len(matches), 'total_reports': total_reports, 'offset': offset, 'limit': limit, 'order': order,
+                'items': items,
+                'facets': {'programs': sorted(({'id': pid, 'name': names[pid][0], 'family': names[pid][1], 'count': n}
+                                               for pid, n in program_counts.items()), key=lambda x: (x['name'].lower(), x['id'])),
+                           'lanes': [{'name': k, 'count': v} for k, v in sorted(lane_counts.items())]},
+                'warnings': list(self._warnings), 'took_ms': round((time.perf_counter() - started) * 1000, 2)}
 
     # ---- scoring ---------------------------------------------------------
     @staticmethod

@@ -277,7 +277,11 @@ def reports(lane, warnings, findings=None, report_autosave=False):
                     kind, fids = 'generated_report', []
                 else:
                     kind, fids = ('unregistered' if findings is not None else 'unknown'), []
-                items.append({'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids,
+                try:
+                    modified = file.lstat().st_mtime
+                except OSError:
+                    modified = None
+                items.append({'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids, 'modified': modified,
                               'editable': bool(report_autosave and text is not None and not navigation),
                               'collaboration_editable': bool(text is not None and not navigation)})
     return items
@@ -1185,6 +1189,54 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             finally:
                 search_slots.release()
 
+        def recent_reports_request(self, url):
+            """GET /api/recent-reports: reports across all programs, newest first.
+
+            Served from the search index (file modification time, title, owners);
+            bounded page size and filter sizes, same trust checks as every GET.
+            """
+            from search_index import MAX_QUERY
+            lanes = set().union(*FAMILIES.values())
+            try:
+                params = parse_qs(url.query, keep_blank_values=True, strict_parsing=bool(url.query),
+                                  encoding='utf-8', errors='strict', max_num_fields=110)
+                allowed = {'limit', 'offset', 'within', 'program', 'lane', 'q', 'order', 'nav'}
+                if not set(params) <= allowed or any(len(v) != 1 for k, v in params.items() if k != 'program'):
+                    raise ValueError('invalid parameters')
+
+                def number(name, default, low, high):
+                    if name not in params:
+                        return default
+                    raw = params[name][0]
+                    if not raw.isascii() or not raw.isdecimal() or len(raw) > 10 or not low <= int(raw) <= high:
+                        raise ValueError('invalid ' + name)
+                    return int(raw)
+                limit = number('limit', 50, 1, 200)
+                offset = number('offset', 0, 0, 1_000_000)
+                within = number('within', None, 1, 20 * 365 * 86400)
+                programs = params.get('program', [])
+                if len(programs) > 100 or any(not p or len(p) > 200 or '\0' in p for p in programs):
+                    raise ValueError('invalid program')
+                lane = params.get('lane', [None])[0]
+                if lane is not None and lane not in lanes:
+                    raise ValueError('invalid lane')
+                query = params.get('q', [''])[0]
+                if len(query) > MAX_QUERY or '\0' in query:
+                    raise ValueError('invalid query')
+                order = params.get('order', ['newest'])[0]
+                nav = params.get('nav', ['0'])[0]
+                if order not in ('newest', 'oldest') or nav not in ('0', '1'):
+                    raise ValueError('invalid order')
+            except (ValueError, UnicodeError):
+                return self.reply(400, {'error': 'invalid_recent_reports', 'message': 'Invalid recent report parameters.'})
+            if not search_slots.acquire(blocking=False):
+                return self.reply(503, {'error': 'search_busy'}, {'Retry-After': '1'})
+            try:
+                return self.reply(200, search_index.recent(limit=limit, offset=offset, within=within, programs=programs,
+                                                           lane=lane, query=query, order=order, include_navigation=nav == '1'))
+            finally:
+                search_slots.release()
+
         def do_GET(self):
             import hashlib
             import os
@@ -1201,6 +1253,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.live_request('GET')
             if url.path == '/api/search':
                 return self.search_request(url)
+            if url.path == '/api/recent-reports':
+                return self.recent_reports_request(url)
             if url.path == '/api/collaboration':
                 return self.collaboration_admitted()
             if url.path == '/api/collaboration/recovery':
