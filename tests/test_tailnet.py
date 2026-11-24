@@ -146,6 +146,7 @@ class TailnetBoundaryTests(unittest.TestCase):
         lane.mkdir(parents=True)
         (lane / 'ledger.json').write_text('{"findings":[{"fid":"F01","title":"synthetic"}]}')
         server = app.make_server(Path(root), port=0, **kwargs)
+        self._port = server.server_port
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         def stop():
@@ -176,6 +177,12 @@ class TailnetBoundaryTests(unittest.TestCase):
                     self.assertEqual(status, 200)
                     self.assertIn(b'<html', body.lower())
             self.assertEqual(request('GET', navigate + [('Sec-Fetch-Site', 'cross-site')], '/index.html')[0], 200)
+            conn = http.client.HTTPConnection('127.0.0.1', self._port, timeout=3)
+            conn.request('GET', '/', headers=dict(navigate + [('Sec-Fetch-Site', 'cross-site')]))
+            response = conn.getresponse(); response.read(); conn.close()
+            self.assertEqual(response.getheader('X-Frame-Options'), 'DENY')
+            self.assertEqual(response.getheader('Content-Security-Policy'), "frame-ancestors 'none'")
+            self.assertEqual(response.getheader('Cross-Origin-Opener-Policy'), 'same-origin')
             for headers, path in (
                 (navigate + [('Sec-Fetch-Site', 'cross-site')], '/api/data'),
                 (navigate + [('Sec-Fetch-Site', 'cross-site')], '/app.js'),

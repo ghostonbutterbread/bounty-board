@@ -1393,6 +1393,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     self.send_header('Content-Type', mimetypes.guess_type(relative)[0] or 'application/octet-stream')
                     self.send_header('Content-Length', str(len(data)))
                     self.send_header('X-Content-Type-Options', 'nosniff')
+                    if relative == 'index.html':
+                        # The page may be opened from other sites; never inside
+                        # their frames, and without a handle back to the opener.
+                        self.send_header('X-Frame-Options', 'DENY')
+                        self.send_header('Content-Security-Policy', "frame-ancestors 'none'")
+                        self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
                     self.end_headers()
                     self.wfile.write(data)
                 except (OSError, ValueError):
