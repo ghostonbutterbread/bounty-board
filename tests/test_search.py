@@ -168,6 +168,22 @@ class IndexTests(Base):
         # Titles and paths stay searchable even when content was dropped.
         self.assertTrue(index.search('profile')['results']['reports'])
 
+    def test_content_budget_holds_across_refreshes(self):
+        index = make_index(self.root)
+        index.max_total_chars, index.max_report_chars = 10_000, 1_000
+        self.addCleanup(index.close)
+        body = '# r\n' + 'a' * 995
+        for wave in range(5):
+            # Each wave adds a program that sorts before the earlier ones.
+            reports = self.root / f'web_bounty/p{9 - wave}/web/reports'
+            reports.mkdir(parents=True)
+            for i in range(10):
+                (reports / f'r{i}.md').write_text(body)
+            index.refresh()
+            indexed = sum(len(r['text']) for lane in index._lanes.values() for r in lane['reports'].values())
+            self.assertLessEqual(indexed, index.max_total_chars + index.max_report_chars, f'pass {wave}')
+        self.assertEqual(index.state(), 'partial')
+
     def test_root_change_drops_and_rebuilds(self):
         self.assertTrue(self.index.search('acme')['results']['programs'])
         other = Path(self.tmp.name) / 'other'

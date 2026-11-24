@@ -78,7 +78,9 @@ def category(name):
 
 def sensitive(name):
     lower = name.lower()
-    if PurePosixPath(lower).suffix in SENSITIVE_EXT:
+    path = PurePosixPath(lower)
+    # Dotfiles such as '.netrc' have no suffix; match the whole name too.
+    if path.suffix in SENSITIVE_EXT or path.name in SENSITIVE_EXT:
         return True
     return category(lower) not in ('video', 'audio', 'image') and bool(SENSITIVE_NAME.search(lower))
 

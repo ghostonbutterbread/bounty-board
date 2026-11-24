@@ -281,7 +281,8 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(ra.markdown_targets(text), ['poc/x.py', 'shot one.png', 'y.js', 'a b.txt', '../z.mp4'])
 
     def test_sensitive_names(self):
-        for name in ('capture.har', 'cookies.json', '.env', 'prod.env', 'api_key.txt', 'req.hdr', 'id_rsa'):
+        for name in ('capture.har', 'cookies.json', '.env', 'prod.env', 'api_key.txt', 'req.hdr', 'id_rsa',
+                     '.netrc', '.npmrc', '.pgpass', '.NETRC'):
             self.assertTrue(ra.sensitive(name), name)
         for name in ('exploit.py', 'oauth-bypass.mp4', 'token-screenshot.png', 'environment.md'):
             self.assertFalse(ra.sensitive(name), name)

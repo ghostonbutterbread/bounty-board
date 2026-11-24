@@ -210,7 +210,10 @@ class SearchIndex:
                 sig = _signature(stat)
                 previous = old_reports.get(rel)
                 room = budget['chars'] < self.max_total_chars
-                if previous is not None and previous['sig'] == sig and (previous['has_text'] or not room):
+                # Reuse indexed text only while the budget has room for it, so
+                # max_total_chars bounds memory across refreshes too.
+                if previous is not None and previous['sig'] == sig and (
+                        (previous['has_text'] and (room or not previous['text'])) or (not previous['has_text'] and not room)):
                     entry = previous
                 else:
                     entry = self._read_report(lane, rel, filename, sig, stat.st_mtime, room, warnings)
