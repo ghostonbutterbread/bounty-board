@@ -205,7 +205,7 @@
     host.onclick = e => {
       if (e.target.id === 'cd-more') { ui.limit += 40; paint(); return; }
       const id = e.target.dataset?.cdReport;
-      if (id != null) { ctx.state.section = 'reports'; ctx.state.report = String(id); ctx.render(); }
+      if (id != null) { if (!ctx.navigate?.({section: 'reports', report: String(id)})) { ctx.state.section = 'reports'; ctx.state.report = String(id); ctx.render(); } }
     };
   }
 

@@ -26,7 +26,11 @@ test('taxonomy labels and coverage drill-down render from real API data', async 
     await page.getByLabel('Dashboard program').selectOption('web_bounty/acme-demo');
     const shots = process.env.SHOT_DIR;
     if (shots) fs.mkdirSync(shots, {recursive: true});
+    // Integrated UI: categories are a toggle inside the redesigned class breakdown.
+    await page.getByRole('button', {name: 'By category', exact: true}).click();
     await page.waitForSelector('[data-category-row]');
+    await page.locator('[data-category-row="xss"]').click();
+    assert.match(await page.locator('.drill').innerText(), /stored-xss/); // raw class shown in the expanded category
     const dash = await page.locator('#app').innerText();
     assert.match(dash, /By category/);
     assert.match(page.url(), /./);
@@ -44,7 +48,9 @@ test('taxonomy labels and coverage drill-down render from real API data', async 
     assert.match(await finding('Template draft').innerText(), /Category: Unclassified/);
     assert.match(await finding('Range rating').innerText(), /Range recorded/);
     assert.doesNotMatch(await finding('Order id swap').innerText(), /Shown as/);
-    assert.equal(await page.getByLabel('Filter classes').locator('option').filter({hasText: 'stored-xss'}).count(), 1); // filter still uses raw values
+    await page.getByRole('button', {name: 'Filter classes', exact: true}).click();
+    assert.equal(await page.getByRole('checkbox', {name: 'stored-xss'}).count(), 1); // filter still uses raw values
+    await page.keyboard.press('Escape');
     if (shots) await page.screenshot({path: path.join(shots, 'findings-taxonomy.png'), fullPage: true});
 
     await page.getByRole('button', {name: 'Coverage', exact: true}).click();

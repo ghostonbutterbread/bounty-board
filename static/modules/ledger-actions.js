@@ -1,9 +1,16 @@
 /* Ledger actions module (feat/board-ledger-actions).
  *
- * Adds to the Findings ledger: severity/date sorting and a date filter, a
- * per-row Actions menu (change class, record submission state, move to
- * Gadgets/MapStore), drag-and-drop onto the Gadgets/MapStore section targets,
- * an Add finding form, and class review from the dashboard class breakdown.
+ * Adds the ledger actions to the Findings view: items in the row menu (change
+ * class, record submission state, move to Gadgets/MapStore), drag-and-drop
+ * onto the Gadgets/MapStore section tabs, an Add finding form, and bulk class
+ * review from the dashboard class breakdown.
+ *
+ * Integration (feat/board-workspace-integrated): sorting (severity rank and
+ * first/last seen dates), the first-seen filter, severity option labels, the
+ * Add finding button and the Reclassify button in expanded class rows live in
+ * app.js. This module contributes menu items via
+ * BoardUI.registerFindingActions, opens the dialogs, and handles drag and drop
+ * using the redesign's [data-drop-target] / .drop-active / .dragging-finding hooks.
  *
  * Every write goes through a backend endpoint that runs a supported BBH
  * command. Unsupported actions stay visible but disabled with a reason; this
@@ -15,19 +22,9 @@
   const SEVERITY_ALIASES = {INFORMATIONAL: 'INFO', NA: 'N/A', 'N/A': 'N/A', NONE: 'N/A', 'NOT APPLICABLE': 'N/A'};
   const SEVERITY_LABELS = {INFO: 'Informational (INFO)', 'N/A': 'N/A', UNKNOWN: 'Unknown'};
   const CLASS_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,99}$/;
-  const SORTS = [
-    ['', 'Ledger order'],
-    ['severity-desc', 'Severity, highest first'],
-    ['severity-asc', 'Severity, lowest first'],
-    ['first-desc', 'First seen, newest first'],
-    ['first-asc', 'First seen, oldest first'],
-    ['last-desc', 'Last seen, newest first'],
-  ];
-  const DATE_FILTERS = [['', 'Any date'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days'], ['older90', 'Older than 90 days'], ['none', 'No date recorded']];
   const STATE_LABELS = {not_submitted: 'Not submitted', submitted: 'Submitted', dropped: 'Dropped'};
   const RESULT_LABELS = {valid: 'Valid', duplicate: 'Duplicate'};
   const DESTINATIONS = {gadgets: 'Gadgets', map: 'MapStore'};
-  const view = {sort: '', date: ''};
   let ctx = null;
   let busy = false;
 
@@ -38,27 +35,6 @@
     return SEVERITY_ORDER.includes(key) ? key : 'UNKNOWN';
   };
   const severityRank = value => SEVERITY_ORDER.indexOf(severityKey(value));
-  const time = value => { const t = Date.parse(value ?? ''); return Number.isFinite(t) ? t : null; };
-  const dateCompare = (field, direction) => (a, b) => {
-    const x = time(a[field]), y = time(b[field]);
-    if (x === y) return 0; if (x === null) return 1; if (y === null) return -1;
-    return direction * (x - y);
-  };
-  const COMPARE = {
-    'severity-desc': (a, b) => severityRank(a.severity) - severityRank(b.severity),
-    'severity-asc': (a, b) => severityRank(b.severity) - severityRank(a.severity),
-    'first-desc': dateCompare('first_seen', -1),
-    'first-asc': dateCompare('first_seen', 1),
-    'last-desc': dateCompare('last_seen', -1),
-  };
-  function dateFilter(row) {
-    if (!view.date) return true;
-    const t = time(row.first_seen);
-    if (view.date === 'none') return t === null;
-    if (t === null) return false;
-    const age = (Date.now() - t) / 86400000;
-    return view.date === 'older90' ? age > 90 : age <= Number(view.date);
-  }
   // After a verified write the server returns {fid: [oldRevision, newRevision]}
   // for entries its write left unchanged (BBH rewrites the whole ledger file).
   // Roll a sibling row forward only if it holds exactly the old revision.
@@ -70,12 +46,9 @@
       if (other !== row && Array.isArray(pair) && pair.length === 2 && pair[0] === other.metadata_revision && /^[a-f0-9]{64}$/.test(pair[1])) other.metadata_revision = pair[1];
     }
   }
-  // Consumed by app.js findings(): stable sort, so ties keep ledger order.
-  window.BoardFindingView = {
-    filter: row => dateFilter(row),
-    get compare() { return COMPARE[view.sort] || null; },
-    rebase,
-  };
+  // Consumed by app.js metadata edit flows (inline severity/class/status and
+  // severity rationale) so untouched sibling rows stay writable.
+  window.BoardFindingView = {rebase};
 
   // ---------------------------------------------------------------- helpers
   const el = (tag, attrs = {}, ...children) => {
@@ -451,128 +424,62 @@
   }
 
   // ---------------------------------------------------------------- row menu
-  function closeMenus() { document.querySelectorAll('.ledger-menu').forEach(m => m.remove()); document.querySelectorAll('[data-ledger-menu][aria-expanded="true"]').forEach(b => b.setAttribute('aria-expanded', 'false')); }
-  function openMenu(button) {
-    closeMenus();
-    const entry = currentEntry(button.dataset.ledgerMenu); if (!entry) return;
-    const items = [['class', 'Change class…'], ['submission', 'Set submission state…'], ['gadgets', 'Move to Gadgets…'], ['map', 'Move to MapStore…']];
-    const menu = el('div', {className: 'ledger-menu panel', role: 'menu', 'aria-label': `Actions for ${label(entry)}`},
-      ...items.map(([action, text]) => el('button', {type: 'button', role: 'menuitem', tabindex: '-1', 'data-ledger-item': action, text})));
-    button.setAttribute('aria-expanded', 'true');
-    button.after(menu);
-    const buttons = [...menu.querySelectorAll('[role=menuitem]')];
-    buttons[0].focus();
-    menu.addEventListener('keydown', event => {
-      const i = buttons.indexOf(document.activeElement);
-      if (event.key === 'ArrowDown') { event.preventDefault(); buttons[(i + 1) % buttons.length].focus(); }
-      else if (event.key === 'ArrowUp') { event.preventDefault(); buttons[(i - 1 + buttons.length) % buttons.length].focus(); }
-      else if (event.key === 'Home') { event.preventDefault(); buttons[0].focus(); }
-      else if (event.key === 'End') { event.preventDefault(); buttons.at(-1).focus(); }
-      else if (event.key === 'Escape' || event.key === 'Tab') { if (event.key === 'Escape') event.preventDefault(); closeMenus(); if (event.key === 'Escape') button.focus(); }
-    });
-    menu.addEventListener('click', event => {
-      const item = event.target.closest('[data-ledger-item]'); if (!item) return;
-      closeMenus();
-      const action = item.dataset.ledgerItem;
-      if (action === 'class') openClassDialog(entry);
-      else if (action === 'submission') openSubmissionDialog(entry);
-      else openMoveDialog(entry, action);
-    });
+  // Items for the app's row menu (kebab). Dialogs explain when BBH does not
+  // support an action, so items stay enabled and reachable by keyboard.
+  function menuItems(row) {
+    const entry = ctx && currentEntry(row.id); if (!entry || row.id == null) return [];
+    return [
+      {heading: 'Ledger actions'},
+      {label: 'Change class…', icon: 'tag', onSelect: () => openClassDialog(entry)},
+      {label: 'Set submission state…', icon: 'paper-plane-o', onSelect: () => openSubmissionDialog(entry)},
+      {label: 'Move to Gadgets…', icon: 'puzzle-piece', onSelect: () => openMoveDialog(entry, 'gadgets')},
+      {label: 'Move to MapStore…', icon: 'map-o', onSelect: () => openMoveDialog(entry, 'map')},
+    ];
   }
-
-  document.addEventListener('click', event => {
-    const menuButton = event.target.closest('[data-ledger-menu]');
-    if (menuButton) { event.stopPropagation(); if (menuButton.getAttribute('aria-expanded') === 'true') closeMenus(); else openMenu(menuButton); return; }
-    if (!event.target.closest('.ledger-menu')) closeMenus();
-    if (event.target.closest('[data-ledger-add]')) openAddDialog();
-    const review = event.target.closest('[data-ledger-class-review]');
-    if (review) openClassReview(review.dataset.ledgerClassReview);
-  }, true);
-  document.addEventListener('change', event => {
-    const target = event.target;
-    if (target.id === 'ledger-sort' || target.id === 'ledger-date') {
-      view[target.id === 'ledger-sort' ? 'sort' : 'date'] = target.value;
-      ctx?.render(); document.getElementById(target.id)?.focus();
-    }
-  });
+  window.BoardUI?.registerFindingActions?.(menuItems);
 
   // ------------------------------------------------------------ drag and drop
+  // Rows drag onto the section tabs marked [data-drop-target] (Gadgets,
+  // MapStore). Styling comes from the redesign: .dragging-finding on <body>
+  // outlines every target, .drop-active marks the one under the pointer.
   const DRAG_TYPE = 'application/x-bounty-board-finding';
   let dragged = null;
-  const dropTarget = event => event.target.closest?.('.workspace-nav [data-section="gadgets"], .workspace-nav [data-section="map"]');
+  const dropTarget = event => event.target.closest?.('[data-drop-target]');
+  const clearDrag = () => { dragged = null; document.body.classList.remove('dragging-finding'); document.querySelectorAll('.drop-active').forEach(n => n.classList.remove('drop-active')); };
   document.addEventListener('dragstart', event => {
-    const row = event.target.closest?.('tr[data-finding-id]');
+    const row = event.target.closest?.('tr[data-finding-id][draggable="true"]');
     if (!row || !ctx) return;
+    // Starting a drag from a form control would steal text selection; ignore.
+    if (event.target.closest?.('input, select, textarea, button, a')) { event.preventDefault(); return; }
     dragged = row.dataset.findingId;
     event.dataTransfer.setData(DRAG_TYPE, dragged);
     event.dataTransfer.setData('text/plain', dragged);
     event.dataTransfer.effectAllowed = 'move';
-    document.body.classList.add('ledger-dragging');
+    document.body.classList.add('dragging-finding');
   });
-  document.addEventListener('dragend', () => { dragged = null; document.body.classList.remove('ledger-dragging'); document.querySelectorAll('.ledger-drop-active').forEach(n => n.classList.remove('ledger-drop-active')); });
+  document.addEventListener('dragend', clearDrag);
   document.addEventListener('dragover', event => {
     const target = dropTarget(event);
     if (!target || !(dragged || event.dataTransfer?.types?.includes(DRAG_TYPE))) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'move'; target.classList.add('ledger-drop-active');
+    event.preventDefault(); event.dataTransfer.dropEffect = 'move'; target.classList.add('drop-active');
   });
-  document.addEventListener('dragleave', event => { const target = dropTarget(event); if (target && !target.contains(event.relatedTarget)) target.classList.remove('ledger-drop-active'); });
+  document.addEventListener('dragleave', event => { const target = dropTarget(event); if (target && !target.contains(event.relatedTarget)) target.classList.remove('drop-active'); });
   document.addEventListener('drop', event => {
     const target = dropTarget(event); if (!target) return;
     const id = event.dataTransfer?.getData(DRAG_TYPE) || dragged;
-    event.preventDefault(); target.classList.remove('ledger-drop-active'); document.body.classList.remove('ledger-dragging');
-    const entry = id && currentEntry(id); dragged = null;
-    if (entry) openMoveDialog(entry, target.dataset.section);
+    event.preventDefault();
+    const entry = id && currentEntry(id); clearDrag();
+    if (entry && DESTINATIONS[target.dataset.dropTarget]) openMoveDialog(entry, target.dataset.dropTarget);
   });
-
-  // ------------------------------------------------------------ decoration
-  function decorateFindings() {
-    const table = ctx.app.querySelector('.ledger-table');
-    const panel = ctx.app.querySelector('#metadata-message')?.closest('section.panel');
-    if (!panel) return;
-    const lane = ctx.currentLane();
-    const filters = panel.querySelector('.filters');
-    if (filters && !panel.querySelector('.ledger-actions-bar')) {
-      const sort = el('select', {id: 'ledger-sort', 'aria-label': 'Sort findings'}, ...SORTS.map(([v, t]) => el('option', {value: v, text: t, selected: view.sort === v})));
-      const date = el('select', {id: 'ledger-date', 'aria-label': 'Filter by first seen date'}, ...DATE_FILTERS.map(([v, t]) => el('option', {value: v, text: t, selected: view.date === v})));
-      const addCap = caps()?.add_finding?.enabled && Array.isArray(lane?.findings);
-      const add = el('button', {type: 'button', className: 'button', 'data-ledger-add': true, text: 'Add finding', title: addCap ? 'Add a finding through BBH' : 'Unavailable: no BBH writer that supports adding findings'});
-      filters.after(el('div', {className: 'filters ledger-actions-bar'}, sort, date, add,
-        el('span', {className: 'hint', text: 'Drag a row onto Gadgets or MapStore, or use Actions.'})));
-    }
-    if (!table) return;
-    for (const tr of table.querySelectorAll('tbody tr[data-finding-id]')) {
-      const id = tr.dataset.findingId; const entry = currentEntry(id); if (!entry) continue;
-      tr.draggable = true;
-      const cell = tr.querySelector('td');
-      const dates = [['First seen', entry.row.first_seen], ['Last seen', entry.row.last_seen]].filter(([, v]) => typeof v === 'string' && v);
-      for (const [name, value] of dates) cell.append(el('span', {className: 'id', text: `${name}: ${value.slice(0, 10)}`}));
-      cell.append(el('div', {className: 'ledger-row-actions'}, el('button', {type: 'button', className: 'button subtle', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'data-ledger-menu': id, 'aria-label': `Actions for ${label(entry)}`, text: 'Actions'})));
-    }
-    // Severity labels: Informational is BBH's INFO; N/A is not a BBH value yet.
-    for (const select of table.querySelectorAll('select[data-metadata="severity"]')) {
-      for (const option of select.options) if (SEVERITY_LABELS[option.value]) option.textContent = SEVERITY_LABELS[option.value];
-      if (!select.disabled && ![...select.options].some(o => o.value === 'N/A'))
-        select.append(el('option', {value: 'N/A', disabled: true, text: 'N/A (not supported by BBH yet)'}));
-    }
-  }
-
-  function decorateDashboard() {
-    if (!classWritable()) return;
-    for (const row of ctx.app.querySelectorAll('.chart-row[data-class-name]')) {
-      const name = row.dataset.className;
-      row.append(el('button', {type: 'button', className: 'link-button ledger-class-edit', 'data-ledger-class-review': name, 'aria-label': `Review and reclassify ${name} findings`, text: 'Edit'}));
-    }
-  }
 
   window.registerBoardModule({
     name: 'ledger-actions',
     afterRender(context) {
       ctx = context;
-      closeMenus();
-      if (context.state.view === 'dashboard') decorateDashboard();
-      else if (context.state.section === 'findings') decorateFindings();
+      if (context.state.view !== 'program' || context.state.section !== 'findings') return;
+      for (const tr of context.app.querySelectorAll('tbody tr[data-finding-id]')) if (tr.dataset.findingId) tr.draggable = true;
     },
   });
-  // Exposed for tests only; no behaviour depends on it.
-  window.BoardLedgerActions = {severityKey, severityRank, SEVERITY_ORDER};
+  // Dialog entry points used by app.js buttons; severity helpers for tests.
+  window.BoardLedgerActions = {severityKey, severityRank, SEVERITY_ORDER, openAddDialog, openClassReview};
 })();

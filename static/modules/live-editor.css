@@ -23,6 +23,3 @@
 .live-history-list li{padding:3px 0}
 .live-history-entry{border:0;background:none;padding:2px 4px;color:var(--ink);text-decoration:underline;text-decoration-color:var(--border)}
 .live-history-entry.active{font-weight:700;background:var(--accent-soft);border-radius:4px}
-/* style.css has a global .preview panel rule that also matches EasyMDE's
-   "preview" toolbar button; undo it inside the live editor toolbar. */
-.live-editor .editor-toolbar button.preview{min-height:0;height:30px;padding:0;border:1px solid transparent;border-radius:3px;line-height:normal}

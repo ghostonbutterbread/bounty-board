@@ -137,7 +137,7 @@ test('multi-select filters, chips, persisted sort and row actions', {timeout: 60
   // Row action menu is keyboard operable and opens the owned report.
   const kebab = page.getByRole('button', {name: 'Actions for Stored XSS in project description renders for invited members'});
   await kebab.focus(); await page.keyboard.press('Enter');
-  const menu = page.getByRole('menu', {name: 'Finding actions'});
+  const menu = page.getByRole('menu', {name: 'Actions for Stored XSS in project description renders for invited members'});
   await menu.waitFor();
   assert.equal(await menu.getByRole('menuitem').first().evaluate(el => el === document.activeElement), true);
   await page.keyboard.press('ArrowDown');

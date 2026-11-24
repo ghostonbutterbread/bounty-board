@@ -38,36 +38,54 @@ const openAlpha=async page=>{await page.getByRole('button',{name:'Programs',exac
 const order=page=>page.locator('tbody tr[data-finding-id]').evaluateAll(rows=>rows.map(r=>r.dataset.findingId));
 const snap=async(page,name)=>{if(shots){fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,name)});}};
 
+// Integrated UI: one sort system (Sort menu + header buttons) and the first
+// seen filter in the redesign's multi-select filter bar.
+const sortBy=async(page,label)=>{await page.getByRole('button',{name:/^Sort findings/}).click();await page.getByRole('menuitemradio',{name:label}).click();};
+const pickFilter=async(page,plural,values)=>{await page.getByRole('button',{name:`Filter ${plural}`,exact:true}).click();for(const v of values)await page.getByRole('checkbox',{name:v}).check();await page.keyboard.press('Escape');};
 test('sorts by severity and date, filters by date, labels severities',{timeout:60000},()=>withBoard('writer',async({page})=>{
   await openAlpha(page);
   assert.deepEqual(await order(page),['D01','D02','D03','D04','D05']);
-  await page.getByLabel('Sort findings').selectOption('severity-desc');
+  await sortBy(page,'Severity, highest first');
   assert.deepEqual(await order(page),['D02','D05','D01','D03','D04']);
-  assert.equal(await page.evaluate(()=>document.activeElement.id),'ledger-sort');
-  await page.getByLabel('Sort findings').selectOption('severity-asc');
+  assert.equal(await page.evaluate(()=>document.activeElement.hasAttribute('data-sort-menu')),true,'focus returns to the Sort button');
+  await sortBy(page,'Severity, lowest first');
   assert.deepEqual(await order(page),['D04','D03','D01','D05','D02']);
-  await page.getByLabel('Sort findings').selectOption('first-desc');
+  await sortBy(page,'First seen, newest first');
   assert.deepEqual(await order(page),['D02','D05','D03','D01','D04']);
-  await page.getByLabel('Sort findings').selectOption('first-asc');
+  await sortBy(page,'First seen, oldest first');
   assert.deepEqual(await order(page),['D01','D03','D05','D02','D04']);
-  await page.getByLabel('Filter by first seen date').selectOption('30');
+  await sortBy(page,'Last seen, newest first');
+  assert.deepEqual(await order(page),['D02','D01','D05','D03','D04']);
+  // The First seen header button is the same sort: newest first on the first click.
+  await page.locator('[data-sort="first_seen"]').click();
+  assert.deepEqual(await order(page),['D02','D05','D03','D01','D04']);
+  assert.equal(await page.locator('th[aria-sort="descending"] [data-sort="first_seen"]').count(),1);
+  await page.locator('[data-sort="first_seen"]').click();
+  assert.deepEqual(await order(page),['D01','D03','D05','D02','D04'],'missing dates stay last');
+  // Disjoint first-seen buckets: the last 30 days is two buckets.
+  await pickFilter(page,'first seen dates',['Last 7 days','8 to 30 days']);
   assert.deepEqual(await order(page),['D05','D02']);
   await page.getByText('2 of 5').waitFor();
-  await page.getByLabel('Filter by first seen date').selectOption('none');
+  await page.getByRole('button',{name:'Clear all'}).click();
+  await pickFilter(page,'first seen dates',['No date recorded']);
   assert.deepEqual(await order(page),['D04']);
-  await page.getByLabel('Filter by first seen date').selectOption('older90');
+  await page.getByRole('button',{name:'Clear all'}).click();
+  await pickFilter(page,'first seen dates',['Older than 90 days']);
   assert.deepEqual(await order(page),['D01']);
-  await page.getByLabel('Filter by first seen date').selectOption('');
-  // Existing severity filter still composes with the new sort.
-  await page.getByLabel('Filter severities').selectOption('INFO');
+  // Existing severity filter composes with the date filter and the sort.
+  await page.getByRole('button',{name:'Clear all'}).click();
+  await pickFilter(page,'severities',['INFO']);
   assert.deepEqual(await order(page),['D03']);
-  await page.getByLabel('Filter severities').selectOption('');
+  await page.getByRole('button',{name:'Clear all'}).click();
   const labels=await page.getByLabel('severity for Alpha critical').locator('option').evaluateAll(o=>o.map(x=>[x.value,x.textContent,x.disabled]));
   assert.deepEqual(labels.find(([v])=>v==='INFO'),['INFO','Informational (INFO)',false]);
   assert.deepEqual(labels.find(([v])=>v==='N/A'),['N/A','N/A (not supported by BBH yet)',true]);
-  assert.match(await page.locator('tr[data-finding-id="D02"]').innerText(),/First seen: \d{4}-\d{2}-\d{2}/);
+  assert.match(await page.locator('tr[data-finding-id="D02"] td.date').innerText(),/^\d{4}-\d{2}-\d{2}\s+Last seen \d{4}-\d{2}-\d{2}$/);
   const ranks=await page.evaluate(()=>['exceptional','Critical','informational','na','N/A','none','bogus',''].map(window.BoardLedgerActions.severityKey));
   assert.deepEqual(ranks,['EXCEPTIONAL','CRITICAL','INFO','N/A','N/A','N/A','UNKNOWN','UNKNOWN']);
+  // Sort choice persists like the header sort.
+  await page.reload();await page.locator('tr[data-finding-id]').first().waitFor();
+  assert.match(await page.getByRole('button',{name:/^Sort findings/}).innerText(),/First seen, oldest first/);
 }));
 
 test('row menu by keyboard, searchable class picker and submission state',{timeout:60000},()=>withBoard('writer',async({page,ledger,calls})=>{
@@ -75,10 +93,13 @@ test('row menu by keyboard, searchable class picker and submission state',{timeo
   const actions=page.getByRole('button',{name:'Actions for Alpha critical'});
   await actions.click();
   const menu=page.getByRole('menu',{name:'Actions for Alpha critical'});
+  // One menu: the UI items and the ledger actions together.
   await menu.waitFor();assert.equal(await actions.getAttribute('aria-expanded'),'true');
-  assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Change class…');
+  assert.deepEqual(await menu.getByRole('menuitem').evaluateAll(items=>items.map(i=>i.textContent)),['Copy finding ID','Change class…','Set submission state…','Move to Gadgets…','Move to MapStore…','Show only severity CRITICAL','Show only class idor','Show only status confirmed']);
+  assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Copy finding ID');
+  await page.keyboard.press('c');assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Change class…');
   await page.keyboard.press('ArrowDown');assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Set submission state…');
-  await page.keyboard.press('End');assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Move to MapStore…');
+  await page.keyboard.press('End');assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Show only status confirmed');
   await snap(page,'row-menu.png');
   await page.keyboard.press('Escape');await menu.waitFor({state:'detached'});
   assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Actions for Alpha critical');
@@ -122,13 +143,13 @@ test('row menu by keyboard, searchable class picker and submission state',{timeo
   const call=calls().at(-1);assert.equal(calls().length,before+1);
   assert.deepEqual(call.slice(call.indexOf('--set-submission')),['--set-submission','D02','--submission-state','submitted','--submission-result','duplicate','--submission-report','R-1']);
   await sub.getByRole('button',{name:'Cancel'}).click();
-  await page.locator('tr[data-finding-id="D02"]').getByText('Submission state: submitted').waitFor();
+  await page.locator('tr[data-finding-id="D02"] .finding-meta').getByText('submitted',{exact:true}).waitFor();
 }));
 
 test('drag a finding onto Gadgets: preview, capability block, real write',{timeout:60000},()=>withBoard('writer',async({page,ledger,mapEntries,calls})=>{
   await openAlpha(page);
   await page.getByLabel('severity for Alpha critical').waitFor();
-  const gadgets=page.locator('.workspace-nav [data-section="gadgets"]');
+  const gadgets=page.locator('.workspace-nav [data-drop-target="gadgets"]');
   assert.equal(await gadgets.locator('.count').innerText(),'0');
   await page.setViewportSize({width:1360,height:1700});
   await page.locator('tr[data-finding-id="D05"]').dragTo(gadgets,{sourcePosition:{x:12,y:12}});
@@ -180,6 +201,8 @@ test('non-drag Move to MapStore and dashboard class review at scale',{timeout:60
   await dialog.getByRole('button',{name:'Close'}).click();
   // Dashboard class breakdown: xss spans two programs.
   await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+  // Bulk reclassify lives in the expanded class row of the dashboard breakdown.
+  await page.locator('.breakdown-row[data-class-name="xss"]').click();
   await page.getByRole('button',{name:'Review and reclassify xss findings'}).click();
   const review=page.getByRole('dialog',{name:'Class: xss'});await review.waitFor();
   await review.getByText('3 loaded findings in this class. Each change runs a separate BBH edit for that finding.').waitFor();
@@ -193,7 +216,7 @@ test('non-drag Move to MapStore and dashboard class review at scale',{timeout:60
   assert.equal(ledger('alpha').find(f=>f.fid==='D03').class_name,'stored-xss');
   assert.equal(ledger('beta')[0].class_name,'xss');
   await review.getByRole('button',{name:'Close'}).click();
-  await page.locator('.chart-row[data-class-name="stored-xss"]').waitFor();
+  await page.locator('.breakdown-row[data-class-name="stored-xss"]').waitFor();
   // Back-to-back inline edit in the same lane after module writes: no false conflict.
   await page.getByRole('button',{name:'Programs',exact:true}).click();
   await page.getByLabel('severity for Alpha high').selectOption('MEDIUM');
@@ -264,6 +287,8 @@ test('without a writer every action stays visibly disabled',{timeout:60000},()=>
   await page.getByText(/Adding findings is unavailable/).waitFor();
   await page.keyboard.press('Escape');
   await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+  if(await page.locator('.breakdown-row[data-class-name="xss"]').count())await page.locator('.breakdown-row[data-class-name="xss"]').click();
+  await page.locator('.drill').first().waitFor();
   assert.equal(await page.getByRole('button',{name:/Review and reclassify/}).count(),0);
   assert.deepEqual(calls(),[]);
 }));

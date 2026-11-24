@@ -716,10 +716,14 @@
       let s = sessions.get(key);
       if (!s || s.closed) { s = createSession(sel, host); sessions.set(key, s); return; }
       if (s.parked) unpark(s);
-      if (s.el.parentNode !== host) {
-        const refocus = s.hadFocus && s.blurPending && (!document.activeElement || document.activeElement === document.body);
+      // The app keeps an unchanged host node across renders (it is detached
+      // and reinserted), so the session may already be in place. Either way a
+      // render that removed the focused editor must give focus back.
+      const refocus = s.hadFocus && s.blurPending && (!document.activeElement || document.activeElement === document.body);
+      const moved = s.el.parentNode !== host;
+      if (moved) host.replaceChildren(s.el);
+      if (moved || refocus) {
         s.blurPending = false;
-        host.replaceChildren(s.el);
         if (s.cm) { s.cm.refresh(); if (refocus) s.cm.focus(); }
       }
     },

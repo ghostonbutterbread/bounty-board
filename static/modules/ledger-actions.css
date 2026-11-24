@@ -1,33 +1,33 @@
-/* Ledger actions module. Uses theme custom properties only. */
-.ledger-actions-bar{border-top:0;padding-top:0}
-.ledger-row-actions{position:relative;margin-top:6px}
-.ledger-menu{position:absolute;z-index:5;display:grid;min-width:190px;padding:4px;margin-top:2px;box-shadow:var(--shadow);border:1px solid var(--border);background:var(--panel)}
-.ledger-menu [role=menuitem]{border:0;background:transparent;text-align:left;padding:7px 10px;border-radius:4px}
-.ledger-menu [role=menuitem]:hover,.ledger-menu [role=menuitem]:focus{background:var(--accent-soft)}
-.ledger-dialog{width:min(560px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;color:var(--ink);background:var(--panel);border:1px solid var(--border);padding:18px 20px}
-.ledger-dialog::backdrop{background:color-mix(in srgb,var(--nav) 55%,transparent)}
-.ledger-dialog h2{margin-top:0}
-.ledger-dialog h3{margin:14px 0 4px;font-size:14px}
-.ledger-dialog input:not([type=checkbox]),.ledger-dialog select,.ledger-dialog textarea{width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:5px;background:var(--panel);color:var(--ink)}
-.ledger-form{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 12px;align-items:start;margin:10px 0}
-.ledger-form>label{padding-top:7px}
-.ledger-check{display:flex;gap:8px;align-items:center;margin:10px 0}
-.ledger-dialog-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+/* Ledger actions dialogs. Redesign tokens only (see the header of style.css).
+   Row menu, drag targets, the Add finding button and the class review button
+   use the shared .menu, .drop-target/.drop-active and .button styles. */
+.ledger-dialog{width:min(580px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;padding:var(--space-5) var(--space-6);color:var(--text);background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg)}
+.ledger-dialog::backdrop{background:var(--overlay)}
+.ledger-dialog h2{margin:0 0 var(--space-2);font-size:var(--text-lg);font-weight:600;line-height:1.3}
+.ledger-dialog h3{margin:var(--space-4) 0 var(--space-1);font-size:var(--text-sm);font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.04em}
+.ledger-dialog input:not([type=checkbox]),.ledger-dialog select,.ledger-dialog textarea{width:100%;min-height:32px;padding:6px 9px;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--surface);color:var(--text)}
+.ledger-dialog input:focus-visible,.ledger-dialog select:focus-visible,.ledger-dialog textarea:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.ledger-dialog input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+.ledger-form{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--space-2) var(--space-3);align-items:start;margin:var(--space-3) 0}
+.ledger-form>label{padding-top:6px;font-size:var(--text-md);font-weight:500;color:var(--text-2)}
+.ledger-form .hint{margin:4px 0 0}
+.ledger-check{display:flex;gap:var(--space-2);align-items:center;margin:var(--space-3) 0;font-size:var(--text-md)}
+.ledger-dialog-actions{display:flex;gap:var(--space-2);justify-content:flex-end;margin-top:var(--space-4);padding-top:var(--space-3);border-top:1px solid var(--border)}
 .ledger-status:empty{display:none}
-.ledger-status{margin-top:10px}
+.ledger-status{margin-top:var(--space-3)}
 .ledger-combobox{position:relative}
-.ledger-options{position:absolute;z-index:6;left:0;right:0;max-height:220px;overflow:auto;margin:2px 0 0;padding:4px;list-style:none;background:var(--panel);border:1px solid var(--border);border-radius:5px;box-shadow:var(--shadow)}
-.ledger-options [role=option]{padding:5px 8px;border-radius:4px;cursor:pointer;display:flex;justify-content:space-between}
-.ledger-options [role=option][aria-selected=true],.ledger-options [role=option]:hover{background:var(--accent-soft)}
-.ledger-preview{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 12px;margin:0}
-.ledger-preview dt{color:var(--muted)}
-.ledger-preview dd{margin:0}
-.ledger-review-list{list-style:none;padding:0;margin:8px 0;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:5px}
-.ledger-review-list li{display:flex;gap:10px;align-items:flex-start;padding:7px 10px;border-bottom:1px solid var(--border)}
+.ledger-options{position:absolute;z-index:6;left:0;right:0;max-height:220px;overflow:auto;margin:4px 0 0;padding:4px;list-style:none;background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg)}
+.ledger-options [role=option]{display:flex;justify-content:space-between;gap:var(--space-2);padding:5px 8px;border-radius:var(--radius-sm);font-size:var(--text-md);cursor:pointer}
+.ledger-options [role=option][aria-selected=true],.ledger-options [role=option]:hover{background:var(--surface-3)}
+.ledger-options .muted{color:var(--text-3);font-variant-numeric:tabular-nums}
+#ledger-move-preview{margin-top:var(--space-3);padding:var(--space-3);background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius)}
+#ledger-move-preview h3:first-child{margin-top:0}
+.ledger-preview{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px var(--space-3);margin:0;font-size:var(--text-md)}
+.ledger-preview dt{color:var(--text-3)}
+.ledger-preview dd{margin:0;overflow-wrap:anywhere}
+.ledger-review-list{list-style:none;padding:0;margin:var(--space-2) 0;max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+.ledger-review-list li{display:flex;gap:var(--space-3);align-items:flex-start;padding:8px 10px;border-bottom:1px solid var(--border)}
 .ledger-review-list li:last-child{border-bottom:0}
-.ledger-review-list label{display:grid}
-.chart-row:has(.ledger-class-edit){grid-template-columns:minmax(80px,1fr) minmax(60px,1fr) auto auto}
-.ledger-class-edit{font-size:12px}
-tr[draggable=true]{cursor:grab}
-body.ledger-dragging .workspace-nav [data-section=gadgets],body.ledger-dragging .workspace-nav [data-section=map]{outline:2px dashed var(--accent);outline-offset:2px}
-.workspace-nav .ledger-drop-active{background:var(--accent-soft)!important;outline:3px solid var(--focus)!important}
+.ledger-review-list label{display:grid;gap:2px;font-size:var(--text-md)}
+tr[draggable=true]>td:first-child{cursor:grab}
+.dragging-finding tr[draggable=true]>td:first-child{cursor:grabbing}

@@ -1,3 +1,3 @@
 # Observed unrelated issues
 
-- `static/style.css` `.preview{min-height:340px;padding:14px;...}` (report preview panel) also matches EasyMDE's `button.preview` toolbar button, so the non-live report editor toolbar stretches to ~360 px tall. Seen while building the live editor (feat/live-report-editing), which overrides it locally in `static/modules/live-editor.css`. Fix: scope the panel rule (for example `#report-preview` or `div.preview`). Impact: layout only.
+- Fixed (feat/board-workspace-integrated): `static/style.css` report preview rule also matched EasyMDE's `button.preview` toolbar button, making the editor toolbar ~360 px tall. The rule is now `.preview:not(button)` and the local override in `static/modules/live-editor.css` was removed. A browser test asserts the toolbar height in both the live and non-live editors (`static/tests/integrated-workspace.synthetic.test.cjs`).

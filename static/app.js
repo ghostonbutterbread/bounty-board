@@ -52,12 +52,12 @@
   const classNote = row => {
     const t = taxonomy(); if (!t || row.class == null || row.class === '') return '';
     const c = t.normalizeClass(row.class);
-    return `<span class="id" data-class-category="${esc(c.category)}">${c.category==='unclassified' ? 'Category: Unclassified' : `Category: ${esc(c.label)}${c.confidence==='low' ? ' (low confidence)' : ''}`}</span>`;
+    return `<span class="cell-note" data-class-category="${esc(c.category)}">${c.category==='unclassified' ? 'Category: Unclassified' : `Category: ${esc(c.label)}${c.confidence==='low' ? ' (low confidence)' : ''}`}</span>`;
   };
   const severityNote = row => {
     const t = taxonomy(); if (!t || row.severity == null || row.severity === '') return '';
     const s = t.normalizeSeverity(row.severity);
-    return s.kind === 'canonical' ? '' : `<span class="id" data-severity-note="${esc(s.kind)}">Shown as ${esc(s.value)}${s.note ? `. ${esc(s.note)}` : ''}</span>`;
+    return s.kind === 'canonical' ? '' : `<span class="cell-note" data-severity-note="${esc(s.kind)}">Shown as ${esc(s.value)}${s.note ? `. ${esc(s.note)}` : ''}</span>`;
   };
   window.BoardModules = window.BoardModules || [];
   window.registerBoardModule = module => {window.BoardModules.push(module);try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}};
@@ -364,8 +364,9 @@
   }
   setSidebar(readStore('bounty-board-sidebar-collapsed',false)===true);
   sidebarToggle.addEventListener('click',()=>setSidebar(!shell.classList.contains('sidebar-collapsed')));
-  state.sort=(s=>s && typeof s.key==='string' && ['title','severity','class','status','id'].includes(s.key) && ['asc','desc'].includes(s.dir) ? s : {key:'',dir:'asc'})(readStore('bounty-board-finding-sort',null));
+  state.sort=(s=>s && typeof s.key==='string' && ['title','severity','class','status','id','first_seen','last_seen'].includes(s.key) && ['asc','desc'].includes(s.dir) ? s : {key:'',dir:'asc'})(readStore('bounty-board-finding-sort',null));
   state.dashWork=readStore('bounty-board-dashboard-work','all')==='open' ? 'open' : 'all';
+  state.classGroupBy=readStore('bounty-board-class-group','class')==='category' ? 'category' : 'class';
   // Last-used program: recorded on explicit selection, offered on load.
   const recentPrograms = () => (readStore('bounty-board-recent-programs',[])||[]).filter(r=>r && typeof r.program==='string').slice(0,5);
   function markProgramUsed() {
@@ -657,14 +658,30 @@
     }
     return [...groups.values()].sort((a,b)=>(a.key==='none')-(b.key==='none') || b.items.length-a.items.length || a.label.localeCompare(b.label));
   }
+  // Display-time categories (taxonomy module) for the dashboard class
+  // breakdown. Raw classes stay the source of truth for filters and edits.
+  function categoryGroups(entries) {
+    const t=taxonomy();if(!t)return [];
+    const groups=new Map();
+    for(const entry of entries){
+      const raw=entry.f.class, c=raw==null || raw==='' ? null : t.normalizeClass(raw);
+      const key=c && c.category!=='unclassified' ? c.category : 'none';
+      if(!groups.has(key))groups.set(key,{key,label:key==='none'?'Unclassified':c.label.split(' > ')[0],items:[]});
+      groups.get(key).items.push(entry);
+    }
+    return [...groups.values()].sort((a,b)=>(a.key==='none')-(b.key==='none') || b.items.length-a.items.length || a.label.localeCompare(b.label));
+  }
+  const classWritable = () => !!BoardAPI.capability(state.data,'findingMetadata')?.textFields?.includes('class');
   function drill(kind, group) {
     const byProgram=new Map();
     for(const entry of group.items){const k=JSON.stringify([entry.p.id,entry.l.name]);if(!byProgram.has(k))byProgram.set(k,{p:entry.p,l:entry.l,items:[]});byProgram.get(k).items.push(entry);}
     const sorted=[...byProgram.values()].sort((a,b)=>programLabel(a.p).localeCompare(programLabel(b.p)) || String(a.l.name).localeCompare(String(b.l.name)));
-    return `<div class="drill" id="drill-${esc(kind)}-${esc(group.key.replace(/[^a-z0-9_-]/gi,'_'))}">${sorted.map(({p,l,items})=>`<div class="drill-group"><h4>${icon('folder-o')}<span>${esc(programLabel(p))} / ${esc(l.name)}</span><span class="count">${items.length}</span></h4><ul>${items.sort((a,b)=>sevRank(a.f.severity)-sevRank(b.f.severity)).map(({f})=>{
+    // Bulk reclassify (ledger actions) for one raw class, from its expanded row.
+    const review=kind==='class' && group.key!=='none' && classWritable() && window.BoardLedgerActions?.openClassReview ? `<div class="drill-actions"><span class="hint">${group.items.length} ${group.items.length===1?'finding':'findings'} with class <code>${esc(group.key)}</code></span><button type="button" class="button sm" data-class-review="${esc(group.key)}" aria-label="Review and reclassify ${esc(group.key)} findings">${icon('pencil')}<span>Reclassify</span></button></div>` : '';
+    return `<div class="drill" id="drill-${esc(kind)}-${esc(group.key.replace(/[^a-z0-9_-]/gi,'_'))}">${review}${sorted.map(({p,l,items})=>`<div class="drill-group"><h4>${icon('folder-o')}<span>${esc(programLabel(p))} / ${esc(l.name)}</span><span class="count">${items.length}</span></h4><ul>${items.sort((a,b)=>sevRank(a.f.severity)-sevRank(b.f.severity)).map(({f})=>{
       const report=reportFor(l,f);
       const target=`data-program="${esc(p.id)}" data-lane="${esc(l.name)}"`;
-      return `<li>${kind==='class'?sevBadge(f.severity):statusBadge(f.status)||''}<button type="button" class="link-button truncate" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</button><span class="meta"><span class="id">${esc(f.id??'')}</span>${isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<button type="button" class="link-button" data-goto-report="${esc(report.id)}" ${target}>${icon('file-text-o')} Report</button>`:''}</span></li>`;
+      return `<li>${kind!=='sev'?sevBadge(f.severity):statusBadge(f.status)||''}<button type="button" class="link-button truncate" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</button><span class="meta">${kind==='cat' && f.class?`<span class="badge outline">${esc(f.class)}</span>`:''}<span class="id">${esc(f.id??'')}</span>${isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<button type="button" class="link-button" data-goto-report="${esc(report.id)}" ${target}>${icon('file-text-o')} Report</button>`:''}</span></li>`;
     }).join('')}</ul></div>`).join('')}</div>`;
   }
   function breakdown(kind, groups, total) {
@@ -672,7 +689,8 @@
     return `<div class="breakdown">${groups.map(group=>{
       const id=`${kind}:${group.key}`, open=state.dashExpanded===id;
       const label=kind==='sev' ? `<span class="sev" data-sev="${group.sev}">${esc(group.label)}</span>` : esc(group.label);
-      return `<button type="button" class="breakdown-row" data-breakdown="${esc(id)}" aria-expanded="${open}" title="Show matching findings by program"><i class="fa fa-angle-right" aria-hidden="true"></i><span class="label">${label}</span><span class="bar${kind==='sev'?' sev-bar':''}" ${kind==='sev'?`data-sev="${group.sev}"`:''} aria-hidden="true"><i style="width:${group.items.length/max*100}%"></i></span><strong>${group.items.length}</strong></button>${open?drill(kind==='sev'?'sev':'class',group):''}`;
+      const hook=kind==='class' && group.key!=='none' ? ` data-class-name="${esc(group.key)}"` : kind==='cat' ? ` data-category-row="${esc(group.key)}"` : '';
+      return `<button type="button" class="breakdown-row"${hook} data-breakdown="${esc(id)}" aria-expanded="${open}" title="Show matching findings by program"><i class="fa fa-angle-right" aria-hidden="true"></i><span class="label">${label}</span><span class="bar${kind==='sev'?' sev-bar':''}" ${kind==='sev'?`data-sev="${group.sev}"`:''} aria-hidden="true"><i style="width:${group.items.length/max*100}%"></i></span><strong>${group.items.length}</strong></button>${open?drill(kind,group):''}`;
     }).join('')}</div>`;
   }
   function dashboard() {
@@ -691,7 +709,8 @@
     const target=workspaceTarget();
     const workFilter=`<div class="work-filter"><span id="work-filter-label">Show</span><div class="segmented" role="group" aria-labelledby="work-filter-label"><button type="button" data-dash-work="all" aria-pressed="${!openOnly}">All records</button><button type="button" data-dash-work="open" aria-pressed="${openOnly}">Not submitted</button></div></div>`;
     const controls=`<div class="toolbar">${workFilter}<label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.id||p.name,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`;
-    const sevGroups=severityGroups(entries), clsGroups=classGroups(entries);
+    const sevGroups=severityGroups(entries), clsGroups=classGroups(entries), catGroups=categoryGroups(entries.filter(e=>e.f.class!=null && e.f.class!==''));
+    const byCategory=state.classGroupBy==='category' && catGroups.length>0;
     const scope=openOnly ? 'not-submitted finding records' : 'finding records';
     const programRows=ps.map(p=>{
       const pl=list(p.lanes), fs=pl ? pl.flatMap(l=>list(l.findings)||[]) : [], known=pl && pl.every(l=>Array.isArray(l.findings));
@@ -701,7 +720,7 @@
     }).join('');
     return `${title('Dashboard','A portfolio view of the records currently loaded.',controls)}
       <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}${openOnly?' Finding counts include not-submitted work only.':''}</p></div><div class="open-workspace"><button class="button primary" data-go-program ${target?'':'disabled'}>${icon('arrow-right')}<span>Open workspace</span></button><button type="button" class="button" data-program-picker ${options.length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>${target?`<p class="target-note">Opens <strong>${esc(programLabel(target.program))}</strong>${target.lane?` / ${esc(target.lane)}`:''}<span class="badge outline">${esc(target.why)}</span></p>`:''}</div></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records',openOnly?' (not submitted)':'')}${stat(state.data?.portfolio_unloaded ? 'Unknown' : state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
-      ${availability(ps)}<div class="dashboard-grid"><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?`Counts from all loaded ${scope}.`:`Incomplete data: counts include loaded ${scope} only, not portfolio totals.`} Select a row to list matching findings by program.</p>${sevGroups.length?breakdown('sev',sevGroups):'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded ${scope}; not coverage. Select a row to list matches.</p>${clsGroups.length?breakdown('class',clsGroups):'<div class="state">No classified findings available.</div>'}</section><section class="panel wide"><div class="panel-head"><div><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p></div></div>${ps.length?`<div class="program-search"><div class="input-icon">${icon('search')}<input id="program-search" type="search" aria-label="Search programs" placeholder="Search programs" value="${esc(state.programQuery||'')}" autocomplete="off"></div><span class="hint num" id="program-search-count"></span></div><div class="table-wrap"><table class="program-table"><thead><tr><th>Program</th><th>Lanes</th><th>Findings</th><th>Not submitted</th><th>Highest severity</th></tr></thead><tbody>${programRows}</tbody></table><div class="state" id="program-search-empty" hidden>No programs match this search.</div></div>`:discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for all loaded findings.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
+      ${availability(ps)}<div class="dashboard-grid"><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?`Counts from all loaded ${scope}.`:`Incomplete data: counts include loaded ${scope} only, not portfolio totals.`} Select a row to list matching findings by program.</p>${sevGroups.length?breakdown('sev',sevGroups):'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad" aria-label="Finding classes"><div class="blockhead"><h2>Finding classes</h2>${catGroups.length?`<div class="segmented" role="group" aria-label="Group classes"><button type="button" data-class-group="class" aria-pressed="${!byCategory}">By class</button><button type="button" data-class-group="category" aria-pressed="${byCategory}">By category</button></div>`:''}</div><p class="hint">${byCategory?`Raw classes grouped by display-time category rules on loaded ${scope}. Raw classes stay unchanged; Unclassified keeps the raw label.`:`Classification on loaded ${scope}; not coverage.`} Select a row to list matches.</p>${byCategory?breakdown('cat',catGroups):clsGroups.length?breakdown('class',clsGroups):'<div class="state">No classified findings available.</div>'}</section><section class="panel wide"><div class="panel-head"><div><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p></div></div>${ps.length?`<div class="program-search"><div class="input-icon">${icon('search')}<input id="program-search" type="search" aria-label="Search programs" placeholder="Search programs" value="${esc(state.programQuery||'')}" autocomplete="off"></div><span class="hint num" id="program-search-count"></span></div><div class="table-wrap"><table class="program-table"><thead><tr><th>Program</th><th>Lanes</th><th>Findings</th><th>Not submitted</th><th>Highest severity</th></tr></thead><tbody>${programRows}</tbody></table><div class="state" id="program-search-empty" hidden>No programs match this search.</div></div>`:discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for all loaded findings.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
   function applyProgramSearch() {
     const input=app.querySelector('#program-search');if(!input)return;
@@ -722,12 +741,21 @@
     const header=`<div class="titlebar"><div><p class="eyebrow">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(p.family||'Program workspace')} / ${esc(lane.name)}</span></p><h1>${esc(p.name||p.id)}</h1>${origin}</div><div class="switcher">${selectors()}${picker}</div></div>`;
     return `${header}<div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div><div><strong>${rows('findings') ? rows('findings').filter(isNotSubmitted).length : 'Unknown'}</strong><span>Not submitted</span></div></div></section>${availability([{...p,lanes:[lane]}])}<div class="layout"><div class="stack"><nav class="tabs workspace-nav" aria-label="Workspace sections">${nav}</nav>${sectionContent()}</div></div></div>`;
   }
-  const FILTERS=[['severity','Severity','severities'],['class','Class','classes'],['status','Status','statuses'],['submission','Submission','submission states']];
-  const emptyFilters = () => ({severity:[],class:[],status:[],submission:[],query:''});
-  const filterValue = (row,key) => key==='submission' ? submissionLabel(row) : String(row[key] ?? '');
+  const FILTERS=[['severity','Severity','severities'],['class','Class','classes'],['status','Status','statuses'],['submission','Submission','submission states'],['age','First seen','first seen dates']];
+  const emptyFilters = () => ({severity:[],class:[],status:[],submission:[],age:[],query:''});
+  // First-seen age buckets are disjoint so the multi-select stays meaningful
+  // (pick "Last 7 days" and "8 to 30 days" for the last month).
+  const AGE_BUCKETS=['Last 7 days','8 to 30 days','31 to 90 days','Older than 90 days','No date recorded'];
+  const ledgerTime = value => {const t=Date.parse(value ?? '');return Number.isFinite(t) ? t : null;};
+  const ageBucket = row => {
+    const t=ledgerTime(row.first_seen);if(t===null)return AGE_BUCKETS[4];
+    const days=(Date.now()-t)/86400000;
+    return days<=7 ? AGE_BUCKETS[0] : days<=30 ? AGE_BUCKETS[1] : days<=90 ? AGE_BUCKETS[2] : AGE_BUCKETS[3];
+  };
+  const filterValue = (row,key) => key==='submission' ? submissionLabel(row) : key==='age' ? ageBucket(row) : String(row[key] ?? '');
   const filterValues = (key, findings) => {
     const counts=new Map();for(const r of findings){const v=filterValue(r,key);if(v)counts.set(v,(counts.get(v)||0)+1);}
-    return [...counts].sort((a,b)=>key==='severity' ? sevRank(a[0])-sevRank(b[0]) || a[0].localeCompare(b[0]) : a[0].localeCompare(b[0]));
+    return [...counts].sort((a,b)=>key==='severity' ? sevRank(a[0])-sevRank(b[0]) || a[0].localeCompare(b[0]) : key==='age' ? AGE_BUCKETS.indexOf(a[0])-AGE_BUCKETS.indexOf(b[0]) : a[0].localeCompare(b[0]));
   };
   function filterControl(key,label,plural,findings) {
     const active=state.filters[key]||[];
@@ -756,13 +784,18 @@
     openPopover(trigger,box,{className:'filter-popover',reanchor:()=>app.querySelector(`.filter-trigger[data-filter="${CSS.escape(key)}"]`)});
     box.querySelector('input')?.focus();
   }
+  const WRITE_SEVERITY_LABELS={INFO:'Informational (INFO)',UNKNOWN:'Unknown'};
   function metadataCell(row,key) {
     const value=String(row[key]??''); const cap=BoardAPI.capability(state.data,'findingMetadata');
     if(cap?.textFields?.includes(key)) return `<input data-metadata="${esc(key)}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" aria-describedby="metadata-warning" title="Lowercase class identifier; change applies on leaving the field" value="${esc(value)}" ${row.id != null && !state.metadataPending?'':'disabled'}>`;
     const options=cap?.options?.[key]; const writable=cap && row.id != null && Array.isArray(options) && options.length && !state.metadataPending;
     const values=[...new Set([value,...(Array.isArray(options)?options.map(String):[])].filter(Boolean))];
     const sev=key==='severity' ? ` class="sev-select" data-sev="${value?sevKey(value):'unknown'}"` : '';
-    return `<select data-metadata="${key}" data-id="${esc(row.id??'')}"${sev} aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${cap?'aria-describedby="metadata-warning"':''} ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,v,v===value)).join('')}</select>`;
+    // Severity: INFO is BBH's informational value; N/A is shown and ranked but
+    // BBH stores it as UNKNOWN, so it is offered disabled until BBH supports it.
+    const label=v=>key==='severity' && WRITE_SEVERITY_LABELS[v] ? WRITE_SEVERITY_LABELS[v] : v;
+    const na=key==='severity' && writable && !values.includes('N/A') ? '<option value="N/A" disabled>N/A (not supported by BBH yet)</option>' : '';
+    return `<select data-metadata="${key}" data-id="${esc(row.id??'')}"${sev} aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${cap?'aria-describedby="metadata-warning"':''} ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,label(v),v===value)).join('')}${na}</select>`;
   }
   function rationale(row) {
     const label=String(row.title||row.id||'finding'), edit=state.rationaleDrafts.get(rationaleKey(state.program,state.lane,row.id));
@@ -770,12 +803,25 @@
     if(edit) return `<div class="rationale"><p>Saved rationale: <span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span></p><label>Unsaved draft — Severity rationale for ${esc(label)}<textarea data-rationale-input="${esc(row.id)}" aria-label="Severity rationale for ${esc(label)}" aria-describedby="metadata-warning" rows="3" ${state.metadataPending?'disabled':''}>${esc(edit.text)}</textarea></label>${writable?`<button class="button" data-rationale-save="${esc(row.id)}" aria-label="Save severity rationale for ${esc(label)}" aria-describedby="metadata-warning" ${state.metadataPending?'disabled':''}>Save rationale</button>`:'<p class="hint">Saving unavailable; copy this draft before leaving.</p>'} <button class="button subtle" data-rationale-cancel="${esc(row.id)}" ${state.metadataPending?'disabled':''}>Cancel</button></div>`;
     return `<div class="rationale"><span>Severity rationale: </span><span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span>${writable?` <button class="link-button" data-rationale-edit="${esc(row.id)}" aria-label="Edit severity rationale for ${esc(label)}" ${state.metadataPending?'disabled':''}>Edit rationale</button>`:''}</div>`;
   }
-  const SORTS={title:r=>String(r.title||'').toLowerCase(),severity:r=>sevRank(r.severity),class:r=>String(r.class||'').toLowerCase(),status:r=>String(r.status||'').toLowerCase(),id:r=>String(r.id??'')};
+  // One sort system for the findings table: header buttons and the Sort menu
+  // both set state.sort. Severity ascending is scale order (EXCEPTIONAL first);
+  // dates start newest first. Missing dates always sort last; ties keep ledger order.
+  const SORTS={title:r=>String(r.title||'').toLowerCase(),severity:r=>sevRank(r.severity),class:r=>String(r.class||'').toLowerCase(),status:r=>String(r.status||'').toLowerCase(),id:r=>String(r.id??''),first_seen:r=>ledgerTime(r.first_seen),last_seen:r=>ledgerTime(r.last_seen)};
+  const SORT_FIRST_DIR={first_seen:'desc',last_seen:'desc'};
+  const SORT_MENU=[['','asc','Ledger order'],['severity','asc','Severity, highest first'],['severity','desc','Severity, lowest first'],['first_seen','desc','First seen, newest first'],['first_seen','asc','First seen, oldest first'],['last_seen','desc','Last seen, newest first'],['last_seen','asc','Last seen, oldest first'],['title','asc','Title, A to Z'],['class','asc','Class, A to Z'],['status','asc','Status, A to Z']];
   function sortFindings(items) {
     const {key,dir}=state.sort||{};const get=SORTS[key];if(!get)return items;
     const sign=dir==='desc'?-1:1;
-    return items.map((r,i)=>[r,i]).sort((a,b)=>{const x=get(a[0]),y=get(b[0]);return (x<y?-1:x>y?1:0)*sign || a[1]-b[1];}).map(([r])=>r);
+    return items.map((r,i)=>[r,i,get(r)]).sort((a,b)=>{const x=a[2],y=b[2];if(x===null || y===null)return (x===null)-(y===null) || a[1]-b[1];return (x<y?-1:x>y?1:0)*sign || a[1]-b[1];}).map(([r])=>r);
   }
+  const sortLabel = () => (SORT_MENU.find(([k,d])=>k===(state.sort?.key||'') && (!k || d===state.sort.dir))||SORT_MENU[0])[2];
+  function setSort(next) {state.sort=next;writeStore('bounty-board-finding-sort',state.sort);render();}
+  function openSortMenu(trigger) {
+    openMenu(trigger,[{heading:'Sort findings'},...SORT_MENU.map(([key,dir,label])=>({label,checked:(state.sort?.key||'')===key && (!key || state.sort.dir===dir),onSelect:()=>setSort({key,dir})}))],{label:'Sort findings',reanchor:()=>null});
+  }
+  const shortDate = value => {const t=ledgerTime(value);return t===null ? '' : new Date(t).toISOString().slice(0,10);};
+  // Module hook: providers add items to the finding row menu (see BoardUI.registerFindingActions).
+  const findingActionProviders=[];
   function sortHeader(key,label,extra='') {
     const active=state.sort?.key===key, dir=active?state.sort.dir:'';
     return `<th ${active?`aria-sort="${dir==='desc'?'descending':'ascending'}"`:''} ${extra}><button type="button" class="sort-button" data-sort="${key}" title="Sort by ${esc(label.toLowerCase())}">${esc(label)}${icon(active?(dir==='desc'?'sort-desc':'sort-asc'):'sort')}</button></th>`;
@@ -783,27 +829,33 @@
   function findings() {
     const all=rows('findings'); if (!all) return unavailable('Findings ledger');
     const f=state.filters, query=f.query.trim().toLowerCase();
-    let filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
-    // Module seam (ledger-actions): optional extra filter and sort order.
-    const view=window.BoardFindingView;
-    if(typeof view?.filter==='function')filtered=filtered.filter(r=>{try{return view.filter(r)!==false;}catch{return true;}});
-    if(typeof view?.compare==='function'){try{filtered.sort(view.compare);}catch{}}
+    const filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
     const program=currentProgram(), laneName=state.lane;
-    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
+    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="date">${seenCell(r)}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
     const chips=FILTERS.flatMap(([k,label])=>(f[k]||[]).map(v=>`<span class="chip" data-filter-chip><span class="chip-key">${esc(label)}</span><span>${esc(v)}</span><button type="button" data-remove-filter="${k}" data-value="${esc(v)}" aria-label="Remove filter ${esc(label)} ${esc(v)}">${icon('times')}</button></span>`));
     const anyFilter=chips.length || query;
-    return `<section class="panel"><div class="panel-head"><div><h2>Findings ledger</h2><p class="hint">Filter, sort and open the findings in this lane.</p></div></div>${cap?'<div class="panel-pad" style="padding-top:0"><div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div></div>':''}<div class="filters">${FILTERS.map(([k,label,plural])=>filterControl(k,label,plural,all)).join('')}<div class="input-icon">${icon('search')}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}" autocomplete="off"></div><span class="result-count">${filtered.length} of ${all.length}</span></div>${anyFilter?`<div class="chips">${chips.join('')}<button type="button" class="link-button" data-clear-filters>Clear all</button></div>`:''}${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr>${sortHeader('title','Finding')}${sortHeader('severity','Severity')}${sortHeader('class','Class')}${sortHeader('status','Status')}<th class="actions"><span class="sr-only">Actions</span></th></tr></thead><tbody>${body}</tbody></table></div>`:`<div class="empty">${icon(all.length?'filter':'inbox')}<strong>${all.length?'No findings match these filters.':'No findings in this lane.'}</strong>${all.length?'<button type="button" class="link-button" data-clear-filters>Clear filters</button>':''}</div>`}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
+    return `<section class="panel"><div class="panel-head"><div><h2>Findings ledger</h2><p class="hint">Filter, sort and open the findings in this lane.${window.BoardLedgerActions?' Use a row menu, or drag a row onto Gadgets or MapStore, to act on a finding.':''}</p></div>${window.BoardLedgerActions?`<div class="panel-actions"><button type="button" class="button sm" data-ledger-add title="${state.data?.capabilities?.ledger_actions?.add_finding?.enabled?'Add a finding through BBH':'Unavailable: no BBH writer that supports adding findings'}">${icon('plus')}<span>Add finding</span></button></div>`:''}</div>${cap?'<div class="panel-pad" style="padding-top:0"><div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div></div>':''}<div class="filters">${FILTERS.map(([k,label,plural])=>filterControl(k,label,plural,all)).join('')}<div class="input-icon">${icon('search')}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}" autocomplete="off"></div><button type="button" class="button sm sort-trigger" data-sort-menu aria-haspopup="menu" aria-expanded="false" aria-label="Sort findings: ${esc(sortLabel())}">${icon('sort-amount-desc')}<span>${esc(sortLabel())}</span>${icon('angle-down')}</button><span class="result-count">${filtered.length} of ${all.length}</span></div>${anyFilter?`<div class="chips">${chips.join('')}<button type="button" class="link-button" data-clear-filters>Clear all</button></div>`:''}${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr>${sortHeader('title','Finding')}${sortHeader('severity','Severity')}${sortHeader('class','Class')}${sortHeader('status','Status')}${sortHeader('first_seen','First seen','class="date"')}<th class="actions"><span class="sr-only">Actions</span></th></tr></thead><tbody>${body}</tbody></table></div>`:`<div class="empty">${icon(all.length?'filter':'inbox')}<strong>${all.length?'No findings match these filters.':'No findings in this lane.'}</strong>${all.length?'<button type="button" class="link-button" data-clear-filters>Clear filters</button>':''}</div>`}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
+  }
+  function seenCell(r) {
+    const first=shortDate(r.first_seen), last=shortDate(r.last_seen);
+    return `${first?`<time datetime="${esc(r.first_seen)}">${first}</time>`:'<span class="hint">Not recorded</span>'}${last && last!==first?`<span class="cell-note">Last seen ${last}</span>`:''}`;
   }
   function openRowMenu(trigger) {
     const id=trigger.dataset.rowMenu, row=(rows('findings')||[]).find(r=>String(r.id??'')===id);if(!row)return;
-    const report=reportFor(currentLane(),row), items=[];
+    const report=reportFor(currentLane(),row), items=[], title=String(row.title||row.id||'finding');
     if(row.id!=null)items.push({label:'Copy finding ID',icon:'clipboard',onSelect:async()=>{try{await navigator.clipboard.writeText(String(row.id));toast('Finding ID copied.','success');}catch{toast('Copy is unavailable in this browser.','warning');}}});
     if(report)items.push({label:'Open report',icon:'file-text-o',onSelect:()=>navigate({section:'reports',report:String(report.id)})});
     const only=(key,label,value)=>{if(value!=null && value!=='')items.push({label:`Show only ${label} ${value}`,icon:'filter',onSelect:()=>{state.filters={...emptyFilters(),query:'',[key]:[String(value)]};render();}});};
+    // Ledger actions (and any other module provider) sit between the
+    // navigation items and the filter shortcuts.
+    for(const provider of findingActionProviders){
+      let extra=[];try{extra=provider(row,{program:currentProgram(),lane:currentLane()})||[];}catch(error){console.error('Finding action provider failed:',error);}
+      if(extra.length){if(items.length)items.push({separator:true});items.push(...extra);}
+    }
     if(items.length)items.push({separator:true});
     only('severity','severity',row.severity);only('class','class',row.class);only('status','status',row.status);
-    openMenu(trigger,items,{label:'Finding actions',align:'end',reanchor:()=>null});
+    openMenu(trigger,items,{label:`Actions for ${title}`,align:'end',reanchor:()=>null});
   }
   function unavailable(name){return `<section class="panel panel-pad"><h2>${esc(name)}</h2><div class="state">This collection was not provided by the backend.</div></section>`;}
   function records(key,label,description) {return recordList(rows(key),label,description);}
@@ -1379,7 +1431,7 @@
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
   function render() {
     const oldPath=app.querySelector('#saved-shared-path'), focus=oldPath && document.activeElement===oldPath ? {key:oldPath.dataset.recoveryKey,start:oldPath.selectionStart,end:oldPath.selectionEnd,direction:oldPath.selectionDirection} : null;
-    const active=document.activeElement, focusKey=active && app.contains(active) ? ['data-sort','data-breakdown','data-dash-work','data-section'].map(attr=>active.hasAttribute(attr)?[attr,active.getAttribute(attr),!!active.closest('.tabs')]:null).find(Boolean) : null;
+    const active=document.activeElement, focusKey=active && app.contains(active) ? ['data-sort','data-sort-menu','data-breakdown','data-dash-work','data-class-group','data-section'].map(attr=>active.hasAttribute(attr)?[attr,active.getAttribute(attr),!!active.closest('.tabs')]:null).find(Boolean) : null;
     ++renderGeneration;
     if(editor){editor.toTextArea();editor=null;}
     hideTip();
@@ -1527,18 +1579,22 @@
       if(popover)popover.reanchor=()=>null;
     }
     else if(target.hasAttribute('data-dash-work')){state.dashWork=target.dataset.dashWork==='open'?'open':'all';writeStore('bounty-board-dashboard-work',state.dashWork);render();}
+    else if(target.hasAttribute('data-class-group')){state.classGroupBy=target.dataset.classGroup==='category'?'category':'class';writeStore('bounty-board-class-group',state.classGroupBy);state.dashExpanded='';render();}
     else if(target.hasAttribute('data-breakdown')){state.dashExpanded=state.dashExpanded===target.dataset.breakdown?'':target.dataset.breakdown;render();}
     else if(target.hasAttribute('data-goto-finding')){state.filters=emptyFilters();navigate({view:'program',program:target.dataset.program,lane:target.dataset.lane,section:'findings',highlight:target.dataset.gotoFinding});}
     else if(target.hasAttribute('data-goto-report')){navigate({view:'program',program:target.dataset.program,lane:target.dataset.lane,section:'reports',report:target.dataset.gotoReport});}
     else if(target.hasAttribute('data-sort')){
       const key=target.dataset.sort, current=state.sort||{};
-      state.sort=current.key!==key ? {key,dir:'asc'} : current.dir==='asc' ? {key,dir:'desc'} : {key:'',dir:'asc'};
-      writeStore('bounty-board-finding-sort',state.sort);render();
+      const first=SORT_FIRST_DIR[key]||'asc', second=first==='asc'?'desc':'asc';
+      setSort(current.key!==key ? {key,dir:first} : current.dir===first ? {key,dir:second} : {key:'',dir:'asc'});
     }
     else if(target.classList.contains('filter-trigger')){if(popover?.trigger===target)closePopover(true);else openFilter(target);}
     else if(target.hasAttribute('data-remove-filter')){const key=target.dataset.removeFilter;state.filters[key]=(state.filters[key]||[]).filter(v=>v!==target.dataset.value);render();(app.querySelector('[data-remove-filter]') || app.querySelector('#finding-search'))?.focus();}
     else if(target.hasAttribute('data-clear-filters')){state.filters=emptyFilters();render();app.querySelector('#finding-search')?.focus();}
     else if(target.hasAttribute('data-row-menu')){if(popover?.trigger===target)closePopover(true);else openRowMenu(target);}
+    else if(target.hasAttribute('data-sort-menu')){if(popover?.trigger===target)closePopover(true);else openSortMenu(target);}
+    else if(target.hasAttribute('data-ledger-add'))window.BoardLedgerActions?.openAddDialog?.();
+    else if(target.hasAttribute('data-class-review'))window.BoardLedgerActions?.openClassReview?.(target.dataset.classReview);
     else if(target.hasAttribute('data-rationale-edit')){
       const row=(rows('findings')||[]).find(r=>String(r.id)===target.dataset.rationaleEdit);
       if(row && !state.metadataPending){const key=rationaleKey(state.program,state.lane,row.id), text=String(row.severity_rationale??'');if(!state.rationaleDrafts.has(key))state.rationaleDrafts.set(key,{program:state.program,lane:state.lane,id:String(row.id),text,revision:row.metadata_revision,rootInstance:state.data?.root_instance});render();app.querySelector(`[data-rationale-input="${CSS.escape(String(row.id))}"]`)?.focus();}
@@ -1607,6 +1663,8 @@
   // Public UI helpers for feature modules (see style.css header for tokens).
   window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker,
     navigate:(route)=>navigate(route||{}), severityKey:sevKey, severityRank:sevRank, severityBadge:sevBadge,
-    statusBadge, submissionState, isNotSubmitted, icon, escape:esc});
+    statusBadge, submissionState, isNotSubmitted, icon, escape:esc,
+    // provider(row, {program, lane}) returns extra row-menu items for a finding.
+    registerFindingActions:provider=>{if(typeof provider==='function')findingActionProviders.push(provider);}});
   claimTab().then(load);
 })();
