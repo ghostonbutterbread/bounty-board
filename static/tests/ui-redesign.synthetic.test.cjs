@@ -74,7 +74,11 @@ test('dashboard breakdown lists findings by program and opens the finding; histo
 
 test('not-submitted filter, program search and explicit workspace target', {timeout: 60000}, async () => showcase(async ({page, url}) => {
   await ready(page, url);
+  // One showcase finding is archived; archived findings are hidden unless "Show archived" is on.
+  assert.equal(await stat(page, 'Finding records').innerText(), '16');
+  await page.getByLabel('Show archived').check();
   assert.equal(await stat(page, 'Finding records').innerText(), '17');
+  await page.getByLabel('Show archived').uncheck();
   assert.match(await page.locator('.target-note').innerText(), /First program; none chosen yet/);
   await page.getByRole('button', {name: 'Not submitted', exact: true}).click();
   assert.equal(await page.getByRole('button', {name: 'Not submitted', exact: true}).getAttribute('aria-pressed'), 'true');

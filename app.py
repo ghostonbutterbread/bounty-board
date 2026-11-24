@@ -10,7 +10,13 @@ from taxonomy import annotate_finding
 
 FAMILIES = {'web_bounty': {'web', 'api'}, 'binaries': {'apk', 'exe', 'mac'}}
 SEVERITIES = ('EXCEPTIONAL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', 'UNKNOWN')
-STATUSES = ('raw', 'confirmed', 'dormant', 'novel', 'complete', 'archive')
+# Offered status values. Bounty Core lifecycle values (active is its default,
+# pending-review) are offered too; BBH accepts any string, so a write may also
+# use another safe token (STATUS_TOKEN), for example to restore a finding's
+# exact previous status.
+STATUSES = ('raw', 'confirmed', 'active', 'pending-review', 'dormant', 'novel', 'complete', 'archive')
+STATUS_TOKEN = r'[a-z0-9][a-z0-9-]{0,39}'
+ARCHIVE_STATUSES = ('archive', 'archived')
 # Local submission bookkeeping accepted by BBH manual_hunter --set-submission.
 SUBMISSION_STATES = ('not_submitted', 'submitted', 'dropped')
 # One character of a single-line ledger value. BBH splits notes with
@@ -352,7 +358,10 @@ def writer_features(writer):
     if result.returncode != 0:
         return frozenset()
     required = {'submission': ('--set-submission', '--submission-state', '--submission-result', '--submission-report'),
-                'add_finding': ('--from-file',)}
+                'add_finding': ('--from-file',),
+                # Permanent delete of an archived finding (BBH refuses any other status).
+                'delete': ('--delete-finding',),
+                'actor': ('--actor',)}
     features = {name for name, options in required.items() if all(o in result.stdout for o in options)}
     try:
         # Probe with --help as the second argument, like every other probe, so
@@ -376,9 +385,84 @@ def ledger_action_capabilities(server):
         'submission': {'enabled': 'submission' in features, 'states': list(SUBMISSION_STATES),
                        'results': list(SUBMISSION_RESULTS), 'local_only': True},
         'add_finding': {'enabled': 'add_finding' in features},
+        'delete': {'enabled': 'delete' in features, 'requires_status': 'archive'},
         'reclassify': {store: ({'enabled': True} if 'reclassify' in features else {'enabled': False, 'reason': RECLASSIFY_UNSUPPORTED})
                        for store in ('gadgets', 'map')},
     }
+
+
+class ArchiveState:
+    """Previous status of findings the Board archived, so Restore works from any device.
+
+    Lives in the Board's private state directory (never under the data root).
+    One small JSON file, bounded to MAX entries (oldest dropped), replaced
+    atomically; callers hold the metadata write lock."""
+    MAX = 5000
+    NAME = 'archive-state.json'
+
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.path = self.directory / self.NAME
+
+    @staticmethod
+    def key(family, program, lane, fid):
+        return f'{family}/{program}/{lane}/{fid}'
+
+    def read(self):
+        import re
+        try:
+            raw = json.loads(self.path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, UnicodeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out = {}
+        for key, value in raw.items():
+            if (isinstance(value, dict) and isinstance(value.get('previous_status'), str) and
+                    re.fullmatch(STATUS_TOKEN, value['previous_status']) and isinstance(value.get('archived_at'), str) and
+                    key == self.key(value.get('family'), value.get('program'), value.get('lane'), value.get('fid'))):
+                out[key] = value
+        return out
+
+    def lane(self, family, program, lane):
+        prefix = self.key(family, program, lane, '')
+        return {v['fid']: {'previous_status': v['previous_status'], 'archived_at': v['archived_at']}
+                for k, v in self.read().items() if k.startswith(prefix)}
+
+    def write(self, data):
+        import os
+        import tempfile
+        if len(data) > self.MAX:
+            data = dict(sorted(data.items(), key=lambda item: item[1]['archived_at'])[-self.MAX:])
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temp = tempfile.mkstemp(prefix='.archive-state-', dir=self.directory)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(data, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.path)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+
+    def record(self, family, program, lane, fid, previous_status):
+        from datetime import datetime, timezone
+        data = self.read()
+        data[self.key(family, program, lane, fid)] = {
+            'family': family, 'program': program, 'lane': lane, 'fid': fid, 'previous_status': previous_status,
+            'archived_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+        self.write(data)
+
+    def forget(self, family, program, lane, fid):
+        data = self.read()
+        if data.pop(self.key(family, program, lane, fid), None) is not None:
+            self.write(data)
 
 
 def valid_tailnet_host(host):
@@ -391,11 +475,13 @@ def valid_tailnet_host(host):
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
                 tailnet_port=443, collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
                 report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
-                live_edit_dir=None):
+                live_edit_dir=None, state_dir=None):
     import os
     import tempfile
     import threading
     from collaborative_engine import CollaborationStore, GitUnavailableError
+    if state_dir is not None and Path(state_dir).absolute().is_relative_to(Path(root).absolute()):
+        raise ValueError('the Board state directory must be outside the data root')
     if live_edit_dir is not None and (collaboration_dir is not None or report_autosave or experimental_fixture_publish):
         raise ValueError('live editing replaces the shared-draft store, report autosave and fixture publication')
     if retention_max_operations is not None and (type(retention_max_operations) is not int or retention_max_operations < 1):
@@ -1255,6 +1341,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.search_request(url)
             if url.path == '/api/recent-reports':
                 return self.recent_reports_request(url)
+            if url.path == '/api/archive-state':
+                return self.archive_state_request(url)
             if url.path == '/api/collaboration':
                 return self.collaboration_admitted()
             if url.path == '/api/collaboration/recovery':
@@ -1472,7 +1560,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.collaboration_admitted(write=True)
             # Ledger actions share the metadata lock with PATCH /api/finding.
             action = {'/api/finding/submission': self.set_submission, '/api/finding/new': self.add_finding,
-                      '/api/finding/reclassify': self.reclassify_finding}.get(urlsplit(self.path).path)
+                      '/api/finding/reclassify': self.reclassify_finding, '/api/finding/delete': self.delete_finding}.get(urlsplit(self.path).path)
             if action:
                 with metadata_write_lock:
                     return action()
@@ -1564,7 +1652,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     any(not isinstance(v, str) or len(v) > 4000 for v in patch.values())):
                     raise ValueError('invalid fields')
                 if ('severity' in patch and patch['severity'] not in SEVERITIES or
-                    'status' in patch and patch['status'] not in STATUSES or
+                    'status' in patch and not re.fullmatch(STATUS_TOKEN, patch['status']) or
                     'class_name' in patch and not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,99}', patch['class_name'])):
                     raise ValueError('invalid value')
             except (ValueError, UnicodeError, json.JSONDecodeError):
@@ -1572,7 +1660,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             checked = self.finding_precheck(family, program, lane, fid, payload['root_instance'], payload['expected_revision'])
             if not checked:
                 return
-            lane_path = checked[0]
+            lane_path, before = checked
             try:
                 with tempfile.TemporaryDirectory(prefix='bounty-board-') as temp:
                     patchfile = Path(temp) / 'patch.json'
@@ -1589,7 +1677,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                      updated[0]['current'].get('status') != patch['status'])):
                     self.server.writer_enabled = False
                     return self.reply(502, {'error': 'verification_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
-                return self.reply(200, {'finding': updated[0], 'revisions': self.rebased_revisions(lane_path)})
+                return self.reply(200, {'finding': updated[0], 'revisions': self.rebased_revisions(lane_path),
+                                        **self.track_archive(family, program, lane, fid, before.get('status'), patch.get('status'))})
             except (OSError, subprocess.SubprocessError):
                 self.server.writer_enabled = False
                 return self.reply(503, {'error': 'writer_unavailable', 'message': 'Update may be incomplete; refresh before retrying.'})
@@ -1901,6 +1990,111 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 patchfile.write_text(json.dumps(patch), encoding='utf-8')
                 return self.run_writer(self.hunter_args(program, family, lane, '--edit-finding', fid, '--patch-file', str(patchfile)), verify_finding, lane_path=lane_path)
 
+        def delete_finding(self):
+            """Permanently delete one archived finding via BBH --delete-finding.
+
+            Archive is the only recoverable state; this step is permanent (BBH
+            keeps a minimal tombstone and deletes the generated files; there is
+            no restore). The Board refuses before invoking BBH unless the
+            current status is archive and verifies afterwards that the FID is
+            gone. BBH exit 1 means it refused before committing (stderr
+            "[manual_hunter] <reason>", relayed as `reason`; the writer stays
+            enabled when the ledger is unchanged). Exit 3 means deleted, but a
+            later step warned ("Warning:" lines, relayed as `warning_text`).
+            Exit 2 (usage) or anything else disables the writer."""
+            payload = self.ledger_action_payload({'fid', 'expected_revision'}, 'delete')
+            if not payload:
+                return
+            family, program, lane, fid = (payload[k] for k in ('family', 'program', 'lane', 'fid'))
+            checked = self.finding_precheck(family, program, lane, fid, payload['root_instance'], payload['expected_revision'])
+            if not checked:
+                return
+            lane_path, finding = checked
+            if finding.get('status') != 'archive':
+                return self.reply(409, {'error': 'not_archived', 'message': 'Only archived findings can be deleted. Archive it first.'})
+            ledger_path = lane_path / 'ledgers/ledger.json'
+            try:
+                original = ledger_path.read_bytes()
+            except OSError:
+                return self.reply(409, {'error': 'unsafe_writer_tree'})
+
+            def lines(text, marker):
+                found = []
+                for line in (text or '').splitlines():
+                    line = line.strip()
+                    if line.startswith(marker):
+                        found.append(''.join(c for c in line[len(marker):].strip() if c.isprintable())[:300])
+                return found[:5]
+
+            def verify(_result):
+                remaining = ledger(lane_path, [])
+                if remaining is None or any(f.get('fid') == fid for f in remaining):
+                    return None
+                try:
+                    if self.server.archive_state is not None:
+                        self.server.archive_state.forget(family, program, lane, fid)
+                except (OSError, ValueError, TypeError):
+                    pass
+                return 200, {'deleted': fid, 'warnings': False, 'warning_text': []}
+
+            def refused(result):
+                if result.returncode == 3:
+                    outcome = verify(result)
+                    if outcome is not None:
+                        outcome[1].update(warnings=True, revisions=self.rebased_revisions(lane_path),
+                                          warning_text=lines(f'{result.stderr or ""}\n{result.stdout or ""}', 'Warning:'))
+                    return outcome
+                try:
+                    unchanged = ledger_path.read_bytes() == original
+                except OSError:
+                    unchanged = False
+                if result.returncode == 1 and unchanged:
+                    reason = (lines(result.stderr, '[manual_hunter]') or ['BBH refused to delete this finding.'])[0]
+                    return 409, {'error': 'delete_refused', 'reason': reason, 'message': 'BBH refused; nothing was changed.'}
+                return None
+            actor = ['--actor', 'bounty-board'] if 'actor' in self.server.writer_features else []
+            return self.run_writer(self.hunter_args(program, family, lane, '--delete-finding', fid, *actor), verify, refused, lane_path=lane_path)
+
+        def track_archive(self, family, program, lane, fid, previous, status):
+            """Remember the status a finding had when the Board archived it; forget it on restore.
+
+            The ledger write already succeeded, so a state failure is reported, not raised."""
+            import re
+            store = self.server.archive_state
+            if status is None or store is None:
+                return {}
+            archiving = status in ARCHIVE_STATUSES and previous not in ARCHIVE_STATUSES
+            restoring = status not in ARCHIVE_STATUSES and previous in ARCHIVE_STATUSES
+            try:
+                if archiving and isinstance(previous, str) and re.fullmatch(STATUS_TOKEN, previous):
+                    store.record(family, program, lane, fid, previous)
+                    return {'archive_state': 'saved'}
+                if archiving:
+                    return {'archive_state': 'no_previous_status'}
+                if restoring:
+                    store.forget(family, program, lane, fid)
+            except (OSError, ValueError, TypeError):
+                return {'archive_state': 'unavailable'}
+            return {}
+
+        def archive_state_request(self, url):
+            """GET /api/archive-state: previous statuses the Board stored for archived findings in one lane."""
+            import re
+            try:
+                params = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=4)
+                if set(params) != {'family', 'program', 'lane'} or any(len(v) != 1 for v in params.values()):
+                    raise ValueError('invalid parameters')
+                family, program, lane = (params[k][0] for k in ('family', 'program', 'lane'))
+                if (family not in FAMILIES or lane not in FAMILIES[family] or
+                        not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', program)):
+                    raise ValueError('invalid lane')
+            except ValueError:
+                return self.reply(400, {'error': 'invalid_archive_state_request'})
+            store = self.server.archive_state
+            if store is None:
+                return self.reply(200, {'available': False, 'entries': {}})
+            return self.reply(200, {'available': True, 'entries': store.lane(family, program, lane)})
+
         def rebased_revisions(self, lane_path):
             """Old->new revisions for entries this write left byte-for-byte unchanged.
 
@@ -1948,6 +2142,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     server.writer = Path(writer).absolute() if writer else None
     server.writer_enabled = bool(accept_uncoordinated_writes and writer_available(server.writer))
     server.writer_features = writer_features(server.writer) if server.writer_enabled else frozenset()
+    # Private Board state (previous status of archived findings); never under the data root.
+    server.archive_state = ArchiveState(state_dir) if state_dir is not None else None
     return server
 
 
@@ -1972,6 +2168,8 @@ def parse_config(argv=None):
     parser.add_argument('--live-edit-dir', type=Path, default=Path.home() / '.local/state/bounty-board/live-edit',
                         help='private history directory for --live-edit (outside the data root)')
     from report_publisher import DEFAULT_MAX_OPERATIONS, DEFAULT_MIN_FREE_BYTES
+    parser.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/bounty-board',
+                        help='private Board state directory, for example the previous status of archived findings (outside the data root)')
     parser.add_argument('--retention-max-operations', type=int, default=DEFAULT_MAX_OPERATIONS,
                         help='maximum retained publication entries (default 1000)')
     parser.add_argument('--retention-min-free-bytes', type=int, default=DEFAULT_MIN_FREE_BYTES,
@@ -2035,6 +2233,7 @@ def main():
                 **({} if args.retention_min_free_bytes == DEFAULT_MIN_FREE_BYTES else {'retention_min_free_bytes': args.retention_min_free_bytes}),
                 **({'report_autosave': True} if args.report_autosave else {}),
                 **({'live_edit_dir': args.live_edit_dir} if args.live_edit else {}),
+                state_dir=args.state_dir,
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
 

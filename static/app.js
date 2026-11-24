@@ -2,7 +2,7 @@
   'use strict';
   const app = document.querySelector('#app');
   const themeButton = document.querySelector('#theme-button');
-  const state = {data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:[],class:[],status:[],submission:[],query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], metadataDrafts:new Map(), rationaleDrafts:new Map(),
+  const state = {showArchived:(()=>{try{return localStorage.getItem('bounty-board-show-archived')==='true';}catch{return false;}})(), data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:[],class:[],status:[],submission:[],query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], metadataDrafts:new Map(), rationaleDrafts:new Map(),
     // Presentation state (UI redesign): persisted sort, dashboard work filter,
     // expanded breakdown row, program search, how the program was chosen.
     sort:{key:'',dir:'asc'}, dashWork:'all', dashExpanded:'', programQuery:'', programOrigin:'default', highlight:''};
@@ -45,7 +45,7 @@
   }
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
   // window.BoardModules and mount into host elements after every render.
-  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, hrefFor, api:window.BoardAPI, ui:window.BoardUI});
+  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, hrefFor, api:window.BoardAPI, ui:window.BoardUI, reload:()=>load(), reportIdFor});
   // ---- Real links (feat/board-report-links-recent) ----
   // Every in-app destination is an <a href> in the hash route format, so
   // middle-click, Ctrl/Cmd/Shift+click and "Open link in new tab" work
@@ -134,6 +134,14 @@
     return `<span class="badge ${tone}">${esc(submissionLabel(finding))}</span>${result ? ` <span class="badge ${String(result).toLowerCase()==='valid'?'success':String(result).toLowerCase()==='duplicate'?'warning':''}">${esc(result)}</span>` : ''}`;
   };
   const icon = name => `<i class="fa fa-${name}" aria-hidden="true"></i>`;
+  // Finding actions (static/modules/finding-actions.js): "Delete" archives a
+  // finding (status archive). Archived findings are hidden from dashboard
+  // counts/lists and the Findings table unless "Show archived" is on.
+  const isArchived = finding => ['archive','archived'].includes(String(finding?.status ?? '').trim().toLowerCase());
+  const shownFinding = finding => state.showArchived || !isArchived(finding);
+  const archiveToggle = count => `<label class="archive-toggle"><input type="checkbox" data-show-archived ${state.showArchived?'checked':''}><span>Show archived</span><span class="badge outline" data-archived-count>Archived ${count}</span></label>`;
+  // Hook for finding-actions pickers: a badge wrapped in a button when the module is loaded.
+  const pickButton = (kind, label, inner) => window.BoardFindingActions ? `<button type="button" class="pick-trigger" data-${kind}-pick aria-haspopup="menu" aria-expanded="false" aria-label="${esc(label)}">${inner}</button>` : inner;
   const programLabel = p => p ? String(p.name || p.id || 'Unknown program') : 'Unknown program';
   const readStore = (key,fallback) => {try {const raw=localStorage.getItem(key);return raw==null ? fallback : JSON.parse(raw);} catch {return fallback;}};
   const writeStore = (key,value) => {try {localStorage.setItem(key,JSON.stringify(value));} catch {}};
@@ -225,6 +233,47 @@
     openPopover(trigger,menu,{...options,className:'menu-popover'});
     (menu.querySelector('[aria-checked="true"]:not(:disabled)') || menu.querySelector('[role^="menuitem"]:not(:disabled)'))?.focus();
     return menu;
+  }
+  // Coloured value pills in a popover (severity, submission, status pickers).
+  // groups: [{label?, options:[{value, label, sev?, tone?, disabled?, title?}]}].
+  // Arrow keys move, Enter/Space pick, Escape/Tab close and focus returns.
+  function openPills(trigger, {label, groups, current, note='', disabledHint='', onPick, onClose}) {
+    const box=document.createElement('div');box.className='pill-box';
+    const menu=document.createElement('div');menu.className='pills';menu.setAttribute('role','menu');menu.setAttribute('aria-label',label);
+    for(const group of groups){
+      if(group.label){const h=document.createElement('div');h.className='menu-label';h.setAttribute('role','presentation');h.textContent=group.label;menu.append(h);}
+      const row=document.createElement('div');row.className='pill-row';
+      for(const option of group.options){
+        const b=document.createElement('button');b.type='button';b.setAttribute('role','menuitemradio');
+        const on=option.value===current || (Array.isArray(current) && current.includes(option.value));
+        b.setAttribute('aria-checked',String(on));b.className=`pill ${option.sev?'sev':`badge ${option.tone||''}`}`;
+        if(option.sev)b.dataset.sev=option.sev;b.dataset.value=option.value;b.disabled=!!disabledHint || !!option.disabled;
+        if(option.title)b.title=option.title;
+        b.innerHTML=`${on?icon('check'):''}<span></span>`;b.querySelector('span').textContent=option.label;
+        b.addEventListener('click',()=>{closePopover(true);onPick(option);});
+        row.append(b);
+      }
+      menu.append(row);
+    }
+    box.append(menu);
+    if(note || disabledHint){const n=document.createElement('p');n.className=`hint pill-note${disabledHint?' warning':''}`;n.textContent=disabledHint || note;box.append(n);}
+    menu.addEventListener('keydown',event=>{
+      const items=[...menu.querySelectorAll('[role=menuitemradio]:not(:disabled)')], i=items.indexOf(document.activeElement);let next=null;
+      if(event.key==='ArrowRight' || event.key==='ArrowDown')next=items[(i+1)%items.length];
+      else if(event.key==='ArrowLeft' || event.key==='ArrowUp')next=items[(i-1+items.length)%items.length];
+      else if(event.key==='Home')next=items[0];else if(event.key==='End')next=items[items.length-1];
+      if(next){event.preventDefault();next.focus();}
+    });
+    openPopover(trigger,box,{label,className:'pill-popover',reanchor:()=>null,onClose});
+    const first=menu.querySelector('[aria-checked="true"]:not(:disabled)') || menu.querySelector('[role=menuitemradio]:not(:disabled)');
+    if(first)first.focus();else{box.tabIndex=-1;box.focus();}
+    return box;
+  }
+  const SEVERITY_PILL_TITLES={INFO:'Informational (INFO)'};
+  // Severity pills for a finding: BBH order, current value checked. Values come
+  // from the write capability; N/A is shown but BBH stores it as UNKNOWN.
+  function severityOptions(values) {
+    return values.map(v=>{const k=sevKey(v), canonical=String(v).toUpperCase()===String(v) && k!=='unknown' || String(v)==='UNKNOWN';return {value:String(v),label:canonical?SEVERITY_LABELS[k]:String(v),sev:k,title:SEVERITY_PILL_TITLES[v]||''};});
   }
   document.addEventListener('mousedown',event=>{
     if(popover && !popover.el.contains(event.target) && !popover.trigger?.contains(event.target))closePopover(false);
@@ -766,7 +815,8 @@
     return `<div class="drill" id="drill-${esc(kind)}-${esc(group.key.replace(/[^a-z0-9_-]/gi,'_'))}">${review}${sorted.map(({p,l,items})=>`<div class="drill-group"><h4>${icon('folder-o')}<span>${esc(programLabel(p))} / ${esc(l.name)}</span><span class="count">${items.length}</span></h4><ul>${items.sort((a,b)=>sevRank(a.f.severity)-sevRank(b.f.severity)).map(({f})=>{
       const report=reportIdFor(l,f);
       const target=`data-program="${esc(p.id)}" data-lane="${esc(l.name)}"`;
-      return `<li>${kind!=='sev'?sevBadge(f.severity):statusBadge(f.status)||''}<a class="link-button truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta">${kind==='cat' && f.class?`<span class="badge outline">${esc(f.class)}</span>`:''}<span class="id">${esc(f.id??'')}</span>${isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<a class="link-button" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target}>${icon('file-text-o')} Report</a>`:''}</span></li>`;
+      // finding-actions hooks: row identity for selection/context menu, severity and submission pickers.
+      return `<li data-finding-row data-finding-id="${esc(f.id??'')}" data-program="${esc(p.id)}" data-lane="${esc(l.name)}" data-sev="${sevKey(f.severity)}">${kind!=='sev'?pickButton('sev',`Severity ${f.severity==null||f.severity===''?'not recorded':f.severity}. Change severity`,sevBadge(f.severity)):statusBadge(f.status)||''}<a class="link-button truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta">${kind==='cat' && f.class?`<span class="badge outline">${esc(f.class)}</span>`:''}<span class="id">${esc(f.id??'')}</span>${isArchived(f)?'<span class="badge outline">archive</span>':''}${window.BoardFindingActions?pickButton('submission',`Submission: ${submissionLabel(f)}. Change submission`,submissionBadge(f)):isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<a class="link-button" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target}>${icon('file-text-o')} Report</a>`:''}</span></li>`;
     }).join('')}</ul></div>`).join('')}</div>`;
   }
   function breakdown(kind, groups, total) {
@@ -780,9 +830,9 @@
   }
   function dashboard() {
     const options=programs(), ps=state.dashboardProgram ? options.filter(p=>String(p.id)===state.dashboardProgram) : options;
-    const lanes=ps.flatMap(p=>list(p.lanes)||[]), every=lanes.flatMap(l=>list(l.findings)||[]);
+    const lanes=ps.flatMap(p=>list(p.lanes)||[]), loaded=lanes.flatMap(l=>list(l.findings)||[]), every=loaded.filter(shownFinding);
     const openOnly=state.dashWork==='open', all=openOnly ? every.filter(isNotSubmitted) : every;
-    const entries=findingEntries(ps).filter(e=>!openOnly || isNotSubmitted(e.f));
+    const entries=findingEntries(ps).filter(e=>shownFinding(e.f) && (!openOnly || isNotSubmitted(e.f)));
     const discovered=!discoveryIncomplete();
     const complete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.findings));
     const stat=(v,label,extra='')=>`<div class="stat"><strong>${esc(v)}</strong><span>${esc(label)}${extra}</span></div>`;
@@ -793,12 +843,12 @@
     };
     const target=workspaceTarget();
     const workFilter=`<div class="work-filter"><span id="work-filter-label">Show</span><div class="segmented" role="group" aria-labelledby="work-filter-label"><button type="button" data-dash-work="all" aria-pressed="${!openOnly}">All records</button><button type="button" data-dash-work="open" aria-pressed="${openOnly}">Not submitted</button></div></div>`;
-    const controls=`<div class="toolbar">${workFilter}<label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.id||p.name,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`;
+    const controls=`<div class="toolbar">${archiveToggle(loaded.filter(isArchived).length)}${workFilter}<label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.id||p.name,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`;
     const sevGroups=severityGroups(entries), clsGroups=classGroups(entries), catGroups=categoryGroups(entries.filter(e=>e.f.class!=null && e.f.class!==''));
     const byCategory=state.classGroupBy==='category' && catGroups.length>0;
     const scope=openOnly ? 'not-submitted finding records' : 'finding records';
     const programRows=ps.map(p=>{
-      const pl=list(p.lanes), fs=pl ? pl.flatMap(l=>list(l.findings)||[]) : [], known=pl && pl.every(l=>Array.isArray(l.findings));
+      const pl=list(p.lanes), fs=pl ? pl.flatMap(l=>list(l.findings)||[]).filter(shownFinding) : [], known=pl && pl.every(l=>Array.isArray(l.findings));
       const top=fs.length ? fs.reduce((best,f)=>sevRank(f.severity)<sevRank(best.severity)?f:best,fs[0]).severity : null;
       const search=[p.id,p.name,p.family,...(pl||[]).map(l=>l.name)].join(' ').toLowerCase();
       return `<tr data-program-row data-search="${esc(search)}"><td><a class="link-button" href="${esc(hrefFor({program:p.id,lane:(pl||[])[0]?.name ?? '',section:'findings'}))}" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</a><span class="id" style="display:block">${esc(p.family||'Family not provided')}</span></td><td class="num">${pl?pl.length:'Unavailable'}</td><td class="num">${known?fs.length:'Unknown'}</td><td class="num">${known?fs.filter(isNotSubmitted).length:'Unknown'}</td><td>${top!=null && top!==''?sevBadge(top):'<span class="hint">None</span>'}</td></tr>`;
@@ -875,7 +925,10 @@
     if(cap?.textFields?.includes(key)) return `<input data-metadata="${esc(key)}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" aria-describedby="metadata-warning" title="Lowercase class identifier; change applies on leaving the field" value="${esc(value)}" ${row.id != null && !state.metadataPending?'':'disabled'}>`;
     const options=cap?.options?.[key]; const writable=cap && row.id != null && Array.isArray(options) && options.length && !state.metadataPending;
     const values=[...new Set([value,...(Array.isArray(options)?options.map(String):[])].filter(Boolean))];
-    const sev=key==='severity' ? ` class="sev-select" data-sev="${value?sevKey(value):'unknown'}"` : '';
+    // Severity uses the same coloured pills as the dashboard (finding actions);
+    // the button keeps data-metadata/value so the metadata flow is unchanged.
+    if(key==='severity') return `<button type="button" class="pick-trigger sev-cell" data-metadata="severity" data-id="${esc(row.id??'')}" value="${esc(value)}" aria-haspopup="menu" aria-expanded="false" aria-label="severity for ${esc(row.title||row.id||'finding')}: ${esc(value||'not recorded')}" ${cap?'aria-describedby="metadata-warning"':''} title="${writable?'Change severity':'Severity editing is unavailable'}" ${writable?'':'disabled'}>${sevBadge(value||null)}${icon('angle-down')}</button>`;
+    const sev='';
     // Severity: INFO is BBH's informational value; N/A is shown and ranked but
     // BBH stores it as UNKNOWN, so it is offered disabled until BBH supports it.
     const label=v=>key==='severity' && WRITE_SEVERITY_LABELS[v] ? WRITE_SEVERITY_LABELS[v] : v;
@@ -912,15 +965,16 @@
     return `<th ${active?`aria-sort="${dir==='desc'?'descending':'ascending'}"`:''} ${extra}><button type="button" class="sort-button" data-sort="${key}" title="Sort by ${esc(label.toLowerCase())}">${esc(label)}${icon(active?(dir==='desc'?'sort-desc':'sort-asc'):'sort')}</button></th>`;
   }
   function findings() {
-    const all=rows('findings'); if (!all) return unavailable('Findings ledger');
+    const loadedRows=rows('findings'); if (!loadedRows) return unavailable('Findings ledger');
+    const all=loadedRows.filter(shownFinding), archivedCount=loadedRows.filter(isArchived).length;
     const f=state.filters, query=f.query.trim().toLowerCase();
     const filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
     const program=currentProgram(), laneName=state.lane;
-    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${(rid=>rid?`<a class="report-ref" href="${esc(hrefFor({program:program?.id,lane:laneName,section:'reports',report:rid}))}" title="Open report ${esc(rid)}">${icon('file-text-o')}<span>Report</span></a>`:'')(reportIdFor(currentLane(),r))}${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="date">${seenCell(r)}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
+    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}" data-sev="${sevKey(r.severity)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${(rid=>rid?`<a class="report-ref" href="${esc(hrefFor({program:program?.id,lane:laneName,section:'reports',report:rid}))}" title="Open report ${esc(rid)}">${icon('file-text-o')}<span>Report</span></a>`:'')(reportIdFor(currentLane(),r))}${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : pickButton('submission',`Submission: ${submissionLabel(r)}. Change submission`,submissionBadge(r))}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="date">${seenCell(r)}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
     const chips=FILTERS.flatMap(([k,label])=>(f[k]||[]).map(v=>`<span class="chip" data-filter-chip><span class="chip-key">${esc(label)}</span><span>${esc(v)}</span><button type="button" data-remove-filter="${k}" data-value="${esc(v)}" aria-label="Remove filter ${esc(label)} ${esc(v)}">${icon('times')}</button></span>`));
     const anyFilter=chips.length || query;
-    return `<section class="panel"><div class="panel-head"><div><h2>Findings ledger</h2><p class="hint">Filter, sort and open the findings in this lane.${window.BoardLedgerActions?' Use a row menu, or drag a row onto Gadgets or MapStore, to act on a finding.':''}</p></div>${window.BoardLedgerActions?`<div class="panel-actions"><button type="button" class="button sm" data-ledger-add title="${state.data?.capabilities?.ledger_actions?.add_finding?.enabled?'Add a finding through BBH':'Unavailable: no BBH writer that supports adding findings'}">${icon('plus')}<span>Add finding</span></button></div>`:''}</div>${cap?'<div class="panel-pad" style="padding-top:0"><div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div></div>':''}<div class="filters">${FILTERS.map(([k,label,plural])=>filterControl(k,label,plural,all)).join('')}<div class="input-icon">${icon('search')}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}" autocomplete="off"></div><button type="button" class="button sm sort-trigger" data-sort-menu aria-haspopup="menu" aria-expanded="false" aria-label="Sort findings: ${esc(sortLabel())}">${icon('sort-amount-desc')}<span>${esc(sortLabel())}</span>${icon('angle-down')}</button><span class="result-count">${filtered.length} of ${all.length}</span></div>${anyFilter?`<div class="chips">${chips.join('')}<button type="button" class="link-button" data-clear-filters>Clear all</button></div>`:''}${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr>${sortHeader('title','Finding')}${sortHeader('severity','Severity')}${sortHeader('class','Class')}${sortHeader('status','Status')}${sortHeader('first_seen','First seen','class="date"')}<th class="actions"><span class="sr-only">Actions</span></th></tr></thead><tbody>${body}</tbody></table></div>`:`<div class="empty">${icon(all.length?'filter':'inbox')}<strong>${all.length?'No findings match these filters.':'No findings in this lane.'}</strong>${all.length?'<button type="button" class="link-button" data-clear-filters>Clear filters</button>':''}</div>`}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
+    return `<section class="panel"><div class="panel-head"><div><h2>Findings ledger</h2><p class="hint">Filter, sort and open the findings in this lane.${window.BoardLedgerActions?' Use a row menu, or drag a row onto Gadgets or MapStore, to act on a finding.':''}</p></div>${window.BoardLedgerActions?`<div class="panel-actions"><button type="button" class="button sm" data-ledger-add title="${state.data?.capabilities?.ledger_actions?.add_finding?.enabled?'Add a finding through BBH':'Unavailable: no BBH writer that supports adding findings'}">${icon('plus')}<span>Add finding</span></button></div>`:''}</div>${cap?'<div class="panel-pad" style="padding-top:0"><div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div></div>':''}<div class="filters">${FILTERS.map(([k,label,plural])=>filterControl(k,label,plural,all)).join('')}<div class="input-icon">${icon('search')}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}" autocomplete="off"></div><button type="button" class="button sm sort-trigger" data-sort-menu aria-haspopup="menu" aria-expanded="false" aria-label="Sort findings: ${esc(sortLabel())}">${icon('sort-amount-desc')}<span>${esc(sortLabel())}</span>${icon('angle-down')}</button>${archivedCount?archiveToggle(archivedCount):''}<span class="result-count">${filtered.length} of ${all.length}</span></div>${anyFilter?`<div class="chips">${chips.join('')}<button type="button" class="link-button" data-clear-filters>Clear all</button></div>`:''}${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr>${sortHeader('title','Finding')}${sortHeader('severity','Severity')}${sortHeader('class','Class')}${sortHeader('status','Status')}${sortHeader('first_seen','First seen','class="date"')}<th class="actions"><span class="sr-only">Actions</span></th></tr></thead><tbody>${body}</tbody></table></div>`:`<div class="empty">${icon(all.length?'filter':'inbox')}<strong>${all.length?'No findings match these filters.':'No findings in this lane.'}</strong>${all.length?'<button type="button" class="link-button" data-clear-filters>Clear filters</button>':''}</div>`}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
   }
   function seenCell(r) {
     const first=shortDate(r.first_seen), last=shortDate(r.last_seen);
@@ -1670,6 +1724,14 @@
   app.addEventListener('focusout',event=>{if(!phaseStatus.contains(event.relatedTarget) && !portfolioAction.contains(event.relatedTarget))retryDeferredApply();});
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
+    if(target.dataset.metadata==='severity' && !target.disabled){
+      const id=target.dataset.id, row=(rows('findings')||[]).find(r=>String(r.id)===id), cap=BoardAPI.capability(state.data,'findingMetadata');if(!row)return;
+      const values=[...new Set([...(Array.isArray(cap?.options?.severity)?cap.options.severity.map(String):[])])];
+      const options=severityOptions(values);
+      if(cap?.backend==='bbh' && !values.includes('N/A'))options.push({value:'N/A',label:'N/A',sev:'na',disabled:true,title:'Not supported by BBH yet'});
+      openPills(target,{label:`Change severity for ${row.title||row.id||'finding'}`,groups:[{options}],current:String(row.severity??''),onPick:option=>{if(option.value!==String(row.severity??''))saveMetadata('severity',id,option.value);}});
+      return;
+    }
     if(target.hasAttribute('data-observation')){
       const item=(rows(state.section)||[])[Number(target.dataset.observation)], box=target.parentElement.querySelector('[data-observation-body]');
       const program=currentProgram(), lane=state.lane, section=state.section;
@@ -1755,20 +1817,24 @@
       } catch (error) {state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${edit.program} / ${edit.lane} / ${edit.id} (severity rationale). The source may have changed; refresh before retrying. Your rationale draft remains in this tab.`);render();}
     }
   });
+  // One metadata write path for inline edits: the class/status fields and the
+  // severity pills. Conflicts keep a copyable pending value (metadata drafts).
+  async function saveMetadata(key,id,value) {
+    const row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
+    const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
+    const origin=rationaleKey(program,lane,id);state.metadataPending=true;render();
+    try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;window.BoardFindingView?.rebase?.(row,response.revisions);/* ledger-actions: roll untouched rows forward */state.metadataPending=false;render();}
+    catch (error) {const sequence=++metadataDraftSequence;state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);state.metadataDrafts.set(JSON.stringify([origin,key,sequence]),{sequence,field:key,value,message:`Unsaved value for ${program} / ${lane} / ${id}${/^[a-f0-9]{64}$/.test(rootInstance || '')?` (source ${rootInstance.slice(0,8)})`:' (source unknown)'}; refresh and review before retrying.`});render();}
+  }
   app.addEventListener('change',async event=>{
     const el=event.target;
     if(el.id==='dashboard-program'){const focused=document.activeElement===el;state.dashboardProgram=el.value;render();if(focused)app.querySelector('#dashboard-program')?.focus();}
     else if(el.id==='program-select'){++laneGeneration;state.program=el.value;state.lane='';state.report='';state.filters=emptyFilters();normalizeSelection();markProgramUsed();routePush=true;render();}
     else if(el.id==='lane-select'){++laneGeneration;state.lane=el.value;state.report='';state.filters=emptyFilters();markProgramUsed();routePush=true;render();}
     else if(el.id==='report-select'){state.report=el.value;routePush=true;render();}
+    else if(el.matches('[data-show-archived]')){state.showArchived=el.checked;try{localStorage.setItem('bounty-board-show-archived',String(el.checked));}catch{}render();app.querySelector('[data-show-archived]')?.focus();}
     else if(el.id==='report-nav-toggle'){state.reportNav=el.checked;render();app.querySelector('#report-nav-toggle')?.focus();}
-    else if(el.dataset.metadata){
-      const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
-      const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
-      const origin=rationaleKey(program,lane,id);state.metadataPending=true;render();
-      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;window.BoardFindingView?.rebase?.(row,response.revisions);/* ledger-actions: roll untouched rows forward */state.metadataPending=false;render();}
-      catch (error) {const sequence=++metadataDraftSequence;state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);state.metadataDrafts.set(JSON.stringify([origin,key,sequence]),{sequence,field:key,value,message:`Unsaved value for ${program} / ${lane} / ${id}${/^[a-f0-9]{64}$/.test(rootInstance || '')?` (source ${rootInstance.slice(0,8)})`:' (source unknown)'}; refresh and review before retrying.`});render();}
-    }
+    else if(el.dataset.metadata)saveMetadata(el.dataset.metadata,el.dataset.id,el.value);
   });
   app.addEventListener('input',event=>{
     const el=event.target;
@@ -1808,7 +1874,7 @@
     if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
   }
   // Public UI helpers for feature modules (see style.css header for tokens).
-  window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker,
+  window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker, openPills, severityOptions,
     navigate:(route)=>navigate(route||{}), severityKey:sevKey, severityRank:sevRank, severityBadge:sevBadge,
     statusBadge, submissionState, isNotSubmitted, icon, escape:esc, hrefFor, relativeTime, absoluteTime,
     // provider(row, {program, lane}) returns extra row-menu items for a finding.

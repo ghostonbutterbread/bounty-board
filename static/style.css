@@ -565,3 +565,25 @@ a.link-button:hover{text-decoration:underline}
 @media(max-width:760px){.report-link-meta .badge{display:none}}
 /* Phone top bar: three navigation items size to their labels (Recent reports added). */
 @media(max-width:650px){.app .nav a,.app.sidebar-collapsed .nav a{width:auto;flex:none;padding:6px}.nav{min-width:0;overflow-x:auto}}
+
+/* Value pills (severity, submission, status pickers): BoardUI.openPills. */
+.pick-trigger{display:inline-flex;align-items:center;padding:0;margin:0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;border-radius:var(--radius-pill);min-height:0}
+.pick-trigger:hover>.sev,.pick-trigger:hover>.badge{box-shadow:0 0 0 1px currentColor}
+.pick-trigger:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.pick-trigger>.badge+.badge{margin-left:4px}
+.pill-popover{min-width:0;padding:8px}
+.pill-box{display:grid;gap:6px;max-width:320px}
+.pills .pill-row{display:flex;flex-wrap:wrap;gap:6px}
+.pills .menu-label{margin-top:6px}
+.pill{cursor:pointer;min-height:26px;padding:3px 11px;font-size:var(--text-sm);gap:5px}
+.pill.badge.outline{background:var(--surface)}
+.pill:hover:not(:disabled){box-shadow:0 0 0 1px currentColor}
+.pill[aria-checked="true"]{box-shadow:0 0 0 2px currentColor}
+.pill:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.pill:disabled{opacity:.55;cursor:not-allowed}
+.pill-note{margin:2px 0 0;max-width:300px;font-size:var(--text-xs)}
+.pill-note.warning{color:var(--warning)}
+.sev-cell{gap:4px}
+.sev-cell>.fa{color:var(--text-3);font-size:11px}
+.sev-cell:disabled{cursor:default}
+.sev-cell:disabled>.fa{display:none}

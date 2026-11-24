@@ -4,6 +4,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
+// Severity is a pill picker: open it from the trigger, then pick the value's pill.
+const pickSeverity=async(trigger,value,options={})=>{await trigger.click(options);await trigger.page().locator(`.pill-popover [data-value="${value}"]`).click(options);};
 
 // The theme switcher is a menu button; filters are multi-select popovers.
 async function setTheme(page,name){await page.getByRole('button',{name:'Theme',exact:true}).click();await page.getByRole('menuitemradio',{name:name[0].toUpperCase()+name.slice(1),exact:true}).click();}
@@ -146,7 +148,7 @@ test('metadata writes need capability and confirm returned value', async () => {
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',route=>{writes++;const payload=route.request().postDataJSON();return route.fulfill({json:{value:payload.value}});});
   await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-  const severity=page.getByLabel('severity for Example finding');await severity.selectOption('Low');
+  const severity=page.getByLabel('severity for Example finding');await pickSeverity(severity,'Low');
   await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='Low' && !document.querySelector('[data-metadata="severity"]')?.disabled);
   assert.equal(writes,1);assert.equal(await page.getByLabel('class for Example finding').isDisabled(),true);
   await page.close();
@@ -319,10 +321,10 @@ test('metadata with no recorded value stays unknown until a confirmed update', a
   await page.route('**/api/meta',route=>{writes++;return route.fulfill({status:500,body:'failed'});});
   await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   const severity=page.getByLabel('severity for Example finding');
-  assert.equal(await severity.inputValue(),'');
-  assert.equal(await severity.locator('option:checked').innerText(),'Unknown');
-  await severity.selectOption('Low');await page.getByText(/Update failed or was not verified/).waitFor();
-  assert.equal(await severity.inputValue(),'');assert.equal(writes,1);
+  assert.equal(await severity.getAttribute('value'),'');
+  assert.equal(await severity.locator('.sev').innerText(),'Not recorded','empty severity is shown as not recorded');
+  await pickSeverity(severity,'Low');await page.getByText(/Update failed or was not verified/).waitFor();
+  assert.equal(await severity.getAttribute('value'),'');assert.equal(writes,1);
   await page.close();
 });
 
@@ -345,7 +347,7 @@ test('multiple metadata failures remain visible until a successful refresh', asy
   await page.route('**/api/meta',route=>route.fulfill({status:500,body:'failed'}));
   try {
     await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Example finding').selectOption('Low');
+    await pickSeverity(page.getByLabel('severity for Example finding'),'Low');
     await page.getByText(/f1 \(severity\)/).waitFor();
     await page.getByLabel('status for Example finding').selectOption('Open');
     await page.getByText(/f1 \(status\)/).waitFor();
@@ -366,12 +368,12 @@ test('failed metadata stays visible after navigation away and back', async () =>
   await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({status:500,body:'failed'});});
   try {
     await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    await pickSeverity(page.getByLabel('severity for Example finding'),'Low');await received;
     await page.getByRole('link',{name:'Dashboard',exact:true}).click();release();
     await page.getByText(/Update failed or was not verified/).waitFor({timeout:3000});
     await page.getByRole('link',{name:'Programs',exact:true}).click();
     assert.ok(await page.getByText(/Update failed or was not verified/).isVisible());
-    assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'High');
+    assert.equal(await page.getByLabel('severity for Example finding').getAttribute('value'),'High');
   } finally {release();await page.close();}
 });
 
@@ -383,7 +385,7 @@ test('pending metadata is visible when navigating to the dashboard', async () =>
   await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
   try {
     await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    await pickSeverity(page.getByLabel('severity for Example finding'),'Low');await received;
     await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     assert.ok(await page.getByText(/Updating metadata; waiting for confirmation/).isVisible());
     release();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
@@ -399,7 +401,7 @@ test('pending metadata blocks refresh and updates the dashboard after navigation
   await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
   try {
     await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    await pickSeverity(page.getByLabel('severity for Example finding'),'Low');await received;
     assert.equal(await page.getByRole('button',{name:'Refresh'}).isDisabled(),true);
     await page.locator('#refresh').dispatchEvent('click');assert.equal(loads,1);
     await page.getByRole('link',{name:'Dashboard',exact:true}).click();
@@ -407,7 +409,7 @@ test('pending metadata blocks refresh and updates the dashboard after navigation
     await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.match(await page.getByRole('region',{name:'Severity breakdown'}).innerText(),/Low\s+1/);
     await page.getByRole('link',{name:'Programs',exact:true}).click();
-    assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'Low');
+    assert.equal(await page.getByLabel('severity for Example finding').getAttribute('value'),'Low');
   } finally {release();await page.close();}
 });
 
@@ -419,11 +421,11 @@ test('metadata updates show pending and serialize controls until verified', asyn
   await page.route('**/api/meta',async route=>{writes++;started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
   try {
     await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Example finding').selectOption('Low');await received;
+    await pickSeverity(page.getByLabel('severity for Example finding'),'Low');await received;
     assert.ok(await page.getByText(/Updating metadata/).count());
     assert.equal(await page.getByLabel('status for Example finding').isDisabled(),true);
     release();await page.waitForFunction(()=>!document.querySelector('[data-metadata="severity"]')?.disabled);
-    assert.equal(writes,1);assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'Low');
+    assert.equal(writes,1);assert.equal(await page.getByLabel('severity for Example finding').getAttribute('value'),'Low');
   } finally {release();await page.close();}
 });
 
@@ -435,7 +437,7 @@ test('advertised BBH metadata capability sends the actual backend contract', asy
   await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();headers=route.request().headers();return route.fulfill({json:{finding:{fid:'F01',severity:'LOW',class_name:'xss',status:'raw'}}});});
   await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   assert.match(await page.locator('.footnote').innerText(),/supported fields/i);
-  await page.getByLabel('severity for Synthetic BBH finding').selectOption('LOW',{timeout:2000});
+  await pickSeverity(page.getByLabel('severity for Synthetic BBH finding'),'LOW',{timeout:2000});
   await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='LOW' && !document.querySelector('[data-metadata="severity"]')?.disabled);
   assert.deepEqual(payload,{family:'Test',program:'Example program',lane:'Web',fid:'F01',patch:{severity:'LOW'}});
   assert.equal(headers['x-requested-with'],'Bounty-Board');
@@ -451,7 +453,7 @@ test('stale BBH metadata keeps the pending value after refresh and navigation', 
   await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();return route.fulfill({status:409,json:{error:'finding_changed'}});});
   try {
     await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
+    await pickSeverity(page.getByLabel('severity for Synthetic BBH finding'),'HIGH');
     await page.getByText(/Conflict: finding changed/).waitFor();
     assert.equal(payload.expected_revision,'b'.repeat(64));assert.equal(payload.root_instance,'a'.repeat(64));
     const pending=page.getByLabel('Pending severity value — copy before leaving');
@@ -474,12 +476,12 @@ test('a successful edit on a different root does not discard an earlier pending 
   });
   try {
     await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
+    await pickSeverity(page.getByLabel('severity for Synthetic BBH finding'),'HIGH');
     await page.getByLabel('Pending severity value — copy before leaving').waitFor();
     data.root_instance='c'.repeat(64);data.programs[0].lanes[0].findings[0].metadata_revision='d'.repeat(64);
     await page.getByRole('button',{name:'Refresh'}).click();
     await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
-    await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
+    await pickSeverity(page.getByLabel('severity for Synthetic BBH finding'),'HIGH');
     await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='HIGH'&&!document.querySelector('[data-metadata="severity"]')?.disabled);
     assert.equal(attempts,2);
     assert.equal(await page.getByLabel('Pending severity value — copy before leaving').inputValue(),'HIGH');
@@ -525,7 +527,7 @@ test('browser metadata update reaches backend with a disposable synthetic writer
     const [chunk]=await Promise.race([once(proc.stdout,'data'),new Promise((_,reject)=>setTimeout(()=>reject(new Error('backend startup timeout')),5000))]);
     page=await browser.newPage();await page.goto(`http://127.0.0.1:${Number(chunk.toString().trim())}`);
     await page.getByRole('link',{name:'Programs',exact:true}).click();
-    await page.getByLabel('severity for Synthetic fixture').selectOption('HIGH');
+    await pickSeverity(page.getByLabel('severity for Synthetic fixture'),'HIGH');
     await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='HIGH' && !document.querySelector('[data-metadata="severity"]')?.disabled);
     assert.equal(JSON.parse(fs.readFileSync(ledger,'utf8')).findings[0].severity,'HIGH');
   } finally {if(page)await page.close();if(proc.exitCode===null && proc.signalCode===null){const exited=once(proc,'exit');proc.kill('SIGTERM');await exited;}fs.rmSync(tmp,{recursive:true,force:true});}
@@ -538,9 +540,9 @@ test('BBH metadata rejects a response for a different finding', async () => {
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F02',severity:'LOW'}}}));
   await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
-  await page.getByLabel('severity for Synthetic BBH finding').selectOption('LOW');
+  await pickSeverity(page.getByLabel('severity for Synthetic BBH finding'),'LOW');
   await page.getByText(/source may have changed; refresh/).waitFor();
-  assert.equal(await page.getByLabel('severity for Synthetic BBH finding').inputValue(),'HIGH');
+  assert.equal(await page.getByLabel('severity for Synthetic BBH finding').getAttribute('value'),'HIGH');
   await page.close();
 });
 

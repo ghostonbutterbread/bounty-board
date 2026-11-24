@@ -28,7 +28,8 @@ class ConfigCliTest(unittest.TestCase):
         with patch.object(sys, 'argv', ['app.py', '--root', '/fixture', '--bbh', '/fake', '--accept-uncoordinated-writes']), patch.object(app, 'make_server') as make_server:
             app.main()
         make_server.assert_called_once_with(Path('/fixture'), 9001, writer=Path('/fake'), accept_uncoordinated_writes=True,
-                                            tailnet_host=None, collaboration_dir=None, experimental_fixture_publish=False)
+                                            tailnet_host=None, collaboration_dir=None, experimental_fixture_publish=False,
+                                            state_dir=Path.home() / '.local/state/bounty-board')
         make_server.return_value.serve_forever.assert_called_once_with()
 
     def test_main_forwards_a_non_default_tailnet_port(self):

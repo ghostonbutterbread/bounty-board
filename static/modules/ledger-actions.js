@@ -481,5 +481,8 @@
     },
   });
   // Dialog entry points used by app.js buttons; severity helpers for tests.
-  window.BoardLedgerActions = {severityKey, severityRank, SEVERITY_ORDER, openAddDialog, openClassReview};
+  // Shared with finding-actions.js (bulk/context-menu actions): the dialog
+  // shell, class combobox, error text and the move dialog for one finding.
+  window.BoardLedgerActions = {severityKey, severityRank, SEVERITY_ORDER, openAddDialog, openClassReview,
+    openMoveDialog, dialog, classPicker, failure, post, el, statusBox: status, showStatus: show, closeButton, CLASS_PATTERN};
 })();
