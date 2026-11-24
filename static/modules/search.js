@@ -47,7 +47,7 @@
     input = el('input'); input.type = 'text'; input.id = 'global-search-input'; input.autocomplete = 'off'; input.spellcheck = false;
     input.placeholder = 'Search programs, findings and reports'; input.setAttribute('aria-label', 'Search programs, findings and reports');
     input.setAttribute('role', 'combobox'); input.setAttribute('aria-expanded', 'true'); input.setAttribute('aria-controls', 'global-search-results'); input.setAttribute('aria-autocomplete', 'list');
-    field.append(icon('fa-search'), input, el('kbd', 'search-kbd', 'Esc'));
+    field.append(icon('fa-search'), input, el('kbd', 'kbd search-kbd', 'Esc'));
     status = el('div', 'search-status hint'); status.setAttribute('role', 'status');
     list = el('div', 'search-results'); list.id = 'global-search-results'; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Search results');
     const foot = el('div', 'search-foot hint', 'Up and down to move, Enter to open, Shift+Enter to open a finding’s report, Esc to close.');
