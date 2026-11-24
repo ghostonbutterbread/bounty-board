@@ -147,3 +147,16 @@ These findings come from the snapshot `board-bbh-browser.A1LilEDR/bbh` with pinn
 - These are not compare-and-swap guarantees. Same limits as `PATCH /api/finding`: stop other writers and sync before editing.
 
 ## Final runs
+
+All runs used real Chromium 1.60 and `/opt/google/chrome/chrome` on a shared 6-CPU machine (load average 16 to 24 during the runs).
+
+- `python3 -W error::ResourceWarning tests/safe_suite.py`, run once: **198 run, 193 passed, 4 failed, 1 skipped** (excluded as designed: `test_backend.BackendTests.test_real_bbh_metadata_write_on_disposable_fixture`). This run began before the map-store probe change (decision 9).
+  - Three of the failures were caused by that probe: `test_backend...context_symlink`, `test_metadata_conflict...stale_finding`, and `test_tailnet...hostile_patches`. Their fake writers count any call whose second argument is not `--help` as a write.
+  - The fourth was `test_report_retention_capacity...two_processes_share_one_capacity_slot_repeatedly`.
+  - After the fix, all 4 passed when run directly (`PYTHONPATH=.:tests python3 -m unittest <4 ids>`: **4/4 OK**). The full safe suite was **not** rerun after the fix.
+- `npm test` (default selection, now including `ledger-actions.synthetic.test.cjs`): **121 tests, 120 passed, 1 failed**.
+  - The failure was `review.synthetic.test.cjs`, "revisionless source conflict stays visible when original content returns": a 2000 ms timeout clicking Programs.
+  - Running that file alone twice: **17/17 and 17/17 passed**. Treated as a load-related flake, not caused by this branch, but not proven.
+- Real-BBH e2e (above): rerun after the probe fix, **PASS**.
+
+9. **Map-store probe.** `writer_features` runs `agents/map_store.py --help` and looks for `write` in the subcommand list. Probing `write --help` would break the convention that `--help` is the second argument of every probe. The `write` flags themselves are assumed from the reviewed BBH; if a write fails, the writer is disabled.
