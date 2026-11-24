@@ -562,3 +562,5 @@ a.link-button:hover{text-decoration:underline}
 .report-link-meta{flex:none;display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--text-3)}
 .report-link-meta .id{margin:0}
 @media(max-width:760px){.report-link-meta .badge{display:none}}
+/* Phone top bar: three navigation items size to their labels (Recent reports added). */
+@media(max-width:650px){.app .nav button,.app.sidebar-collapsed .nav button{width:auto;flex:none;padding:6px}.nav{min-width:0;overflow-x:auto}}
