@@ -104,7 +104,7 @@
     placePopover(el,trigger,options.align);
     el.addEventListener('keydown',event=>{
       if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closePopover(true);}
-      else if(event.key==='Tab' && !options.trapTab){closePopover(false);}
+      else if(event.key==='Tab' && !options.trapTab){event.preventDefault();closePopover(true);}
     });
     return el;
   }

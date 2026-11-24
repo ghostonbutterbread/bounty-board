@@ -165,6 +165,16 @@ test('theme menu is keyboard operable and persists', {timeout: 60000}, async () 
   assert.equal(await menu.count(), 0);
   await page.reload();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
+  // The sidebar collapses to an icon rail; names stay available and it persists.
+  await page.getByRole('button', {name: 'Collapse sidebar'}).click();
+  assert.equal(await page.locator('#shell.sidebar-collapsed').count(), 1);
+  assert.equal(await page.getByRole('button', {name: 'Expand sidebar'}).getAttribute('aria-expanded'), 'false');
+  await page.reload();
+  assert.equal(await page.locator('#shell.sidebar-collapsed').count(), 1);
+  await page.getByRole('button', {name: 'Programs', exact: true}).click();
+  await page.locator('#program-select').waitFor();
+  await page.getByRole('button', {name: 'Expand sidebar'}).click();
+  assert.equal(await page.locator('#shell.sidebar-collapsed').count(), 0);
 }));
 
 test('tablet width keeps navigation usable without horizontal overflow', {timeout: 60000}, async () => showcase(async ({page, url}) => {
