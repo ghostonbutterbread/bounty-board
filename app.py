@@ -1974,7 +1974,8 @@ def main():
     args = parse_config()
     make_server(args.root, args.port, writer=args.bbh,
                 accept_uncoordinated_writes=args.accept_uncoordinated_writes,
-                tailnet_host=args.tailnet_host, tailnet_port=args.tailnet_port, collaboration_dir=args.collaboration_dir,
+                tailnet_host=args.tailnet_host, collaboration_dir=args.collaboration_dir,
+                **({} if args.tailnet_port == 443 else {'tailnet_port': args.tailnet_port}),
                 experimental_fixture_publish=args.experimental_fixture_publish,
                 **({} if args.retention_max_operations == DEFAULT_MAX_OPERATIONS else {'retention_max_operations': args.retention_max_operations}),
                 **({} if args.retention_min_free_bytes == DEFAULT_MIN_FREE_BYTES else {'retention_min_free_bytes': args.retention_min_free_bytes}),

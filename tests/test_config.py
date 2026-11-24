@@ -31,6 +31,15 @@ class ConfigCliTest(unittest.TestCase):
                                             tailnet_host=None, collaboration_dir=None, experimental_fixture_publish=False)
         make_server.return_value.serve_forever.assert_called_once_with()
 
+    def test_main_forwards_a_non_default_tailnet_port(self):
+        import app
+        from unittest.mock import patch
+        with patch.object(sys, 'argv', ['app.py', '--root', '/fixture', '--tailnet-host', 'board.example.ts.net',
+                                        '--tailnet-port', '9001']), patch.object(app, 'make_server') as make_server:
+            app.main()
+        self.assertEqual(make_server.call_args.kwargs['tailnet_host'], 'board.example.ts.net')
+        self.assertEqual(make_server.call_args.kwargs['tailnet_port'], 9001)
+
     def test_json_toml_and_cli_overrides(self):
         import tempfile
         import app
