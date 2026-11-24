@@ -76,7 +76,7 @@ test('Reports section lists the lane reports as links; modified clicks open new 
   assert.equal(await selected(page), 'notes.md');
   assert.equal(await page.evaluate(() => window.__noReload), true);
   // The filter hides rows in place.
-  await page.getByLabel('Filter reports in this lane').fill('invoice');
+  await page.getByLabel('Filter report list by name, path or finding').fill('invoice');
   assert.equal(await links.filter({visible: true}).count(), 1);
   assert.equal(await page.locator('#report-filter-count').innerText(), '1 of 3');
   // The fast picker still works.
