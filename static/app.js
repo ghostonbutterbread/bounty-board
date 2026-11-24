@@ -137,7 +137,7 @@
   // Finding actions (static/modules/finding-actions.js): "Delete" archives a
   // finding (status archive). Archived findings are hidden from dashboard
   // counts/lists and the Findings table unless "Show archived" is on.
-  const isArchived = finding => String(finding?.status ?? '').trim().toLowerCase()==='archive';
+  const isArchived = finding => ['archive','archived'].includes(String(finding?.status ?? '').trim().toLowerCase());
   const shownFinding = finding => state.showArchived || !isArchived(finding);
   const archiveToggle = count => `<label class="archive-toggle"><input type="checkbox" data-show-archived ${state.showArchived?'checked':''}><span>Show archived</span><span class="badge outline" data-archived-count>Archived ${count}</span></label>`;
   // Hook for finding-actions pickers: a badge wrapped in a button when the module is loaded.
@@ -233,6 +233,47 @@
     openPopover(trigger,menu,{...options,className:'menu-popover'});
     (menu.querySelector('[aria-checked="true"]:not(:disabled)') || menu.querySelector('[role^="menuitem"]:not(:disabled)'))?.focus();
     return menu;
+  }
+  // Coloured value pills in a popover (severity, submission, status pickers).
+  // groups: [{label?, options:[{value, label, sev?, tone?, disabled?, title?}]}].
+  // Arrow keys move, Enter/Space pick, Escape/Tab close and focus returns.
+  function openPills(trigger, {label, groups, current, note='', disabledHint='', onPick, onClose}) {
+    const box=document.createElement('div');box.className='pill-box';
+    const menu=document.createElement('div');menu.className='pills';menu.setAttribute('role','menu');menu.setAttribute('aria-label',label);
+    for(const group of groups){
+      if(group.label){const h=document.createElement('div');h.className='menu-label';h.setAttribute('role','presentation');h.textContent=group.label;menu.append(h);}
+      const row=document.createElement('div');row.className='pill-row';
+      for(const option of group.options){
+        const b=document.createElement('button');b.type='button';b.setAttribute('role','menuitemradio');
+        const on=option.value===current || (Array.isArray(current) && current.includes(option.value));
+        b.setAttribute('aria-checked',String(on));b.className=`pill ${option.sev?'sev':`badge ${option.tone||''}`}`;
+        if(option.sev)b.dataset.sev=option.sev;b.dataset.value=option.value;b.disabled=!!disabledHint || !!option.disabled;
+        if(option.title)b.title=option.title;
+        b.innerHTML=`${on?icon('check'):''}<span></span>`;b.querySelector('span').textContent=option.label;
+        b.addEventListener('click',()=>{closePopover(true);onPick(option);});
+        row.append(b);
+      }
+      menu.append(row);
+    }
+    box.append(menu);
+    if(note || disabledHint){const n=document.createElement('p');n.className=`hint pill-note${disabledHint?' warning':''}`;n.textContent=disabledHint || note;box.append(n);}
+    menu.addEventListener('keydown',event=>{
+      const items=[...menu.querySelectorAll('[role=menuitemradio]:not(:disabled)')], i=items.indexOf(document.activeElement);let next=null;
+      if(event.key==='ArrowRight' || event.key==='ArrowDown')next=items[(i+1)%items.length];
+      else if(event.key==='ArrowLeft' || event.key==='ArrowUp')next=items[(i-1+items.length)%items.length];
+      else if(event.key==='Home')next=items[0];else if(event.key==='End')next=items[items.length-1];
+      if(next){event.preventDefault();next.focus();}
+    });
+    openPopover(trigger,box,{label,className:'pill-popover',reanchor:()=>null,onClose});
+    const first=menu.querySelector('[aria-checked="true"]:not(:disabled)') || menu.querySelector('[role=menuitemradio]:not(:disabled)');
+    if(first)first.focus();else{box.tabIndex=-1;box.focus();}
+    return box;
+  }
+  const SEVERITY_PILL_TITLES={INFO:'Informational (INFO)'};
+  // Severity pills for a finding: BBH order, current value checked. Values come
+  // from the write capability; N/A is shown but BBH stores it as UNKNOWN.
+  function severityOptions(values) {
+    return values.map(v=>{const k=sevKey(v), canonical=String(v).toUpperCase()===String(v) && k!=='unknown' || String(v)==='UNKNOWN';return {value:String(v),label:canonical?SEVERITY_LABELS[k]:String(v),sev:k,title:SEVERITY_PILL_TITLES[v]||''};});
   }
   document.addEventListener('mousedown',event=>{
     if(popover && !popover.el.contains(event.target) && !popover.trigger?.contains(event.target))closePopover(false);
@@ -873,7 +914,10 @@
     if(cap?.textFields?.includes(key)) return `<input data-metadata="${esc(key)}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" aria-describedby="metadata-warning" title="Lowercase class identifier; change applies on leaving the field" value="${esc(value)}" ${row.id != null && !state.metadataPending?'':'disabled'}>`;
     const options=cap?.options?.[key]; const writable=cap && row.id != null && Array.isArray(options) && options.length && !state.metadataPending;
     const values=[...new Set([value,...(Array.isArray(options)?options.map(String):[])].filter(Boolean))];
-    const sev=key==='severity' ? ` class="sev-select" data-sev="${value?sevKey(value):'unknown'}"` : '';
+    // Severity uses the same coloured pills as the dashboard (finding actions);
+    // the button keeps data-metadata/value so the metadata flow is unchanged.
+    if(key==='severity') return `<button type="button" class="pick-trigger sev-cell" data-metadata="severity" data-id="${esc(row.id??'')}" value="${esc(value)}" aria-haspopup="menu" aria-expanded="false" aria-label="severity for ${esc(row.title||row.id||'finding')}: ${esc(value||'not recorded')}" ${cap?'aria-describedby="metadata-warning"':''} title="${writable?'Change severity':'Severity editing is unavailable'}" ${writable?'':'disabled'}>${sevBadge(value||null)}${icon('angle-down')}</button>`;
+    const sev='';
     // Severity: INFO is BBH's informational value; N/A is shown and ranked but
     // BBH stores it as UNKNOWN, so it is offered disabled until BBH supports it.
     const label=v=>key==='severity' && WRITE_SEVERITY_LABELS[v] ? WRITE_SEVERITY_LABELS[v] : v;
@@ -1656,6 +1700,14 @@
   app.addEventListener('focusout',event=>{if(!phaseStatus.contains(event.relatedTarget) && !portfolioAction.contains(event.relatedTarget))retryDeferredApply();});
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
+    if(target.dataset.metadata==='severity' && !target.disabled){
+      const id=target.dataset.id, row=(rows('findings')||[]).find(r=>String(r.id)===id), cap=BoardAPI.capability(state.data,'findingMetadata');if(!row)return;
+      const values=[...new Set([...(Array.isArray(cap?.options?.severity)?cap.options.severity.map(String):[])])];
+      const options=severityOptions(values);
+      if(cap?.backend==='bbh' && !values.includes('N/A'))options.push({value:'N/A',label:'N/A',sev:'na',disabled:true,title:'Not supported by BBH yet'});
+      openPills(target,{label:`Change severity for ${row.title||row.id||'finding'}`,groups:[{options}],current:String(row.severity??''),onPick:option=>{if(option.value!==String(row.severity??''))saveMetadata('severity',id,option.value);}});
+      return;
+    }
     if(target.hasAttribute('data-observation')){
       const item=(rows(state.section)||[])[Number(target.dataset.observation)], box=target.parentElement.querySelector('[data-observation-body]');
       const program=currentProgram(), lane=state.lane, section=state.section;
@@ -1741,6 +1793,15 @@
       } catch (error) {state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${edit.program} / ${edit.lane} / ${edit.id} (severity rationale). The source may have changed; refresh before retrying. Your rationale draft remains in this tab.`);render();}
     }
   });
+  // One metadata write path for inline edits: the class/status fields and the
+  // severity pills. Conflicts keep a copyable pending value (metadata drafts).
+  async function saveMetadata(key,id,value) {
+    const row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
+    const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
+    const origin=rationaleKey(program,lane,id);state.metadataPending=true;render();
+    try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;window.BoardFindingView?.rebase?.(row,response.revisions);/* ledger-actions: roll untouched rows forward */state.metadataPending=false;render();}
+    catch (error) {const sequence=++metadataDraftSequence;state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);state.metadataDrafts.set(JSON.stringify([origin,key,sequence]),{sequence,field:key,value,message:`Unsaved value for ${program} / ${lane} / ${id}${/^[a-f0-9]{64}$/.test(rootInstance || '')?` (source ${rootInstance.slice(0,8)})`:' (source unknown)'}; refresh and review before retrying.`});render();}
+  }
   app.addEventListener('change',async event=>{
     const el=event.target;
     if(el.id==='dashboard-program'){const focused=document.activeElement===el;state.dashboardProgram=el.value;render();if(focused)app.querySelector('#dashboard-program')?.focus();}
@@ -1749,13 +1810,7 @@
     else if(el.id==='report-select'){state.report=el.value;routePush=true;render();}
     else if(el.matches('[data-show-archived]')){state.showArchived=el.checked;try{localStorage.setItem('bounty-board-show-archived',String(el.checked));}catch{}render();app.querySelector('[data-show-archived]')?.focus();}
     else if(el.id==='report-nav-toggle'){state.reportNav=el.checked;render();app.querySelector('#report-nav-toggle')?.focus();}
-    else if(el.dataset.metadata){
-      const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
-      const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
-      const origin=rationaleKey(program,lane,id);state.metadataPending=true;render();
-      try {const response=await BoardAPI.write(state.data,'findingMetadata',{programId:program,program:name,family,lane, findingId:id,field:key,value,expectedRevision:row.metadata_revision,rootInstance}); if(response?.value!==value)throw new Error('Unverified value'); row[key]=response.value;row.metadata_revision=response.revision;window.BoardFindingView?.rebase?.(row,response.revisions);/* ledger-actions: roll untouched rows forward */state.metadataPending=false;render();}
-      catch (error) {const sequence=++metadataDraftSequence;state.metadataPending=false;state.metadataErrors.push(`${metadataFailure(error)} ${program} / ${lane} / ${id} (${key}). The source may have changed; refresh before retrying.`);state.metadataDrafts.set(JSON.stringify([origin,key,sequence]),{sequence,field:key,value,message:`Unsaved value for ${program} / ${lane} / ${id}${/^[a-f0-9]{64}$/.test(rootInstance || '')?` (source ${rootInstance.slice(0,8)})`:' (source unknown)'}; refresh and review before retrying.`});render();}
-    }
+    else if(el.dataset.metadata)saveMetadata(el.dataset.metadata,el.dataset.id,el.value);
   });
   app.addEventListener('input',event=>{
     const el=event.target;
@@ -1794,7 +1849,7 @@
     if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
   }
   // Public UI helpers for feature modules (see style.css header for tokens).
-  window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker,
+  window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker, openPills, severityOptions,
     navigate:(route)=>navigate(route||{}), severityKey:sevKey, severityRank:sevRank, severityBadge:sevBadge,
     statusBadge, submissionState, isNotSubmitted, icon, escape:esc, hrefFor, relativeTime, absoluteTime,
     // provider(row, {program, lane}) returns extra row-menu items for a finding.

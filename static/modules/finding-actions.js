@@ -32,10 +32,12 @@
   const SEV_LABELS = {EXCEPTIONAL: 'Exceptional', CRITICAL: 'Critical', HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low', INFO: 'Info', UNKNOWN: 'Unknown'};
   const STATES = [['not_submitted', 'Not submitted'], ['submitted', 'Submitted'], ['dropped', 'Dropped']];
   const RESULTS = [['valid', 'Valid'], ['duplicate', 'Duplicate']];
-  const RESTORE_STATUSES = ['raw', 'confirmed', 'dormant', 'novel', 'complete'];
+  const ARCHIVE_STATUSES = ['archive', 'archived'];
+  const STATUS_TOKEN = /^[a-z0-9][a-z0-9-]{0,39}$/; // what BBH and the Board accept as a status
+  const RESTORE_FALLBACK = 'confirmed';
   const PLACEHOLDER_TITLES = new Set(['short vulnerability label', 'short novel pattern label']);
   const POSSIBLE_KINDS = new Set(['unregistered', 'generated_report', 'unknown']);
-  const PREV_STATUS_KEY = 'bounty-board-archived-from';
+  const NOTE_SEEN_KEY = 'bounty-board-submission-note-seen';
   const ROWS = '[data-finding-row][data-finding-id], tbody tr[data-finding-id]';
   const DRAG_TYPE = 'application/x-bounty-board-findings';
   const OFF_HINT = 'Editing is off: the backend has not enabled the BBH writer.';
@@ -67,7 +69,7 @@
   const rowNodes = () => ctx ? [...ctx.app.querySelectorAll(ROWS)].filter(n => n.dataset.findingId) : [];
   const visibleKeys = () => rowNodes().map(rowKey);
   const selectedEntries = () => visibleKeys().filter(k => selected.has(k)).map(resolve).filter(Boolean);
-  const isArchived = row => String(row?.status ?? '').trim().toLowerCase() === 'archive';
+  const isArchived = row => ARCHIVE_STATUSES.includes(String(row?.status ?? '').trim().toLowerCase());
   const submission = row => {
     const nested = row?.submission && typeof row.submission === 'object' ? row.submission : {};
     const state = String(nested.state || row?.submission_status || 'not_submitted').toLowerCase();
@@ -92,10 +94,26 @@
   const canDelete = () => !!ledgerCaps().delete?.enabled && !!rootInstance();
   const writerOn = () => !!metaCap();
 
-  // --------------------------------------------------------- remembered state
-  const readPrev = () => { try { return JSON.parse(localStorage.getItem(PREV_STATUS_KEY) || '{}') || {}; } catch { return {}; } };
-  const writePrev = map => { try { localStorage.setItem(PREV_STATUS_KEY, JSON.stringify(map)); } catch {} };
-  const prevStatus = key => { const v = readPrev()[key]; return RESTORE_STATUSES.includes(v) ? v : null; };
+  // ------------------------------------------------------- previous status
+  // The server remembers the status a finding had when the Board archived it
+  // (private state, not the ledger), so Restore works from any device.
+  async function previousStatuses(entries) {
+    const lanes = new Map(), out = new Map(); let available = true;
+    for (const e of entries) lanes.set(JSON.stringify([e.program.family, e.program.name, e.lane.name]), e);
+    for (const [lane] of lanes) {
+      const [family, program, name] = JSON.parse(lane);
+      try {
+        const response = await fetch(`/api/archive-state?${new URLSearchParams({family, program, lane: name})}`, {cache: 'no-store'});
+        const body = response.ok ? await response.json() : null;
+        if (!body?.available) { available = false; continue; }
+        for (const e of entries) if (e.program.family === family && e.program.name === program && e.lane.name === name) {
+          const value = body.entries?.[String(e.row.id)]?.previous_status;
+          if (typeof value === 'string' && STATUS_TOKEN.test(value) && !ARCHIVE_STATUSES.includes(value)) out.set(e.key, value);
+        }
+      } catch { available = false; }
+    }
+    return {map: out, available};
+  }
 
   // ------------------------------------------------------------------ writes
   async function writeField(entry, field, value) {
@@ -114,18 +132,27 @@
     Object.assign(entry.row, {...result.finding, id: result.finding.fid, class: result.finding.class_name});
     window.BoardFindingView?.rebase?.(entry.row, result.revisions);
   }
+  async function postJson(url, body) {
+    const response = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}, body: JSON.stringify(body)});
+    let payload = null; try { payload = await response.json(); } catch {}
+    if (!response.ok) throw Object.assign(new Error(`Request failed (${response.status})`), {status: response.status, code: payload?.error, reason: payload?.reason});
+    return payload;
+  }
+  // Permanent: BBH removes the finding and its generated report files and keeps
+  // only a minimal tombstone. BBH deletes only status "archive", so an
+  // "archived" finding is first set to archive through the edit path.
   async function deletePermanently(entry) {
-    const result = await LA().post('/api/finding/delete', {...where(entry), expected_revision: entry.row.metadata_revision, root_instance: rootInstance()});
+    if (entry.row.status !== 'archive') await writeField(entry, 'status', 'archive');
+    const result = await postJson('/api/finding/delete', {...where(entry), expected_revision: entry.row.metadata_revision, root_instance: rootInstance()});
     if (result?.deleted !== String(entry.row.id)) throw new Error('Unverified delete');
     window.BoardFindingView?.rebase?.(entry.row, result.revisions);
     const list = findings(entry.lane), index = list.indexOf(entry.row);
     if (index >= 0) list.splice(index, 1);
-    const prev = readPrev(); delete prev[entry.key]; writePrev(prev);
     return result;
   }
-  const reasonFor = error => ({
+  const reasonFor = error => error?.code === 'delete_refused' && error.reason ? `BBH refused: ${error.reason}` : ({
     finding_changed: 'changed since it was loaded (stale)', root_changed: 'the source root changed', finding_not_found: 'no longer in the ledger',
-    not_archived: 'not archived', no_previous: 'previous status not known; pick a status', delete_refused: 'BBH refused the delete', writer_unavailable: 'the writer is unavailable', busy: 'another update is in progress',
+    not_archived: 'not archived', delete_refused: 'BBH refused the delete', writer_unavailable: 'the writer is unavailable', busy: 'another update is in progress',
     invalid_finding_patch: 'rejected as invalid', invalid_ledger_action: 'rejected as invalid', writer_failed: 'writer error; the writer is now off',
     verification_failed: 'not verified; the writer is now off',
   }[error?.code] || (error?.status === 503 ? 'the writer is unavailable' : error?.status === 502 ? 'writer error; the writer is now off' : 'not saved or not verified'));
@@ -137,7 +164,7 @@
     if (!entries.length) { setStatus({text: skipped.length ? `${title}: nothing to change. ${skipped.map(s => `${s.id}: ${s.reason}`).join('; ')}` : `${title}: nothing to change.`, kind: 'warning'}); return null; }
     if (running || ctx.state.metadataPending) { ctx.ui.toast('Another update is in progress. Try again when it finishes.', 'warning'); return null; }
     running = true; ctx.state.metadataPending = true;
-    const done = [], failed = [], undoItems = []; let stopped = false, warnings = 0;
+    const done = [], failed = [], undoItems = [], warningText = []; let stopped = false, warnings = 0;
     setStatus({text: `${title}: saving 0 of ${entries.length} through BBH.`, progress: [0, entries.length]});
     ctx.render();
     try {
@@ -147,7 +174,7 @@
         const before = undo?.(entry);
         try {
           const result = await perform(entry);
-          if (result?.warnings) warnings++;
+          if (result?.warnings) { warnings++; for (const text of result.warning_text || []) warningText.push(`${entry.row.id}: ${text}`); }
           done.push(entry); if (before) undoItems.push(before);
         } catch (error) {
           failed.push({entry, reason: reasonFor(error)});
@@ -163,6 +190,8 @@
     setStatus({text: failed.length ? `${summary} Not saved: ${failed.length}. They stay selected; the data was refreshed so you can retry.` : summary, kind, failures, undo: !!lastUndo});
     const toast = ctx.ui.toast(failed.length ? `${summary} ${failed.length} not saved.` : summary, kind, {timeout: lastUndo ? 12000 : 6000});
     if (lastUndo) addUndoButton(toast);
+    // Non-blocking notice: the work was done, but BBH reported a warning.
+    if (warningText.length) ctx.ui.toast(`BBH warnings: ${warningText.slice(0, 5).join(' ')}${warningText.length > 5 ? ` (and ${warningText.length - 5} more)` : ''}`, 'warning', {timeout: 15000});
     if (refresh || failed.length) await ctx.reload();
     ctx.render(); // load() returns early while a report refresh is pending
     return {done, failed};
@@ -193,10 +222,11 @@
   // Undo descriptors per change type.
   const fieldUndo = (field, value) => entry => {
     const prev = field === 'class' ? entry.row.class : entry.row[field];
-    const writable = field === 'severity' ? SEVERITIES.includes(prev) : field === 'status' ? (metaCap()?.options?.status || []).includes(prev) : typeof prev === 'string' && LA().CLASS_PATTERN.test(prev);
+    // Status: BBH accepts any string, so the exact previous token is written back.
+    const writable = field === 'severity' ? SEVERITIES.includes(prev) : field === 'status' ? typeof prev === 'string' && STATUS_TOKEN.test(prev) : typeof prev === 'string' && LA().CLASS_PATTERN.test(prev);
     return {key: entry.key, id: String(entry.row.id),
       check: row => (field === 'class' ? row.class : row[field]) !== value ? 'changed since' : writable ? '' : `the previous value ${prev == null || prev === '' ? '(empty)' : prev} cannot be written back`,
-      restore: e => { if (field === 'status' && value === 'archive') forgetPrev(e.key); return writeField(e, field, prev); }};
+      restore: e => writeField(e, field, prev)};
   };
   const submissionUndo = value => entry => {
     const prev = submission(entry.row);
@@ -204,7 +234,6 @@
       check: row => { const now = submission(row); if (now.state !== value.state || (value.result && now.result !== value.result)) return 'changed since'; if (!prev.result && now.result) return 'BBH cannot clear a recorded result'; return ''; },
       restore: e => writeSubmission(e, {state: prev.state, ...(prev.result ? {result: prev.result} : {})})};
   };
-  const forgetPrev = key => { const map = readPrev(); delete map[key]; writePrev(map); };
 
   // --------------------------------------------------------------- actions
   const ids = entries => entries.map(e => String(e.row.id));
@@ -232,19 +261,24 @@
       lines: ['This archives the findings: it sets their status to archive.', 'Archived findings are hidden from the dashboard and lists. The ledger keeps them, and you can restore them with Show archived.'],
       list: targets, confirm: 'Delete (archive)', danger: true});
     if (!ok) return;
-    return runBulk(targets, 'Delete', e => { const prev = readPrev(); if (RESTORE_STATUSES.includes(e.row.status)) prev[e.key] = e.row.status; writePrev(prev); return writeField(e, 'status', 'archive'); },
+    // The server remembers each previous status for Restore.
+    return runBulk(targets, 'Delete', e => writeField(e, 'status', 'archive'),
       {undo: fieldUndo('status', 'archive'), refresh: true, success: (n, total) => `Archived ${n} of ${countLabel(total)}. Hidden from the dashboard and lists.`});
   }
-  function restore(entries, status) {
+  function restore(entries, status, previous) {
     const targets = entries.filter(e => isArchived(e.row));
-    return runBulk(targets, 'Restore', e => { const value = status || prevStatus(e.key); if (!value) return Promise.reject(Object.assign(new Error('no previous'), {code: 'no_previous'})); return writeField(e, 'status', value).then(() => forgetPrev(e.key)); },
-      {refresh: true, success: (n, total) => `Restored ${n} of ${countLabel(total)}.`});
+    const fallback = status ? [] : targets.filter(e => !previous.get(e.key));
+    return runBulk(targets, 'Restore', e => writeField(e, 'status', status || previous.get(e.key) || RESTORE_FALLBACK),
+      {refresh: true, success: (n, total) => `Restored ${n} of ${countLabel(total)}.${fallback.length ? ` ${fallback.length} had no stored previous status and ${fallback.length === 1 ? 'was' : 'were'} restored as ${RESTORE_FALLBACK}.` : ''}`});
   }
   async function deleteForever(entries) {
     const targets = entries.filter(e => isArchived(e.row));
     if (!targets.length || !canDelete()) return;
+    const one = targets.length === 1, marked = targets.filter(e => e.row.status !== 'archive').length;
     const ok = await confirmDialog({title: `Permanently delete ${countLabel(targets.length)}?`,
-      lines: [`This permanently removes ${targets.length === 1 ? 'this finding' : `these ${targets.length} findings`} from the ledger and deletes ${targets.length === 1 ? 'its' : 'their'} BBH-generated reports.`, 'It cannot be undone. Archive is the recoverable state; this is not.'],
+      lines: [`Delete permanently removes ${one ? 'the finding and its' : `the ${targets.length} findings and their`} generated report files. It cannot be undone.`,
+        'Archive is how to keep something recoverable.',
+        ...(marked ? [`${marked === targets.length ? (one ? 'It is' : 'They are') : `${marked} of them are`} marked archived; the Board first sets archive, then deletes.`] : [])],
       list: targets, confirm: 'Delete permanently', danger: true});
     if (!ok) return;
     return runBulk(targets, 'Delete permanently', deletePermanently, {refresh: true, success: (n, total) => `Permanently deleted ${n} of ${countLabel(total)}.`});
@@ -300,51 +334,13 @@
     (document.querySelector('#ui-layer') || document.body).append(anchor);
     return anchor;
   }
-  function openPills(trigger, {label, options, current, note, disabledHint, onPick, extra, restoreFocus}) {
-    const box = document.createElement('div');
-    box.className = 'pill-box';
-    const menu = document.createElement('div');
-    menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', label); menu.className = 'pills';
-    const build = (group, groupLabel) => {
-      const wrap = document.createElement('div'); wrap.className = 'pill-row';
-      if (groupLabel) { const h = document.createElement('div'); h.className = 'menu-label'; h.textContent = groupLabel; h.setAttribute('role', 'presentation'); menu.append(h); }
-      for (const option of group) {
-        const button = document.createElement('button');
-        button.type = 'button'; button.setAttribute('role', 'menuitemradio');
-        button.setAttribute('aria-checked', String(option.value === current));
-        button.className = `pill ${option.sev ? 'sev' : `badge ${option.tone || ''}`}`;
-        if (option.sev) button.dataset.sev = option.sev;
-        button.dataset.value = option.value;
-        button.disabled = !!disabledHint || !!option.disabled;
-        if (option.title) button.title = option.title;
-        button.innerHTML = `${option.value === current ? '<i class="fa fa-check" aria-hidden="true"></i>' : ''}<span></span>`;
-        button.querySelector('span').textContent = option.label;
-        button.addEventListener('click', () => { ctx.ui.closePopover(true); onPick(option); });
-        wrap.append(button);
-      }
-      menu.append(wrap);
-    };
-    build(options);
-    if (extra) build(extra.options, extra.label);
-    box.append(menu);
-    if (note || disabledHint) { const p = document.createElement('p'); p.className = `hint pill-note${disabledHint ? ' warning' : ''}`; p.textContent = disabledHint || note; box.append(p); }
-    menu.addEventListener('keydown', event => {
-      const items = [...menu.querySelectorAll('[role=menuitemradio]:not(:disabled)')];
-      const index = items.indexOf(document.activeElement); let next = null;
-      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = items[(index + 1) % items.length];
-      else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = items[(index - 1 + items.length) % items.length];
-      else if (event.key === 'Home') next = items[0]; else if (event.key === 'End') next = items[items.length - 1];
-      if (next) { event.preventDefault(); next.focus(); }
-    });
-    ctx.ui.openPopover(trigger, box, {label, className: 'pill-popover', reanchor: () => null, onClose: () => { if (trigger.classList.contains('point-anchor')) trigger.remove(); restoreFocus?.(); }});
-    const first = menu.querySelector('[aria-checked=true]:not(:disabled)') || menu.querySelector('[role=menuitemradio]:not(:disabled)');
-    (first || box.querySelector('.pill-note') || menu).focus?.();
-    if (!first) { box.tabIndex = -1; box.focus(); }
-  }
+  // Shared pills (BoardUI.openPills); a pointer anchor is removed on close.
+  const pills = (trigger, restoreFocus, options) => ctx.ui.openPills(trigger, {...options,
+    onClose: () => { if (trigger.classList.contains('point-anchor')) trigger.remove(); restoreFocus?.(); }});
   function severityPills(trigger, entries, restoreFocus) {
     const current = entries.length === 1 || entries.every(e => e.row.severity === entries[0].row.severity) ? entries[0]?.row.severity : null;
-    openPills(trigger, {label: entries.length > 1 ? `Change severity for ${countLabel(entries.length)}` : 'Change severity', current, restoreFocus,
-      options: SEVERITIES.map(value => ({value, label: SEV_LABELS[value], sev: value.toLowerCase()})),
+    pills(trigger, restoreFocus, {label: entries.length > 1 ? `Change severity for ${countLabel(entries.length)}` : 'Change severity', current,
+      groups: [{options: ctx.ui.severityOptions(SEVERITIES)}],
       note: entries.length > 1 ? `Applies to ${countLabel(entries.length)}, saved one at a time.` : '',
       disabledHint: canEdit('severity') ? '' : OFF_HINT,
       onPick: option => changeSeverity(entries, option.value)});
@@ -352,27 +348,30 @@
   function submissionPills(trigger, entries, restoreFocus) {
     const states = entries.map(e => submission(e.row));
     const same = states.every(s => s.state === states[0]?.state);
-    const current = same ? states[0]?.state : null;
     const submittedAll = states.length && states.every(s => s.state === 'submitted');
-    const results = new Set(states.map(s => s.result));
-    openPills(trigger, {label: entries.length > 1 ? `Submission for ${countLabel(entries.length)}` : 'Submission', current, restoreFocus,
-      options: STATES.map(([value, label]) => ({value, label, tone: value === 'submitted' ? 'accent' : 'outline'})),
-      extra: {label: 'Platform result', options: RESULTS.map(([value, label]) => ({value: `result:${value}`, label, tone: value === 'valid' ? 'success' : 'warning',
-        disabled: !submittedAll, title: submittedAll ? '' : 'Mark as Submitted first'}))},
-      note: `Records local state only. Nothing is sent to a platform.${submittedAll ? '' : ' A result needs Submitted.'}${results.size === 1 && [...results][0] ? ' BBH cannot clear a recorded result.' : ''}`,
+    const results = new Set(states.map(s => s.result)), result = results.size === 1 ? [...results][0] : null;
+    // The "ledger only" note is shown once per browser; no extra confirmation step.
+    let seen = false; try { seen = localStorage.getItem(NOTE_SEEN_KEY) === '1'; localStorage.setItem(NOTE_SEEN_KEY, '1'); } catch {}
+    pills(trigger, restoreFocus, {label: entries.length > 1 ? `Submission for ${countLabel(entries.length)}` : 'Submission',
+      current: [same ? states[0]?.state : null, result ? `result:${result}` : null],
+      groups: [{options: STATES.map(([value, label]) => ({value, label, tone: value === 'submitted' ? 'accent' : 'outline'}))},
+        {label: 'Platform result', options: RESULTS.map(([value, label]) => ({value: `result:${value}`, label, tone: value === 'valid' ? 'success' : 'warning',
+          disabled: !submittedAll, title: submittedAll ? (result ? 'BBH cannot clear a recorded result' : '') : 'Mark as Submitted first'}))}],
+      note: [seen ? '' : 'Records state in the ledger only. Nothing is sent to a platform.', submittedAll ? '' : 'A result needs Submitted.'].filter(Boolean).join(' '),
       disabledHint: canSubmit() ? '' : 'Recording submission state is off: the backend has not enabled a BBH writer that supports it.',
       onPick: option => option.value.startsWith('result:') ? changeSubmission(entries, {state: 'submitted', result: option.value.slice(7)}) : changeSubmission(entries, {state: option.value})});
-    // Mark the current result, if all selected share it.
-    if (results.size === 1 && [...results][0]) document.querySelector(`.pill-popover [data-value="result:${CSS.escape([...results][0])}"]`)?.setAttribute('aria-checked', 'true');
   }
-  function restorePills(trigger, entries, restoreFocus) {
-    const known = entries.every(e => prevStatus(e.key));
-    openPills(trigger, {label: 'Restore as', current: null, restoreFocus,
-      options: [{value: '', label: 'Previous status', tone: 'accent', disabled: !known, title: known ? '' : 'The previous status is not known for every selected finding'},
-        ...RESTORE_STATUSES.map(value => ({value, label: value, tone: 'outline'}))],
-      note: known ? 'Previous status restores the status each finding had before it was archived.' : 'Previous status is only known for findings archived in this browser. Pick a status.',
-      disabledHint: canEdit('status') ? '' : OFF_HINT,
-      onPick: option => restore(entries, option.value || null)});
+  async function restorePills(trigger, entries, restoreFocus) {
+    const {map, available} = await previousStatuses(entries);
+    const missing = entries.filter(e => !map.get(e.key)).length;
+    const statuses = (metaCap()?.options?.status || []).filter(v => !ARCHIVE_STATUSES.includes(v));
+    const note = !missing ? 'Previous status restores the status each finding had when the Board archived it.'
+      : `${!available ? 'Stored previous statuses are unavailable. ' : ''}No previous status is stored for ${entries.length === 1 ? 'this finding' : `${missing} of ${countLabel(entries.length)}`}; Previous status restores ${missing === 1 ? 'it' : 'them'} as ${RESTORE_FALLBACK}.`;
+    if (!trigger.isConnected) return;
+    pills(trigger, restoreFocus, {label: 'Restore as', current: null,
+      groups: [{options: [{value: '', label: 'Previous status', tone: 'accent'}]}, {label: 'Or set status', options: statuses.map(value => ({value, label: value, tone: 'outline'}))}],
+      note, disabledHint: canEdit('status') ? '' : OFF_HINT,
+      onPick: option => restore(entries, option.value || null, map)});
   }
 
   // ------------------------------------------------------------ report info
@@ -384,8 +383,9 @@
     if (!reports || (Array.isArray(lane.warnings) && lane.warnings.some(w => typeof w === 'string' && w.startsWith('reports_')))) return null;
     const fid = String(row.id), pattern = new RegExp(`(^|[^a-z0-9])${escapeRe(fid)}([^a-z0-9]|$)`, 'i');
     const possible = reports.find(r => POSSIBLE_KINDS.has(r.kind) && pattern.test(String(r.path || '')));
+    const evidence = reports.find(r => r.kind === 'generated_evidence' && pattern.test(String(r.path || '')));
     const recorded = typeof row.report_path === 'string' && row.report_path.trim();
-    return {possible, reason: recorded ? 'No report: the ledger has a report path, but that file is not among this lane\'s reports (missing or moved).' : 'No report: the ledger has no report_path for this finding.'};
+    return {possible, evidence, reason: recorded ? 'No report: the ledger has a report path, but that file is not among this lane\'s reports (missing or moved).' : 'No report: the ledger has no report_path for this finding.'};
   }
 
   // ----------------------------------------------------------- context menu
@@ -546,6 +546,10 @@
       if (info.possible) {
         const tip = `Unlinked: ${info.possible.path} is a report file in this lane with this finding ID in its path. The ledger does not link it.`;
         html += `<a class="possible-report" href="${esc(ctx.hrefFor({program, lane, section: 'reports', report: info.possible.id ?? info.possible.path}))}" data-tip="${esc(tip)}" aria-label="Possible report, unlinked: ${esc(info.possible.path)}"><i class="fa fa-question-circle-o" aria-hidden="true"></i>Possible report</a>`;
+      }
+      if (info.evidence) {
+        const tip = `Generated evidence file for this finding: ${info.evidence.path}. The ledger links it as evidence, not as the report.`;
+        html += `<a class="evidence-report" href="${esc(ctx.hrefFor({program, lane, section: 'reports', report: info.evidence.id ?? info.evidence.path}))}" data-tip="${esc(tip)}" aria-label="Evidence: ${esc(info.evidence.path)}"><i class="fa fa-file-text-o" aria-hidden="true"></i>Evidence</a>`;
       }
       meta.insertAdjacentHTML('beforeend', html);
     }

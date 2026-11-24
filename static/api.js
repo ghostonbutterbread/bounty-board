@@ -17,7 +17,7 @@ window.BoardAPI = (() => {
       const fields=data.capabilities.finding_fields;
       cap={enabled:true,method:'PATCH',url:'/api/finding',backend:'bbh',options:{}};
       if(fields.includes('severity')) cap.options.severity=['EXCEPTIONAL','CRITICAL','HIGH','MEDIUM','LOW','INFO','UNKNOWN'];
-      if(fields.includes('status')) cap.options.status=['raw','confirmed','dormant','novel','complete','archive'];
+      if(fields.includes('status')) cap.options.status=Array.isArray(data.capabilities.finding_options?.status) ? data.capabilities.finding_options.status.map(String) : ['raw','confirmed','active','pending-review','dormant','novel','complete','archive'];
       cap.textFields=[];
       if(fields.includes('class_name')) cap.textFields.push('class');
       if(fields.includes('severity_rationale')) cap.textFields.push('severity_rationale');

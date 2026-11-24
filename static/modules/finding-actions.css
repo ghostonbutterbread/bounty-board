@@ -1,21 +1,5 @@
 /* Finding actions: pickers, context menu, selection, drag and report markers.
    Redesign tokens only (see the header of style.css). Menus reuse .popover/.menu. */
-.pick-trigger{display:inline-flex;align-items:center;padding:0;margin:0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;border-radius:var(--radius-pill);min-height:0}
-.pick-trigger:hover>.sev,.pick-trigger:hover>.badge{box-shadow:0 0 0 1px currentColor}
-.pick-trigger:focus-visible{outline:none;box-shadow:var(--focus-ring)}
-.pick-trigger>.badge+.badge{margin-left:4px}
-.pill-popover{min-width:0;padding:8px}
-.pill-box{display:grid;gap:6px;max-width:320px}
-.pills .pill-row{display:flex;flex-wrap:wrap;gap:6px}
-.pills .menu-label{margin-top:6px}
-.pill{cursor:pointer;min-height:26px;padding:3px 11px;font-size:var(--text-sm);gap:5px}
-.pill.badge.outline{background:var(--surface)}
-.pill:hover:not(:disabled){box-shadow:0 0 0 1px currentColor}
-.pill[aria-checked="true"]{box-shadow:0 0 0 2px currentColor}
-.pill:focus-visible{outline:none;box-shadow:var(--focus-ring)}
-.pill:disabled{opacity:.55;cursor:not-allowed}
-.pill-note{margin:2px 0 0;max-width:300px;font-size:var(--text-xs)}
-.pill-note.warning{color:var(--warning)}
 .point-anchor{position:fixed;width:1px;height:1px;pointer-events:none}
 .context-menu .menu-label{white-space:normal;max-width:300px}
 .row-select{flex:none;margin:0;width:15px;height:15px;min-height:0;accent-color:var(--accent);cursor:pointer}
@@ -62,3 +46,4 @@ td.has-select>.row-select{position:absolute;left:12px;top:13px}
 .breakdown-row .label .placeholder-badge{flex:none}
 .has-selection-bar .toasts{bottom:calc(var(--space-4) + var(--selection-bar-offset,0px))}
 .has-selection-bar .page{padding-bottom:calc(var(--selection-bar-offset,0px) + var(--space-6))}
+.evidence-report{display:inline-flex;align-items:center;gap:4px;font-size:var(--text-xs);white-space:nowrap;color:var(--text-2);text-decoration:underline dotted}
