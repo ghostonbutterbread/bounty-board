@@ -407,5 +407,31 @@ class LiveEngineTests(unittest.TestCase):
         live.open(REL)
         self.assertEqual([e['kind'] for e in live.history_page(REL)], kinds, 'reopening does not duplicate history')
 
+    def test_retry_after_lost_save_response_merges_instead_of_conflicting(self):
+        head = self.live.open(REL)['revision']
+        first = self.live.save(REL, head, BASE.replace('intro', 'INTRO'), client='a')['revision']
+        typed = BASE.replace('intro', 'INTRO').replace('middle', 'MIDDLE')
+        self.live.save(REL, first, typed, client='a')  # the client never sees this response
+        retry = self.live.save(REL, first, typed.replace('closing', 'CLOSING'), client='a')
+        self.assertNotEqual(retry['status'], 'conflict')
+        self.assertEqual(self.report.read_text(), typed.replace('closing', 'CLOSING'))
+
+    def test_subscriber_is_told_about_a_change_seen_while_subscribing(self):
+        self.live.open(REL)
+        self.report.write_text(BASE.replace('intro', 'agent intro'))  # between the editor's fetch and its stream
+        events = self.live.subscribe(REL)
+        self.assertEqual(events.get(timeout=2)['type'], 'changed')
+
+    def test_recording_stores_its_text_even_if_another_report_just_dropped_it(self):
+        history = self.live.history
+        template = 'shared template\n'
+        history.put(template, 'web_bounty/alpha/web/reports/x.md', 'a')
+        # Report x's client moves on and drops the blob (under x's lock) right
+        # before report y records the same text (under y's lock).
+        history.release_client('web_bounty/alpha/web/reports/x.md', 'a', ())
+        history.record('web_bounty/alpha/web/reports/y.md', None, 'board', 'Board editor', 'b', text=template)
+        self.assertEqual(history.text('web_bounty/alpha/web/reports/y.md', revision_of(template)), template)
+        self.assertEqual(len(history.page('web_bounty/alpha/web/reports/y.md')), 1)
+
 if __name__ == '__main__':
     unittest.main()

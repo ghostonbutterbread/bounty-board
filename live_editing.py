@@ -325,9 +325,19 @@ class History:
                 self.db.execute('DELETE FROM bases WHERE key=? AND client=? AND sha=?', (key, client, sha))
                 self._drop_if_unused(sha)
 
-    def record(self, key, sha, kind, author, client=None, coalesce=False):
+    def record(self, key, sha, kind, author, client=None, coalesce=False, text=None):
+        """Add a history event. With ``text``, store it in the same locked step.
+
+        Blobs are shared by content across reports and another report's save
+        may drop an unused one at any time, so a caller must not store a text
+        in one step and reference it in a later one.
+        """
         now = time.time()
+        if text is not None:
+            sha = revision_of(text)
         with self.lock:
+            if text is not None:
+                self.db.execute('INSERT OR IGNORE INTO blobs VALUES (?,?,?)', (sha, text, now))
             last = self.db.execute('SELECT id, kind, client, created, sha FROM events WHERE key=? ORDER BY id DESC LIMIT 1',
                                    (key,)).fetchone()
             if (coalesce and last and last[1] == kind == 'board' and client and last[2] == client
@@ -489,16 +499,16 @@ class LiveReports:
             doc.raw, doc.editable, doc.reason = data, False, 'not_utf8'
             raise ReportUnavailable('not UTF-8') from exc
         first = doc.head is None
-        sha = self.history.put(text)
+        sha = revision_of(text)
         if first:
             # After a restart or eviction, only record what history lacks.
             last = self.history.last(doc.relative)
             if last is None:
-                self.history.record(doc.relative, sha, 'observed', 'File on disk')
+                self.history.record(doc.relative, sha, 'observed', 'File on disk', text=text)
             elif last != sha:
-                self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
+                self.history.record(doc.relative, sha, 'external', 'Changed outside the Board', text=text)
         elif sha != doc.head:
-            self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
+            self.history.record(doc.relative, sha, 'external', 'Changed outside the Board', text=text)
         changed = sha != doc.head and not first
         doc.raw, doc.text, doc.head, doc.crlf = data, text, sha, _crlf(data)
         doc.editable = bool(self.editable(doc.relative, text))
@@ -546,8 +556,8 @@ class LiveReports:
             finally:
                 os.close(dir_fd)
             previous = doc.text
-            sha = self.history.put(target)
-            self.history.record(doc.relative, sha, kind, author, client, coalesce=kind == 'board')
+            sha = revision_of(target)
+            self.history.record(doc.relative, sha, kind, author, client, coalesce=kind == 'board', text=target)
             doc.text, doc.head, doc.raw = target, sha, _encode(target, doc.crlf)
             self._refresh_identity(doc)
             if displaced is None:
@@ -560,7 +570,7 @@ class LiveReports:
                 # Bytes this server cannot merge: put them back untouched.
                 doc.text, doc.head = previous, revision_of(previous)
                 self._put_back(doc, displaced)
-            self.history.record(doc.relative, self.history.put(theirs), 'external', 'Changed outside the Board')
+            self.history.record(doc.relative, None, 'external', 'Changed outside the Board', text=theirs)
             merged, conflicted = merge3(previous, target, theirs, self.workdir)
             if conflicted:
                 # Nothing may leave the disk on a conflict: put the late
@@ -582,8 +592,8 @@ class LiveReports:
                 return merge3(previous, target, doc.text, self.workdir)
             finally:
                 os.close(dir_fd)
-            sha = self.history.put(theirs)
-            self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
+            sha = revision_of(theirs)
+            self.history.record(doc.relative, sha, 'external', 'Changed outside the Board', text=theirs)
             doc.text, doc.head, doc.raw, doc.crlf = theirs, sha, displaced, _crlf(displaced)
             self._refresh_identity(doc)
             if again is None:
@@ -593,7 +603,7 @@ class LiveReports:
                 later = _normalize(again.decode('utf-8'))
             except UnicodeDecodeError:
                 self._put_back(doc, again)
-            self.history.record(doc.relative, self.history.put(later), 'external', 'Changed outside the Board')
+            self.history.record(doc.relative, None, 'external', 'Changed outside the Board', text=later)
             combined, clash = merge3(previous, theirs, later, self.workdir)
             if clash:
                 combined = later  # keep the newest on disk; both are in history
@@ -633,8 +643,8 @@ class LiveReports:
             # Nothing was written; leave the bytes alone and stop editing.
             doc.raw, doc.editable, doc.reason, doc.identity = data, False, 'not_utf8', None
             raise NotEditable('not_utf8') from None
-        sha = self.history.put(text)
-        self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
+        sha = revision_of(text)
+        self.history.record(doc.relative, sha, 'external', 'Changed outside the Board', text=text)
         doc.raw, doc.text, doc.head, doc.crlf = data, text, sha, _crlf(data)
         self._refresh_identity(doc)
         self._broadcast(doc, {'type': 'changed', 'revision': sha, 'author': 'Changed outside the Board'})
@@ -677,10 +687,12 @@ class LiveReports:
             # The client may send any revision returned here back as a base.
             self.history.hand_out(relative, doc.head, client)
             if conflicted:
-                self.history.record(relative, sent, 'conflict_draft', author, client)
+                self.history.record(relative, sent, 'conflict_draft', author, client, text=content)
                 return {'status': 'conflict', 'revision': doc.head, 'content': target, 'sent_revision': sent}
-            # It has moved on from its older private bases.
-            self.history.release_client(relative, client, (doc.head, sent))
+            # It has moved on from its older private bases. Keep the base this
+            # save started from: if the response is lost, the client retries
+            # from it (with newer text). The next successful save releases it.
+            self.history.release_client(relative, client, (doc.head, sent, base))
             return {'status': 'saved' if doc.text == content else 'merged', 'revision': doc.head,
                     'content': doc.text, 'sent_revision': sent}
 
@@ -779,8 +791,7 @@ class LiveReports:
         self._broadcast(doc, {'type': 'sync_conflicts', 'copies': [self._copy_info(c) for c in doc.copies]})
 
     def _archive_copy(self, doc, name, text):
-        sha = self.history.put(text)
-        self.history.record(doc.relative, sha, 'sync_conflict', f'Syncthing conflict copy {name}')
+        self.history.record(doc.relative, None, 'sync_conflict', f'Syncthing conflict copy {name}', text=text)
 
     def _auto_resolve(self, doc, name):
         """Fold back a Board write that lost a Syncthing conflict.
@@ -859,14 +870,20 @@ class LiveReports:
         doc = self._doc(relative)
         subscriber = queue.Queue(SUBSCRIBER_QUEUE)
         with doc.lock:
+            # Listen first: an outside change noticed by this observation is
+            # then announced to the new subscriber instead of absorbed silently.
+            doc.subscribers.add(subscriber)
             try:
                 self._observe(doc)
                 if doc.missing or doc.reason == 'not_utf8':
                     raise ReportUnavailable('missing or not UTF-8')
             except ReportUnavailable:
+                doc.subscribers.discard(subscriber)
                 self._forget_unopened(doc)
                 raise
-            doc.subscribers.add(subscriber)
+            except BaseException:
+                doc.subscribers.discard(subscriber)
+                raise
             doc.touched = time.monotonic()
         return subscriber
 
