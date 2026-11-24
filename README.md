@@ -29,7 +29,7 @@ TOML files with top-level `root` and `port` are also accepted. Relative roots re
 The backend always binds `127.0.0.1` and has **no authentication or TLS**. To opt in to one exact Tailscale Serve HTTPS hostname, start the board with the canonical lowercase DNS name shown for this node in Tailscale, for example:
 
 ```sh
-python3 app.py --root "$HOME/Shared" --port 9001 --tailnet-host ghostonbread.taildb09a3.ts.net
+python3 app.py --root "$HOME/Shared" --port 9001 --tailnet-host board.example.ts.net
 # Only after reviewing existing Serve settings and tailnet access policy:
 tailscale serve status
 tailscale serve --bg --https=443 http://127.0.0.1:9001
