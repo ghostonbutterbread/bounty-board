@@ -675,10 +675,28 @@
   const discoveryIncomplete = () => state.data?.root_unavailable === true || state.data?.discovery_incomplete === true || (list(state.data?.warnings)||[]).some(w=>w==='root_unavailable'||w==='discovery_incomplete');
   // Every finding with its owning program and lane, for cross-program views.
   const findingEntries = ps => ps.flatMap(p=>(list(p.lanes)||[]).flatMap(l=>(list(l.findings)||[]).map(f=>({p,l,f}))));
+  // Lookup tables per report list (rebuilt when the list object changes): the
+  // first registered report owning a finding id, and the first report per path.
+  const reportLookups=new WeakMap();
+  const reportLookup = reports => {
+    let lookup=reportLookups.get(reports);
+    if(!lookup){
+      lookup={owner:new Map(),path:new Map()};
+      reports.forEach((r,i)=>{
+        if(r.id==null)return;
+        if(r.kind==='registered_report' && Array.isArray(r.owner_fids))for(const fid of r.owner_fids)if(!lookup.owner.has(String(fid)))lookup.owner.set(String(fid),i);
+        if(r.path!=null && !lookup.path.has(r.path))lookup.path.set(r.path,i);
+      });
+      reportLookups.set(reports,lookup);
+    }
+    return lookup;
+  };
   const reportFor = (lane, finding) => {
     const reports=list(lane?.reports);if(!reports || finding?.id==null)return null;
     const id=String(finding.id), path=typeof finding.report_path==='string' ? finding.report_path.replace(/^reports\//,'') : null;
-    return reports.find(r=>r.id!=null && ((Array.isArray(r.owner_fids) && r.owner_fids.map(String).includes(id) && r.kind==='registered_report') || (path && r.path===path))) || null;
+    const lookup=reportLookup(reports), a=lookup.owner.get(id), b=path ? lookup.path.get(path) : undefined;
+    const index=a===undefined ? b : b===undefined ? a : Math.min(a,b);
+    return index===undefined ? null : reports[index];
   };
   // Report id (its path) for a finding: from the loaded report index, else
   // derived from a relative reports/... report_path while the index is not

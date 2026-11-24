@@ -332,14 +332,17 @@ class SearchIndex:
         return 'partial' if self._warnings else 'ready'
 
     # ---- search ----------------------------------------------------------
-    def _activate(self, fresh_wait=0.0):
-        """Mark the index as in use and wake the refresher when it is stale.
+    def _activate(self, fresh_wait=0.0, keep_alive=True):
+        """Wake the refresher when the index is stale.
 
         A cold index gets a short grace period so the first request is useful.
-        With `fresh_wait`, a pass older than the refresh interval is redone
-        first (bounded wait), so a view opened after an idle period is current.
+        `keep_alive` (searches) keeps the refresher passing every `interval`
+        for the next minute. With `fresh_wait`, a pass older than the interval
+        is redone first (bounded wait): one on-demand pass per request, so a
+        polling view stays current without keeping the refresher busy.
         """
-        self._last_search = time.monotonic()
+        if keep_alive:
+            self._last_search = time.monotonic()
         snapshot = self._root_snapshot()
         if snapshot is None or snapshot[2] != self._instance:
             if self._instance is not None:
@@ -460,7 +463,7 @@ class SearchIndex:
         counts for programs and lanes each ignore their own filter.
         """
         started = time.perf_counter()
-        snapshot = self._activate(fresh_wait)
+        snapshot = self._activate(fresh_wait, keep_alive=False)
         now = time.time()
         since = now - within if within is not None else None
         terms = parse_terms(query)

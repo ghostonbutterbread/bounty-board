@@ -170,6 +170,20 @@ class IndexTests(Base):
         self.assertEqual(index.recent(fresh_wait=3)['items'][0]['path'], 'fresh.md')
         self.assertEqual(index.recent(fresh_wait=0)['items'][0]['path'], 'fresh.md')
 
+    def test_recent_requests_do_not_keep_the_refresher_busy(self):
+        index = make_index(self.root)
+        self.addCleanup(index.close)
+        index.interval = 0.1
+        index.recent()
+        self.assertEqual(index._last_search, 0.0, 'recent requests do not extend the active window')
+        time.sleep(0.4)
+        passes = index.passes
+        time.sleep(0.4)
+        self.assertEqual(index.passes, passes, 'idle refresher')
+        (self.root / 'binaries/initech/apk/reports/later.md').write_text('# Later\n')
+        self.assertEqual(index.recent()['items'][0]['path'], 'later.md', 'one on-demand pass')
+        self.assertEqual(index.passes, passes + 1)
+
     def test_unavailable_root(self):
         index = make_index(Path(self.tmp.name) / 'missing')
         self.addCleanup(index.close)
