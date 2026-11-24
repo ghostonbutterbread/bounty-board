@@ -53,7 +53,7 @@ test('taxonomy labels and coverage drill-down render from real API data', async 
     await page.keyboard.press('Escape');
     if (shots) await page.screenshot({path: path.join(shots, 'findings-taxonomy.png'), fullPage: true});
 
-    await page.getByRole('button', {name: 'Coverage', exact: true}).click();
+    await page.getByRole('link', {name: 'Coverage', exact: true}).click();
     const host = page.locator('#coverage-drilldown-host');
     await host.getByRole('heading', {name: 'Coverage drill-down'}).waitFor();
     const surfaces = await host.locator('[data-cd-surfaces]').innerText();

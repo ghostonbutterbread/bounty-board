@@ -78,15 +78,15 @@ test('portfolio filtering, ledger and unassessed inventory end to end', async ()
     await pickFilter(page,'statuses','raw');
     assert.equal(await page.getByText('Alpha finding',{exact:true}).count(),1);
     assert.equal(await page.getByText('Second alpha',{exact:true}).count(),0);
-    await page.getByRole('button',{name:'Coverage',exact:true}).click();
+    await page.getByRole('link',{name:'Coverage',exact:true}).click();
     assert.equal(await page.getByText('/<img src=x onerror=alert(1)>',{exact:true}).count(),1);
     assert.equal(await page.locator('#app img').count(),0);
     assert.match(await page.locator('#app').innerText(),/no_assessment/);
     await page.locator('#program-select').selectOption('web_bounty/beta');
-    await page.getByRole('button',{name:'Findings',exact:true}).click();
+    await page.getByRole('link',{name:'Findings',exact:true}).click();
     assert.equal(await page.getByText('Beta finding',{exact:true}).count(),1);
     assert.equal(await page.locator('[data-filter-chip]').count(),0,'filters reset when the program changes');
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     await page.getByLabel('Dashboard program').selectOption('');
     assert.equal(await stat('Finding records').innerText(),'3');
     fs.unlinkSync(path.join(root,'web_bounty/beta/web/ledgers/ledger.json'));

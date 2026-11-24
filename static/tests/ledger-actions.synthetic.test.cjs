@@ -34,7 +34,7 @@ async function withBoard(mode,run){
     fs.rmSync(base,{recursive:true,force:true});
   }
 }
-const openAlpha=async page=>{await page.getByRole('button',{name:'Programs',exact:true}).click();await page.locator('#program-select').selectOption('web_bounty/alpha');await page.locator('tr[data-finding-id]').first().waitFor();};
+const openAlpha=async page=>{await page.getByRole('link',{name:'Programs',exact:true}).click();await page.locator('#program-select').selectOption('web_bounty/alpha');await page.locator('tr[data-finding-id]').first().waitFor();};
 const order=page=>page.locator('tbody tr[data-finding-id]').evaluateAll(rows=>rows.map(r=>r.dataset.findingId));
 const snap=async(page,name)=>{if(shots){fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,name)});}};
 
@@ -200,7 +200,7 @@ test('non-drag Move to MapStore and dashboard class review at scale',{timeout:60
   assert.equal(ledger('alpha').find(f=>f.fid==='D03').status,'raw');
   await dialog.getByRole('button',{name:'Close'}).click();
   // Dashboard class breakdown: xss spans two programs.
-  await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+  await page.getByRole('link',{name:'Dashboard',exact:true}).click();
   // Bulk reclassify lives in the expanded class row of the dashboard breakdown.
   await page.locator('.breakdown-row[data-class-name="xss"]').click();
   await page.getByRole('button',{name:'Review and reclassify xss findings'}).click();
@@ -218,7 +218,7 @@ test('non-drag Move to MapStore and dashboard class review at scale',{timeout:60
   await review.getByRole('button',{name:'Close'}).click();
   await page.locator('.breakdown-row[data-class-name="stored-xss"]').waitFor();
   // Back-to-back inline edit in the same lane after module writes: no false conflict.
-  await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();
   await page.getByLabel('severity for Alpha high').selectOption('MEDIUM');
   await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="D05"] [data-metadata=severity]')?.value==='MEDIUM' && !document.querySelector('tr[data-finding-id="D05"] [data-metadata=severity]').disabled);
   await page.getByLabel('severity for Alpha critical').selectOption('HIGH');
@@ -286,7 +286,7 @@ test('without a writer every action stays visibly disabled',{timeout:60000},()=>
   await page.getByRole('button',{name:'Add finding'}).click();
   await page.getByText(/Adding findings is unavailable/).waitFor();
   await page.keyboard.press('Escape');
-  await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+  await page.getByRole('link',{name:'Dashboard',exact:true}).click();
   if(await page.locator('.breakdown-row[data-class-name="xss"]').count())await page.locator('.breakdown-row[data-class-name="xss"]').click();
   await page.locator('.drill').first().waitFor();
   assert.equal(await page.getByRole('button',{name:/Review and reclassify/}).count(),0);

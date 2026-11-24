@@ -19,7 +19,7 @@ async function fixture(run) {
     await run({browser,base,report});
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 }
-async function open(page,base){page.setDefaultTimeout(8000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+async function open(page,base){page.setDefaultTimeout(8000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
 async function edit(page,text){await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(text);}
 
 test('published receipt is presented as point-in-time Markdown save', {timeout:30000},()=>fixture(async({browser,base,report})=>{
@@ -37,7 +37,7 @@ test('lost acknowledgment retains exact request and newer edit until original is
   await page.getByText(/Save outcome unconfirmed/).waitFor();await edit(page,'newer\n');
   await page.unroute('**/api/collaboration?*',lose);
   page.on('request',r=>{if(r.method()==='POST' && r.url().includes('/api/collaboration?'))posts.push(r.postDataJSON());});
-  await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.reload();await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.getByRole('button',{name:'Inspect original save'}).waitFor();
   assert.equal(posts.length,1);assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'newer\n');
   const inspection=page.waitForResponse(r=>r.url().includes('/api/collaboration/recovery?')&&r.status()===200);
@@ -126,7 +126,7 @@ test('not-observed recovery permits only exact original retry before newer edit'
 test('a saved notice is invalidated when reload observes a later external change', {timeout:30000},()=>fixture(async({browser,base,report})=>{
   const page=await browser.newPage();await open(page,base);await edit(page,'saved earlier\n');await page.getByText(/Markdown file saved/).waitFor();
   fs.writeFileSync(report,'later external\n');await page.reload();
-  await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue()==='later external\n');
   await page.waitForTimeout(300);
   assert.doesNotMatch(await page.locator('#report-status').innerText(),/Markdown file saved/);
@@ -140,7 +140,7 @@ test('backend editability disables collaborative editor and source writes only f
   await page.route('**/api/lane-reports?*',async route=>{const response=await route.fetch(),body=await response.json();classify(body.reports);await route.fulfill({response,json:body});});
   await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=!route.request().url().includes('example.md');body.collaboration_editable=body.editable;await route.fulfill({response,json:body});});
   page.on('request',req=>{if(req.method()==='POST'&&req.url().includes('/api/collaboration?'))posts++;});
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.getByText(/read.only/i).waitFor({timeout:3000});
   assert.match(await page.locator('#app').innerText(),/Generated navigation/);
   assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror')?.CodeMirror.getOption('readOnly') ?? document.querySelector('#report-source')?.readOnly),true);

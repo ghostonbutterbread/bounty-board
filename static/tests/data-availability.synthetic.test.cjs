@@ -77,13 +77,13 @@ test('many lane warnings leave the portfolio visible and provide bounded availab
     assert.equal(await page.locator('.summary-line > div').filter({hasText:'Reports'}).locator('strong').innerText(),'Unknown');
     fixture.programs[1].lanes[0].reports=[];
     await page.getByRole('button',{name:'Refresh'}).click();
-    await page.getByRole('button',{name:'Reports',exact:true}).click();
+    await page.getByRole('link',{name:'Reports',exact:true}).click();
     assert.match(await page.locator('#app').innerText(),/report list is incomplete/i);
     assert.doesNotMatch(await page.locator('#app').innerText(),/No reports in this lane/);
     await laneSelector.selectOption('empty');
     assert.match(await workspaceSummary.innerText(),/No lane warnings reported/);
     assert.equal(await page.locator('.summary-line > div').filter({hasText:'Reports'}).locator('strong').innerText(),'0');
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     await page.getByLabel('Dashboard program').selectOption('');
     await page.getByRole('region',{name:'Data availability'}).locator('summary').click();
     assert.match(await page.getByRole('region',{name:'Data availability'}).innerText(),/Global warning: global_<svg onload=alert\(1\)>/);

@@ -42,7 +42,7 @@ async function setup(t){
 async function open(page,base,report){
   await page.goto(base);
   await page.getByRole('button',{name:'Open workspace'}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   if(report)await page.locator('#report-select').selectOption(report);
   await page.locator('#live-report-host .live-editor .CodeMirror').waitFor({timeout:15000});
   await page.locator('[data-live-status]').filter({hasText:/^(Saved|Read-only)$/}).waitFor({timeout:15000});
@@ -82,7 +82,7 @@ test('two browser contexts see each other edits; session survives re-render; his
   await waitValue(a,v=>v.includes('Closing line. From B.') && v.includes('From A.'),'A sees B');
   await waitFile(env,text=>text.includes('From A.') && text.includes('From B.'),'file has both');
   // An app re-render must move the same session node, not recreate it.
-  await a.getByRole('button',{name:'Reports',exact:true}).click();
+  await a.getByRole('link',{name:'Reports',exact:true}).click();
   assert.equal(await a.evaluate(()=>document.querySelector('[data-live-session]')===window.__session && window.__session.isConnected),true);
   // A re-render while typing keeps focus and cursor in the editor.
   await a.evaluate(()=>window.registerBoardModule({name:'test-probe',afterRender(ctx){window.__render=ctx.render;}}));
@@ -193,7 +193,7 @@ test('offline edits survive a closed tab and merge on reopen',{timeout:90000},as
   const b=await context.newPage();
   await b.goto(env.base);
   await b.getByRole('button',{name:'Open workspace'}).click();
-  await b.getByRole('button',{name:'Reports',exact:true}).click();
+  await b.getByRole('link',{name:'Reports',exact:true}).click();
   await b.getByText(/Recovered unsaved text from this browser/).waitFor({timeout:20000});
   const both=v=>v.includes('Closing line. Typed offline.') && v.includes('Intro line. Agent while offline.');
   await waitFile(env,both,'backup merged into file');

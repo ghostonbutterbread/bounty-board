@@ -29,7 +29,7 @@ test('real report policy allows owned and unregistered files but rejects generat
     for(const name of ['registered.md','unregistered.md','evidence.md'])assert.equal(entries[name].editable,true,name);
     assert.equal(entries['navigation.md'].editable,false);
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
-    const page=await browser.newPage();page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+    const page=await browser.newPage();page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
     for(const name of ['registered.md','unregistered.md','evidence.md']){
       await page.locator('#report-select').selectOption(name);await page.getByText(/Shared draft ready/).waitFor();
       await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(`saved ${name}\n`);
@@ -48,7 +48,7 @@ test('real report policy allows owned and unregistered files but rejects generat
     await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('unsent local draft\n');
     await page.getByText(/Save outcome unconfirmed/).waitFor();
     fs.writeFileSync(path.join(reports,'unregistered.md'),contents['navigation.md']);
-    await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.locator('#report-select').selectOption('unregistered.md');
+    await page.reload();await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.locator('#report-select').selectOption('unregistered.md');
     await page.getByText(/read.only/i).waitFor();assert.equal(await page.locator('#report-source').inputValue(),'unsent local draft\n');assert.equal(await page.locator('#report-source').getAttribute('readonly'),'');
     assert.equal(fs.readFileSync(path.join(reports,'unregistered.md'),'utf8'),contents['navigation.md']);
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}

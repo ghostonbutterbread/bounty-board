@@ -27,7 +27,7 @@ async function fixture(run, enabled=true) {
     await run({browser,base:`http://127.0.0.1:${port}`,report,initial,restart:async on=>{await stop();await start(on);}});
   } finally {if(browser)await browser.close();await stop();fs.rmSync(tmp,{recursive:true,force:true});}
 }
-async function open(page,base){page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+async function open(page,base){page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
 async function edit(page,text){await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(text);}
 async function get(page,url){return page.evaluate(async url=>{const r=await fetch(url);return {status:r.status,body:await r.json()};},url);}
 
@@ -198,7 +198,7 @@ test('default disabled keeps shared edits out of synthetic Markdown', {timeout:5
   assert.doesNotMatch(await page.locator('#report-status').innerText(),/Markdown file saved/);
   const navigation=path.join(path.dirname(report),'navigation.md');
   fs.writeFileSync(navigation,'<!-- generated: bounty-core-report-navigation -->\n# Navigation\n');
-  await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.reload();await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.locator('#report-select').selectOption('navigation.md');await page.getByText(/read.only/i).waitFor();
   assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror')?.CodeMirror.getOption('readOnly') ?? document.querySelector('#report-source')?.readOnly),true);
   assert.equal(await page.locator('.editor-toolbar').count(),0);

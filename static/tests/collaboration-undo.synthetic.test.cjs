@@ -22,7 +22,7 @@ async function fixture(run) {
     await run({browser,base,report});
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 }
-async function open(page,base){page.setDefaultTimeout(8000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+async function open(page,base){page.setDefaultTimeout(8000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
 const value=page=>page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue());
 
 test('undo with no local edits cannot revert a remote edit', {timeout:30000},()=>fixture(async({browser,base})=>{

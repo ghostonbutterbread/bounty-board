@@ -13,7 +13,7 @@ async function fixture(run){
  async function stop(){if(proc && proc.exitCode===null && proc.signalCode===null){const p=once(proc,'exit');proc.kill();await p;}}
  try{
   await start(1);browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
-  const page=await browser.newPage();page.setDefaultTimeout(8000);await page.goto(`http://127.0.0.1:${port}`);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();
+  const page=await browser.newPage();page.setDefaultTimeout(8000);await page.goto(`http://127.0.0.1:${port}`);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();
   await run({page,report,store,restart:async limit=>{await stop();await start(limit);}});
  }finally{if(browser)await browser.close();await stop();fs.rmSync(tmp,{recursive:true,force:true});}
 }

@@ -17,7 +17,7 @@ async function fixture(program,run){
     await run({browser,base,report,root});
   } finally {if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 }
-async function open(page,base){page.setDefaultTimeout(7000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();}
+async function open(page,base){page.setDefaultTimeout(7000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();}
 
 test('missing source: path-scoped local and pending recovery stays durable without posting', {timeout:60000},()=>fixture('example',async({browser,base,report})=>{
   const context=await browser.newContext(),source=await context.newPage();await open(source,base);await source.getByText(/Shared draft ready/).waitFor();
@@ -73,8 +73,8 @@ test('recovery paths remain copyable but never follow a replaced root or an in-f
     await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.equal(await input.inputValue(),'');assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);assert.equal(await page.evaluate(()=>window.pwned),undefined);
     release();await page.getByRole('button',{name:'Find saved shared draft'}).click();assert.equal(calls.length,1,'blank new-root lookup must not send the old path or any request');
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);
-    await page.getByRole('button',{name:'Programs',exact:true}).click();await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);
+    await page.getByRole('link',{name:'Programs',exact:true}).click();await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);assert.equal(await page.getByLabel('Retained recovery path').inputValue(),text);
     await page.getByRole('button',{name:'Discard retained path'}).click();assert.equal(await page.getByLabel('Retained recovery path').count(),0);
   } finally {release();await context.close();}
 }));

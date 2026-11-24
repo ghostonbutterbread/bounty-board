@@ -37,7 +37,7 @@ test('65 real browser publications with polls leave the next editor save able to
       return {max,content:state.content};
     });
     assert.ok(result.max<=64);assert.equal(result.content,'version 64\n');assert.equal(fs.readFileSync(report,'utf8'),'version 64\n');
-    await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();
+    await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();
     // A restart resets the server's scan cursor without fabricating retained operations.
     let done=once(proc,'exit');proc.kill();await done;proc=start(Number(new URL(base).port));await once(proc.stdout,'data');
     let release,arrive,reject;const gate=new Promise(r=>release=r),backlogged=new Promise((r,j)=>{arrive=r;reject=j});const posts=[],responses=[];

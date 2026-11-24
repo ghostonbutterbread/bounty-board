@@ -50,6 +50,10 @@ LANES = {
         {'apk-notes.md': ('Initech APK notes', 3 * DAY)}),
 }
 
+# EXTRA_REPORTS=N adds N plain reports (1 day old plus N minutes) for paging tests.
+for i in range(int(os.environ.get('EXTRA_REPORTS') or 0)):
+    LANES[('binaries', 'initech', 'apk')][1][f'bulk/r{i:03}.md'] = (f'Bulk report {i:03}', DAY + i * 60)
+
 for (family, program, lane_name), (findings, reports) in LANES.items():
     lane = root / family / program / lane_name
     (lane / 'ledgers').mkdir(parents=True)

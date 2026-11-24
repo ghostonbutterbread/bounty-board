@@ -39,10 +39,10 @@ test('focused filter is retained until the completed data is explicitly applied'
   assert.equal(data.capabilities.collaboration,false);
   await held(root);
   await page.getByRole('button',{name:'Open workspace'}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.getByText('Reports are loading.',{exact:true}).waitFor();
   assert.equal(await page.locator('#report-select, #report-source, .CodeMirror').count(),0);
-  await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+  await page.getByRole('link',{name:'Dashboard',exact:true}).click();
   await page.locator('#dashboard-program').selectOption('web_bounty/alpha');
   await page.locator('#dashboard-program').focus();
   fs.writeFileSync(path.join(root,'release'),'release');
@@ -72,7 +72,7 @@ test('superseded full response does not disturb an active report draft', async()
   await page.goto(url);await held(root);
   await page.locator('#refresh').click();
   await page.getByRole('button',{name:'Open workspace'}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   const input=page.locator('.CodeMirror textarea');await input.waitFor();await input.focus();
   await page.keyboard.press('Control+A');await page.keyboard.insertText('Unsaved synthetic draft');
   const oldResponse=page.waitForResponse(r=>r.url().includes('phase=complete'));
@@ -91,7 +91,7 @@ test('busy stale scan permits selected report drafting and retry guidance', asyn
   assert.equal((await busy).status(),503);
   await page.getByText(/Portfolio scan is busy.*Load entire portfolio/).waitFor();
   await page.getByRole('button',{name:'Open workspace'}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   const input=page.locator('.CodeMirror textarea');await input.waitFor();await input.focus();
   await page.keyboard.press('Control+A');await page.keyboard.insertText('Draft while old scan is held');
   assert.equal(fs.existsSync(path.join(root,'release')),false);
@@ -187,7 +187,7 @@ for (const section of ['MapStore','Gadgets']) test(`partial ${section} refuses a
   const summary=page.waitForResponse(r=>r.request().headers()['x-bounty-board-phase']==='summary');
   await page.goto(url);const token=(await (await summary).json()).root_instance;await held(root);
   await page.getByRole('button',{name:'Open workspace'}).click();
-  await page.getByRole('button',{name:section,exact:true}).click();
+  await page.getByRole('link',{name:section,exact:true}).click();
   await page.getByText('Old observation').waitFor();
   const good=page.waitForResponse(r=>r.url().includes('/api/map-observation?'));
   await page.getByRole('button',{name:'Open observation'}).click();
@@ -228,7 +228,7 @@ test('navigation invalidates an automatic apply check and it retries automatical
     await page.goto(url);await held(root);armed=true;fs.writeFileSync(path.join(root,'release'),'release');await ready;
     await page.getByRole('button',{name:'Open workspace'}).click();
     const response=page.waitForResponse(r=>r.url().includes('phase=identity'));release();await response;
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(e=>e.textContent.includes('Report records') && e.querySelector('strong')?.textContent==='1'));
     assert.ok(checks>=2,'the invalidated check must be repeated before applying');
     assert.equal(await page.getByRole('button',{name:'Apply loaded reports'}).count(),0);

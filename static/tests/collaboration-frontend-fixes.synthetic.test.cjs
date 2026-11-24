@@ -21,7 +21,7 @@ async function fixture(run,autosave=false) {
   finally {try {if(browser)await withTimeout(browser.close(),5000,'browser close');} finally {if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill('SIGKILL');await withTimeout(done,5000,'server exit');}fs.rmSync(tmp,{recursive:true,force:true});}}
 }
 async function withTimeout(promise,ms,phase){let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(`Timed out: ${phase}`)),ms);})]);}finally{clearTimeout(timer);}}
-async function open(page,base){page.setDefaultTimeout(10000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+async function open(page,base){page.setDefaultTimeout(10000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
 
 for(const failure of ['quota','cas','silent']) test(`recovery ${failure} failure keeps copyable text and never sends an undurable request`, {timeout:60000},()=>fixture(async({browser,base})=>{
   const context=await browser.newContext(),source=await context.newPage();await open(source,base);
@@ -223,7 +223,7 @@ test('autosave stale resolution inspects and explicitly continues without losing
   } finally {release();}
   assert.equal((await staleResponse).status(),409);await page.getByText(/Save outcome unconfirmed/).waitFor();assert.equal(posts.length,1);
   const original=posts[0];assert.equal(original.base,head.revision);assert.equal(original.conflict_id,conflict.conflict_id);
-  await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.reload();await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.getByRole('button',{name:'Inspect original save'}).waitFor();assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'later local\n');
   await page.getByRole('button',{name:'Inspect original save'}).click();await page.getByRole('button',{name:'Retry exact original request'}).waitFor();
   const retry=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/api/collaboration?'));
@@ -363,7 +363,7 @@ test('multiple saved drafts and live tab survive navigation and lockless copy fa
   await edit(a,'orphan one');await edit(b,'orphan two');await edit(live,'active draft');
   const saved=await live.evaluate(()=>Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('bounty-board-report-draft-v2:'))));
   await a.goto(base);await b.close();
-  await a.getByRole('button',{name:'Programs',exact:true}).click();await a.getByRole('button',{name:'Reports',exact:true}).click();await a.getByText(/Shared draft ready/).waitFor();
+  await a.getByRole('link',{name:'Programs',exact:true}).click();await a.getByRole('link',{name:'Reports',exact:true}).click();await a.getByText(/Shared draft ready/).waitFor();
   await a.getByRole('button',{name:'Find saved drafts'}).click();
   for(const text of ['orphan one','orphan two','active draft'])await a.locator('[data-recovery-candidate]').filter({hasText:text}).waitFor();
   const liveCard=a.locator('[data-recovery-candidate]').filter({hasText:'active draft'});
@@ -395,7 +395,7 @@ test('a cloned reload cannot claim a live lockless namespace', {timeout:60000},(
   const inherited=await a.evaluate(()=>window.name);
   const b=await context.newPage();await b.addInitScript(name=>{window.name=name;const original=performance.getEntriesByType.bind(performance);performance.getEntriesByType=type=>type==='navigation'?[{type:'reload'}]:original(type);},inherited);
   await b.route('**/api/collaboration?*',route=>route.request().method()==='POST'?route.abort():route.continue());
-  await b.goto(base);await b.getByRole('button',{name:'Programs',exact:true}).click();await b.getByRole('button',{name:'Reports',exact:true}).click();await b.locator('.CodeMirror').waitFor();
+  await b.goto(base);await b.getByRole('link',{name:'Programs',exact:true}).click();await b.getByRole('link',{name:'Reports',exact:true}).click();await b.locator('.CodeMirror').waitFor();
   assert.notEqual(await b.evaluate(()=>window.name),inherited,'live lockless namespace must not be reused by a cloned reload');
   assert.equal(await a.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'live lockless');
 }));

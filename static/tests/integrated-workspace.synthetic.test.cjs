@@ -155,7 +155,7 @@ test('drag onto Gadgets uses the redesign drop target; dashboard class tools',{t
   await dialog.getByRole('button',{name:'Close'}).click();
   assert.deepEqual(env.calls().filter(c=>!c.includes('--help')),[],'opening the preview writes nothing');
   // Dashboard: category toggle and bulk reclassify live in the class breakdown.
-  await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+  await page.getByRole('link',{name:'Dashboard',exact:true}).click();
   await page.locator('.breakdown-row[data-class-name="xss"]').click();
   await page.getByRole('button',{name:'Review and reclassify xss findings'}).waitFor();
   await page.getByRole('button',{name:'By category',exact:true}).click();

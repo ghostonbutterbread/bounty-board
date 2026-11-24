@@ -18,7 +18,7 @@ test('same origin separates drafts when backend root changes and restores them o
     await start(roots[0]);browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome'});
     const page=await browser.newPage();page.setDefaultTimeout(4000);page.on('dialog',d=>d.accept());
     const base=`http://127.0.0.1:${port}`;
-    async function open(){await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();}
+    async function open(){await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();}
     await page.goto(base);await open();await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('Root A draft');
     await stop();await start(roots[1]);await page.getByRole('button',{name:'Refresh'}).click();await page.locator('.CodeMirror').waitFor();
     assert.match(await page.locator('.CodeMirror').innerText(),/Identical source/);
@@ -41,7 +41,7 @@ test('a delayed storage event cannot cause a stale tab to overwrite another draf
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome'});const context=await browser.newContext();
     const a=await context.newPage(), b=await context.newPage();for(const p of [a,b]){p.setDefaultTimeout(4000);p.on('dialog',d=>d.accept());}
     await b.addInitScript(()=>window.addEventListener('storage',e=>e.stopImmediatePropagation()));
-    async function open(p){await p.goto(base);await p.getByRole('button',{name:'Programs',exact:true}).click();await p.getByRole('button',{name:'Reports',exact:true}).click();await p.locator('.CodeMirror').waitFor();}
+    async function open(p){await p.goto(base);await p.getByRole('link',{name:'Programs',exact:true}).click();await p.getByRole('link',{name:'Reports',exact:true}).click();await p.locator('.CodeMirror').waitFor();}
     await open(a);await open(b);
     await a.locator('.CodeMirror textarea').focus();await a.keyboard.press('Control+A');await a.keyboard.insertText('Draft from A');
     await b.locator('.CodeMirror textarea').focus();await b.keyboard.press('Control+A');await b.keyboard.insertText('Draft from B');
@@ -73,13 +73,13 @@ test('missing identity keeps legacy draft untouched and does not persist an unsc
     page.on('dialog',d=>d.accept());
     await page.addInitScript(key=>localStorage.setItem(key,'legacy retained'),legacy);
     await page.route('**/api/data',async route=>{const response=await route.fetch();const data=await response.json();delete data.root_identity;await route.fulfill({json:data});});
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();
     assert.match(await page.locator('.CodeMirror').innerText(),/Source/);
     await page.locator('.CodeMirror textarea').focus();await page.keyboard.insertText(' local edit');
     assert.match(await page.locator('#report-status').innerText(),/identity unavailable/i);
     assert.equal(await page.evaluate(key=>localStorage.getItem(key),legacy),'legacy retained');
     assert.equal(await page.evaluate(()=>Object.keys(localStorage).filter(k=>k.startsWith('bounty-board-report-draft-v2:')).length),0);
-    await page.unroute('**/api/data');await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();
+    await page.unroute('**/api/data');await page.reload();await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();
     assert.match(await page.locator('.CodeMirror').innerText(),/Source/);
     await page.locator('.CodeMirror textarea').focus();await page.keyboard.insertText(' new scoped edit');
     assert.equal(await page.evaluate(key=>localStorage.getItem(key),legacy),'legacy retained');

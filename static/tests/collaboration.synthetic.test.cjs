@@ -19,7 +19,7 @@ test('two browsers share synthetic edits and retain conflicts across restart', {
   try {
     const base=await start(); browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN || '/usr/bin/google-chrome'});
     const a=await browser.newPage(), b=await browser.newPage();
-    async function open(page){page.setDefaultTimeout(15000); await page.goto(base,{waitUntil:'domcontentloaded'});await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();await page.getByText(/Shared draft ready/).waitFor();}
+    async function open(page){page.setDefaultTimeout(15000); await page.goto(base,{waitUntil:'domcontentloaded'});await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();await page.getByText(/Shared draft ready/).waitFor();}
     await Promise.all([open(a),open(b)]);
     async function edit(page,text){await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(text);}
     await edit(a,'ONE\ntwo\nthree\n');
@@ -54,7 +54,7 @@ test('two browsers share synthetic edits and retain conflicts across restart', {
     fs.writeFileSync(report,'one\ntwo\nEXTERNAL\n');
     await a.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror?.getValue()==='B edit\ntwo\nEXTERNAL\n');
     const port=Number(new URL(base).port); await stop(); await start(port);
-    await a.reload({waitUntil:'domcontentloaded'}); await a.getByRole('button',{name:'Programs',exact:true}).click();await a.getByRole('button',{name:'Reports',exact:true}).click();
+    await a.reload({waitUntil:'domcontentloaded'}); await a.getByRole('link',{name:'Programs',exact:true}).click();await a.getByRole('link',{name:'Reports',exact:true}).click();
     await a.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror?.getValue()==='B edit\ntwo\nEXTERNAL\n');
     await a.getByText('Shared history and conflicts').click();
     await a.getByText('client:conflict').waitFor();

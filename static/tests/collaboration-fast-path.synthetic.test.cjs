@@ -32,7 +32,7 @@ test(`${mode}: selected collaborative report works while unrelated ${source} is 
     async function open(page){
       if(page!==a)await page.goto(base);
       await page.getByRole('button',{name:'Open workspace'}).click();
-      await page.getByRole('button',{name:'Reports',exact:true}).click();
+      await page.getByRole('link',{name:'Reports',exact:true}).click();
       await page.getByText(/Shared draft ready/).waitFor({timeout:10000});
     }
     await open(a);await open(b);
@@ -98,7 +98,7 @@ test('collaborative editor refuses a non-authoritative partial report body',{tim
       localStorage.setItem(`bounty-board-report-draft-v2:${key}:${id}`,JSON.stringify({version:1,text:'retained local draft',original:'# synthetic\n',revision:null,hasDraft:true}));
     },data.root_identity);
     await page.getByRole('button',{name:'Open workspace'}).click();
-    await page.getByRole('button',{name:'Reports',exact:true}).click();
+    await page.getByRole('link',{name:'Reports',exact:true}).click();
     await page.getByText(/Your retained draft is read-only/).waitFor({timeout:8000});
     assert.equal(await page.locator('#report-source').inputValue(),'retained local draft');
     assert.equal(await page.locator('#report-source').getAttribute('readonly'),'');

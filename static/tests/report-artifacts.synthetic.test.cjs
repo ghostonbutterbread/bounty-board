@@ -32,7 +32,7 @@ async function withBoard(mode,fn){
 async function openReport(page,base,report){
   await page.goto(base);
   await page.getByRole('button',{name:'Open workspace'}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.locator('#report-select').selectOption(report);
   await page.locator(`#report-artifacts-host[data-path="${report}"] .artifact-row`).first().waitFor({timeout:10000});
 }

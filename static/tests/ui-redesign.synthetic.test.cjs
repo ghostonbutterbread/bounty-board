@@ -61,7 +61,7 @@ test('dashboard breakdown lists findings by program and opens the finding; histo
   await page.goForward();
   await page.locator('tr[data-finding-id="AC-102"]').waitFor();
   // A report link in a drill-down opens that exact report.
-  await page.getByRole('button', {name: 'Dashboard', exact: true}).click();
+  await page.getByRole('link', {name: 'Dashboard', exact: true}).click();
   await page.locator('[data-breakdown="class:ssrf"]').click();
   await page.locator('.drill').getByRole('link', {name: /Report/}).click();
   await page.locator('.CodeMirror').waitFor();
@@ -99,7 +99,7 @@ test('not-submitted filter, program search and explicit workspace target', {time
   await page.getByText('Exported activity accepts arbitrary deep link URL into WebView').waitFor();
   assert.equal(await page.locator('#program-select').inputValue(), 'binaries/initech-mobile');
   assert.equal(await page.locator('.context-note').count(), 0, 'an explicit choice is not labelled as a default');
-  await page.getByRole('button', {name: 'Dashboard', exact: true}).click();
+  await page.getByRole('link', {name: 'Dashboard', exact: true}).click();
   assert.match(await page.locator('.target-note').innerText(), /initech-mobile/);
   assert.match(await page.locator('.target-note').innerText(), /Current selection|Last used/);
   assert.equal(await page.locator('#recent-programs [data-recent-program]').count(), 1);
@@ -176,7 +176,7 @@ test('theme menu is keyboard operable and persists', {timeout: 60000}, async () 
   assert.equal(await page.getByRole('button', {name: 'Expand sidebar'}).getAttribute('aria-expanded'), 'false');
   await page.reload();
   assert.equal(await page.locator('#shell.sidebar-collapsed').count(), 1);
-  await page.getByRole('button', {name: 'Programs', exact: true}).click();
+  await page.getByRole('link', {name: 'Programs', exact: true}).click();
   await page.locator('#program-select').waitFor();
   await page.getByRole('button', {name: 'Expand sidebar'}).click();
   assert.equal(await page.locator('#shell.sidebar-collapsed').count(), 0);
@@ -186,7 +186,7 @@ test('tablet width keeps navigation usable without horizontal overflow', {timeou
   await page.setViewportSize({width: 820, height: 1000});
   await ready(page, url);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-  await page.getByRole('button', {name: 'Programs', exact: true}).click();
+  await page.getByRole('link', {name: 'Programs', exact: true}).click();
   await page.locator('tr[data-finding-id]').first().waitFor();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
 }));

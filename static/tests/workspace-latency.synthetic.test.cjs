@@ -35,9 +35,9 @@ for (const source of ['map_entries','coverage']) test(`selected lane works while
     await page.getByRole('button',{name:'Open workspace'}).click();
     await page.getByText('alpha finding',{exact:true}).waitFor({timeout:5000});
     assert.match(await page.locator('.summary-line').innerText(),/1\s*Assessment questions/);
-    await page.getByRole('button',{name:'MapStore',exact:true}).click();
+    await page.getByRole('link',{name:'MapStore',exact:true}).click();
     await page.getByText('alpha map',{exact:true}).waitFor({timeout:5000});
-    await page.getByRole('button',{name:'Gadgets',exact:true}).click();
+    await page.getByRole('link',{name:'Gadgets',exact:true}).click();
     await page.getByText('alpha map',{exact:true}).waitFor({timeout:5000});
     assert.equal(fs.existsSync(path.join(root,'release')),false);
     const fullDeadline=Date.now()+5000;
@@ -45,7 +45,7 @@ for (const source of ['map_entries','coverage']) test(`selected lane works while
     fs.writeFileSync(path.join(root,'release'),'released');
     await page.waitForFunction(()=>document.querySelector('button') && (![...document.querySelectorAll('button')].some(b=>b.textContent==='Load entire portfolio' && !b.parentElement.hidden) || [...document.querySelectorAll('button')].some(b=>b.textContent==='Apply loaded reports')),null,{timeout:10000});
     if(await page.getByRole('button',{name:'Apply loaded reports'}).isVisible())await page.getByRole('button',{name:'Apply loaded reports'}).click();
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(e=>e.textContent.includes('Finding records') && e.querySelector('strong')?.textContent==='2'),null,{timeout:5000});
   } finally {
     if(releaseAlpha)releaseAlpha();

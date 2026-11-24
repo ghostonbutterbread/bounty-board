@@ -28,7 +28,7 @@ async function fixture(run, enabled=true) {
     await run({browser,base:`http://127.0.0.1:${port}`,report,initial,restart:async on=>{await stop();await start(on);}});
   } finally {if(browser)await browser.close();await stop();fs.rmSync(tmp,{recursive:true,force:true});}
 }
-async function open(page,base){page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
+async function open(page,base){page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();}
 async function edit(page,text){await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(text);}
 async function get(page,url){return page.evaluate(async url=>{const r=await fetch(url);return {status:r.status,body:await r.json()};},url);}
 test('lost store-only acknowledgement recovers merged content', {timeout:60000},()=>fixture(async({browser,base,report,initial})=>{
@@ -44,7 +44,7 @@ test('lost store-only acknowledgement recovers merged content', {timeout:60000},
   const newer=initial.replace('one','board').replace('three','client').replace('five','newer');
   await edit(b,newer);const saved=await b.evaluate(()=>Object.values(localStorage).map(v=>{try{return JSON.parse(v);}catch{return null;}}).find(v=>v?.pendingShared));
   assert.equal(saved.text,newer);assert.equal(saved.pendingShared.content,receipt.content.replace('outside','seven'));
-  await b.reload();await b.getByRole('button',{name:'Programs',exact:true}).click();await b.getByRole('button',{name:'Reports',exact:true}).click();
+  await b.reload();await b.getByRole('link',{name:'Programs',exact:true}).click();await b.getByRole('link',{name:'Reports',exact:true}).click();
   await b.getByRole('button',{name:'Inspect original save'}).waitFor();assert.equal(await b.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),newer);
   const inspection=b.waitForResponse(r=>r.url().includes('/api/collaboration/recovery?'));await b.getByRole('button',{name:'Inspect original save'}).click();console.log('INSPECT',JSON.stringify(await (await inspection).json()));
   await b.waitForFunction(()=>document.querySelector('.CodeMirror')?.CodeMirror.getValue().includes('outside'));

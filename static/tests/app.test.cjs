@@ -26,8 +26,8 @@ test('loads a truthful ledger and filters synthetic findings', async () => {
   browser=await chromium.launch({headless:true, executablePath:process.env.CHROME_BIN || '/usr/bin/google-chrome'});
   const page=await browser.newPage();
   await page.goto(base);
-  await page.getByRole('button',{name:'Programs',exact:true}).click();
-  await page.getByRole('button',{name:'Findings',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Findings',exact:true}).click();
   assert.equal(await page.getByText('Example finding').count(),1);
   if(process.env.BOARD_SCREENSHOTS) await page.screenshot({path:path.join(process.env.BOARD_SCREENSHOTS,'bounty-desktop.png'),fullPage:true});
   await page.getByLabel('Search findings').fill('not present');
@@ -40,8 +40,8 @@ async function setReport(page, text) { await page.locator('.CodeMirror').evaluat
 
 async function openReport(page) {
   await page.goto(base);
-  await page.getByRole('button',{name:'Programs',exact:true}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.locator('.CodeMirror').waitFor();
 }
 
@@ -49,15 +49,15 @@ test('program, lane and ledger filters change the records in view', async () => 
   const page=await browser.newPage();const data=structuredClone(fixture);
   data.programs[0].lanes.push({name:'API',findings:[{id:'f2',title:'API synthetic finding',severity:'Low',class:'XSS',status:'Submitted'}],coverage:[],map:[{title:'Synthetic map'}],gadgets:[{title:'Synthetic gadget'}],reports:[],warnings:[]});
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   await page.getByLabel('Lane').selectOption('API');
   assert.ok(await page.getByText('API synthetic finding').count());
   assert.equal(await page.getByText('Example finding').count(),0);
   await pickFilter(page,'severities','Low');
   await pickFilter(page,'statuses','Submitted');
   assert.ok(await page.getByText('API synthetic finding').count());
-  await page.getByRole('button',{name:'MapStore',exact:true}).click();assert.ok(await page.getByText('Synthetic map').count());
-  await page.getByRole('button',{name:'Gadgets',exact:true}).click();assert.ok(await page.getByText('Synthetic gadget').count());
+  await page.getByRole('link',{name:'MapStore',exact:true}).click();assert.ok(await page.getByText('Synthetic map').count());
+  await page.getByRole('link',{name:'Gadgets',exact:true}).click();assert.ok(await page.getByText('Synthetic gadget').count());
   await page.close();
 });
 
@@ -72,9 +72,9 @@ test('read-only reports render Markdown without executing HTML or fetching image
   assert.equal(await page.locator('#report-preview img').count(),0);
   assert.equal(await page.evaluate(()=>window.pwned),undefined);
   assert.equal(requests.some(url=>url.includes('bad.invalid')),false);
-  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.getByRole('link',{name:'Coverage',exact:true}).click();
   assert.ok(await page.getByText('Example surface').count());
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   assert.match(await page.locator('#report-source').inputValue(),/Heading/);
   await page.close();
 });
@@ -87,10 +87,10 @@ test('advertised report writes stay disabled and browser drafts survive navigati
   await openReport(page);await setReport(page,'My synthetic draft');
   assert.match(await page.locator('#report-status').innerText(),/saved in browser/i);
   assert.equal(await page.getByRole('button',{name:'Save to report unavailable'}).isDisabled(),true);
-  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.getByRole('link',{name:'Coverage',exact:true}).click();
   data.programs[0].lanes[0].reports[0].content='Changed source';data.programs[0].lanes[0].reports[0].revision='2';
   await page.getByRole('button',{name:'Refresh'}).click();await page.getByText('Example surface').waitFor();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);
   assert.equal(await page.locator('#report-source').inputValue(),'My synthetic draft');
   await setReport(page,'Still my draft');
@@ -116,8 +116,8 @@ test('themes persist and mobile workspace fits without page overflow', async () 
   const page=await browser.newPage({viewport:{width:375,height:800}});await page.goto(base);
   await setTheme(page,'dusk');await page.reload();
   assert.equal(await page.locator('html').getAttribute('data-theme'),'dusk');
-  await page.getByRole('button',{name:'Programs',exact:true}).click();
-  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Coverage',exact:true}).click();
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
   if(process.env.BOARD_SCREENSHOTS) await page.screenshot({path:path.join(process.env.BOARD_SCREENSHOTS,'bounty-mobile.png'),fullPage:true});
   await page.close();
@@ -134,8 +134,8 @@ test('missing data and network errors do not look like empty success', async () 
   await page.getByRole('button',{name:'Refresh'}).click();
   await page.getByText('Finding records',{exact:true}).waitFor();
   assert.ok(await page.getByText('Unknown').count());
-  await page.getByRole('button',{name:'Programs',exact:true}).click();
-  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Coverage',exact:true}).click();
   assert.ok(await page.getByText(/collection was not provided/).count());
   await page.close();
 });
@@ -145,7 +145,7 @@ test('metadata writes need capability and confirm returned value', async () => {
   const data=structuredClone(fixture);data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low']}}};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',route=>{writes++;const payload=route.request().postDataJSON();return route.fulfill({json:{value:payload.value}});});
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   const severity=page.getByLabel('severity for Example finding');await severity.selectOption('Low');
   await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='Low' && !document.querySelector('[data-metadata="severity"]')?.disabled);
   assert.equal(writes,1);assert.equal(await page.getByLabel('class for Example finding').isDisabled(),true);
@@ -158,14 +158,14 @@ test('renders backend ledger, coverage and lazily fetched report shapes', async 
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   let reportQueries=[];
   await page.route('**/api/report?*',route=>{reportQueries.push(new URL(route.request().url()).searchParams);return route.fulfill({json:{content:'# Source from backend',revision:'rev1',editable:false}})});
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   assert.ok(await page.getByText('SYN-1').count());
   assert.equal(await page.getByLabel('class for Synthetic issue').inputValue(),'XSS');
   assert.ok(await page.getByText('Submission: submitted',{exact:true}).count());
   assert.ok(await page.getByText('Platform outcome: duplicate',{exact:true}).count());
-  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.getByRole('link',{name:'Coverage',exact:true}).click();
   assert.ok(await page.getByText('Synthetic surface',{exact:true}).count());
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#report-source')?.value==='# Source from backend');
   assert.equal(reportQueries.length,1);assert.equal(reportQueries[0].get('path'),'Example.md');assert.equal(reportQueries[0].get('program'),'test');
   assert.match(await page.locator('#report-status').innerText(),/identity unavailable/i);
@@ -225,7 +225,7 @@ test('frontend boots against the real read-only backend with an empty synthetic 
     await page.goto(url);await page.getByText('Program discovery is unavailable or incomplete.').waitFor();
     assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.sidebar')).display),'flex');
     assert.deepEqual(failures,[]);
-    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('link',{name:'Programs',exact:true}).click();
     assert.ok(await page.getByText('Configure the program root in the backend and refresh.').count());
   } finally {if(page)await page.close();if(proc.exitCode===null && proc.signalCode===null){const exited=once(proc,'exit');proc.kill('SIGTERM');await exited;}}
 });
@@ -237,9 +237,9 @@ test('coverage separates mapped inventory from assessment questions and escapes 
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.goto(base);
   assert.deepEqual(await page.evaluate(async()=> (await BoardAPI.load()).programs[0].lanes[0].coverage),coverage);
-  await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();
   assert.match(await page.locator('.summary-line').innerText(),/Assessment questions/);
-  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.getByRole('link',{name:'Coverage',exact:true}).click();
   assert.match(await page.locator('#app').innerText(),/Mapped inventory/);
   assert.match(await page.locator('#app').innerText(),/route\s*:?\s*3/);
   assert.match(await page.locator('#app').innerText(),/4.*(?:without|unclassified)/i);
@@ -251,7 +251,7 @@ test('coverage displays question counts and evidence as inert text', async () =>
   const page=await browser.newPage();const data=structuredClone(fixture);
   data.programs[0].lanes[0].coverage={items:[{surface_key:'Synthetic route',status:'open',evidence_refs:['<img src=x onerror="window.pwned=1">','ref://synthetic']}],counts:{open:1},total:1,mapped_kinds:{route:1},unclassified_surfaces:0};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Coverage',exact:true}).click();
   assert.match(await page.locator('#app').innerText(),/Assessment counts/);
   assert.match(await page.locator('#app').innerText(),/ref:\/\/synthetic/);
   assert.equal(await page.locator('#app img').count(),0);
@@ -317,7 +317,7 @@ test('metadata with no recorded value stays unknown until a confirmed update', a
   data.capabilities={findingMetadata:{enabled:true,method:'PATCH',url:'/api/meta',options:{severity:['High','Low']}}};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',route=>{writes++;return route.fulfill({status:500,body:'failed'});});
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   const severity=page.getByLabel('severity for Example finding');
   assert.equal(await severity.inputValue(),'');
   assert.equal(await severity.locator('option:checked').innerText(),'Unknown');
@@ -344,12 +344,12 @@ test('multiple metadata failures remain visible until a successful refresh', asy
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',route=>route.fulfill({status:500,body:'failed'}));
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Example finding').selectOption('Low');
     await page.getByText(/f1 \(severity\)/).waitFor();
     await page.getByLabel('status for Example finding').selectOption('Open');
     await page.getByText(/f1 \(status\)/).waitFor();
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     assert.ok(await page.getByText(/f1 \(severity\)/).isVisible());
     assert.ok(await page.getByText(/f1 \(status\)/).isVisible());
     await page.getByRole('button',{name:'Refresh'}).click();
@@ -365,11 +365,11 @@ test('failed metadata stays visible after navigation away and back', async () =>
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({status:500,body:'failed'});});
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Example finding').selectOption('Low');await received;
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();release();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();release();
     await page.getByText(/Update failed or was not verified/).waitFor({timeout:3000});
-    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('link',{name:'Programs',exact:true}).click();
     assert.ok(await page.getByText(/Update failed or was not verified/).isVisible());
     assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'High');
   } finally {release();await page.close();}
@@ -382,9 +382,9 @@ test('pending metadata is visible when navigating to the dashboard', async () =>
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Example finding').selectOption('Low');await received;
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     assert.ok(await page.getByText(/Updating metadata; waiting for confirmation/).isVisible());
     release();await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.equal(await page.getByText(/Updating metadata; waiting for confirmation/).count(),0);
@@ -398,15 +398,15 @@ test('pending metadata blocks refresh and updates the dashboard after navigation
   await page.route('**/api/data',route=>{loads++;return route.fulfill({json:data});});
   await page.route('**/api/meta',async route=>{started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Example finding').selectOption('Low');await received;
     assert.equal(await page.getByRole('button',{name:'Refresh'}).isDisabled(),true);
     await page.locator('#refresh').dispatchEvent('click');assert.equal(loads,1);
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     release();
     await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
     assert.match(await page.getByRole('region',{name:'Severity breakdown'}).innerText(),/Low\s+1/);
-    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('link',{name:'Programs',exact:true}).click();
     assert.equal(await page.getByLabel('severity for Example finding').inputValue(),'Low');
   } finally {release();await page.close();}
 });
@@ -418,7 +418,7 @@ test('metadata updates show pending and serialize controls until verified', asyn
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',async route=>{writes++;started();await gate;await route.fulfill({json:{value:route.request().postDataJSON().value}});});
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Example finding').selectOption('Low');await received;
     assert.ok(await page.getByText(/Updating metadata/).count());
     assert.equal(await page.getByLabel('status for Example finding').isDisabled(),true);
@@ -433,7 +433,7 @@ test('advertised BBH metadata capability sends the actual backend contract', asy
   data.capabilities={finding_metadata:true,finding_fields:['severity','class_name','status','severity_rationale'],report_edit:false};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();headers=route.request().headers();return route.fulfill({json:{finding:{fid:'F01',severity:'LOW',class_name:'xss',status:'raw'}}});});
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   assert.match(await page.locator('.footnote').innerText(),/supported fields/i);
   await page.getByLabel('severity for Synthetic BBH finding').selectOption('LOW',{timeout:2000});
   await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='LOW' && !document.querySelector('[data-metadata="severity"]')?.disabled);
@@ -450,13 +450,13 @@ test('stale BBH metadata keeps the pending value after refresh and navigation', 
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();return route.fulfill({status:409,json:{error:'finding_changed'}});});
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
     await page.getByText(/Conflict: finding changed/).waitFor();
     assert.equal(payload.expected_revision,'b'.repeat(64));assert.equal(payload.root_instance,'a'.repeat(64));
     const pending=page.getByLabel('Pending severity value — copy before leaving');
     assert.equal(await pending.inputValue(),'HIGH');
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();
     await page.getByRole('button',{name:'Refresh'}).click();
     assert.equal(await pending.inputValue(),'HIGH');
   } finally {await page.close();}
@@ -473,7 +473,7 @@ test('a successful edit on a different root does not discard an earlier pending 
     return attempts===1 ? route.fulfill({status:409,json:{error:'finding_changed'}}) : route.fulfill({json:{finding:{fid:'F01',severity:'HIGH',metadata_revision:'e'.repeat(64)}}});
   });
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Synthetic BBH finding').selectOption('HIGH');
     await page.getByLabel('Pending severity value — copy before leaving').waitFor();
     data.root_instance='c'.repeat(64);data.programs[0].lanes[0].findings[0].metadata_revision='d'.repeat(64);
@@ -492,7 +492,7 @@ test('an explicitly disabled BBH writer cannot be overridden by a legacy capabil
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/meta',route=>{writes++;return route.fulfill({status:500});});
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     assert.equal(await page.getByLabel('severity for Example finding').isDisabled(),true);
     assert.equal(writes,0);
   } finally {await page.close();}
@@ -504,7 +504,7 @@ test('BBH class metadata uses the recorded class_name and verified owner ID', as
   data.capabilities={finding_metadata:true,finding_fields:['class_name']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',route=>{payload=route.request().postDataJSON();return route.fulfill({json:{finding:{fid:'F01',class_name:'sqli'}}});});
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   const input=page.getByLabel('class for Synthetic BBH finding');
   assert.equal(await input.inputValue(),'xss');await input.fill('sqli',{timeout:2000});await input.press('Tab');
   await page.waitForFunction(()=>document.querySelector('[data-metadata="class"]')?.value==='sqli' && !document.querySelector('[data-metadata="class"]')?.disabled);
@@ -524,7 +524,7 @@ test('browser metadata update reaches backend with a disposable synthetic writer
   try {
     const [chunk]=await Promise.race([once(proc.stdout,'data'),new Promise((_,reject)=>setTimeout(()=>reject(new Error('backend startup timeout')),5000))]);
     page=await browser.newPage();await page.goto(`http://127.0.0.1:${Number(chunk.toString().trim())}`);
-    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByLabel('severity for Synthetic fixture').selectOption('HIGH');
     await page.waitForFunction(()=>document.querySelector('[data-metadata="severity"]')?.value==='HIGH' && !document.querySelector('[data-metadata="severity"]')?.disabled);
     assert.equal(JSON.parse(fs.readFileSync(ledger,'utf8')).findings[0].severity,'HIGH');
@@ -537,7 +537,7 @@ test('BBH metadata rejects a response for a different finding', async () => {
   data.capabilities={finding_metadata:true,finding_fields:['severity']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',route=>route.fulfill({json:{finding:{fid:'F02',severity:'LOW'}}}));
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   await page.getByLabel('severity for Synthetic BBH finding').selectOption('LOW');
   await page.getByText(/source may have changed; refresh/).waitFor();
   assert.equal(await page.getByLabel('severity for Synthetic BBH finding').inputValue(),'HIGH');
@@ -549,12 +549,12 @@ test('coverage and report ownership remain readable across themes on mobile', as
   data.programs[0].lanes[0].coverage={items:[],counts:{},total:0,mapped_kinds:{route:3},unclassified_surfaces:3};
   data.programs[0].lanes[0].reports=[{path:'findings/long-synthetic-directory-name/final-report.md',kind:'registered_report',owner_fids:['F01'],content:'# Fixture'}];
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   for(const themeName of ['light','dark','dusk']) {
     await setTheme(page,themeName);
     assert.equal(await page.locator('html').getAttribute('data-theme'),themeName);
-    await page.getByRole('button',{name:'Coverage',exact:true}).click();assert.ok(await page.getByText('Mapped inventory').isVisible());
-    await page.getByRole('button',{name:'Reports',exact:true}).click();assert.ok(await page.getByText(/Registered report/).isVisible());
+    await page.getByRole('link',{name:'Coverage',exact:true}).click();assert.ok(await page.getByText('Mapped inventory').isVisible());
+    await page.getByRole('link',{name:'Reports',exact:true}).click();assert.ok(await page.getByText(/Registered report/).isVisible());
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,themeName);
   }
   await page.close();
@@ -568,7 +568,7 @@ test('rationale drafts survive finding switches, navigation and refresh with unl
   data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByRole('button',{name:'Edit severity rationale for First finding'}).click();
     await page.getByRole('textbox',{name:'Severity rationale for First finding'}).fill('First draft');
     await page.getByRole('button',{name:'Edit severity rationale for Second finding'}).click();
@@ -594,7 +594,7 @@ test('a rationale draft remains copyable after the source root changes', async (
   data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
   await page.route('**/api/data*',route=>route.fulfill({json:data}));
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByRole('button',{name:'Edit severity rationale for Synthetic BBH finding'}).click();
     await page.getByRole('textbox',{name:'Severity rationale for Synthetic BBH finding'}).fill('Retain this rationale');
     data.root_instance='c'.repeat(64);data.programs[0].lanes[0].findings=[];
@@ -611,7 +611,7 @@ test('a source change makes an untouched open rationale draft unsaved', async ()
   data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).click();
     data.programs[0].lanes[0].findings[0].severity_rationale='New source';
     await page.getByRole('button',{name:'Refresh'}).click();
@@ -629,7 +629,7 @@ test('rationale save while navigated away updates only its own draft and confirm
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',async route=>{started();await gate;const body=route.request().postDataJSON();await route.fulfill({json:{finding:{fid:body.fid,...body.patch}}});});
   try {
-    await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
     assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),false);
     await page.getByRole('button',{name:'Edit severity rationale for First finding'}).click();
     await page.getByRole('textbox',{name:'Severity rationale for First finding'}).fill('First draft');
@@ -637,9 +637,9 @@ test('rationale save while navigated away updates only its own draft and confirm
     await page.getByRole('textbox',{name:'Severity rationale for Second finding'}).fill('Second draft');
     await page.getByRole('button',{name:'Save severity rationale for First finding'}).click();await received;
     assert.equal(await page.getByRole('button',{name:'Refresh'}).isDisabled(),true);
-    await page.getByRole('button',{name:'Dashboard',exact:true}).click();release();
+    await page.getByRole('link',{name:'Dashboard',exact:true}).click();release();
     await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);
-    await page.getByRole('button',{name:'Programs',exact:true}).click();
+    await page.getByRole('link',{name:'Programs',exact:true}).click();
     assert.ok(await page.getByText('First draft',{exact:true}).isVisible());
     assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Second finding'}).inputValue(),'Second draft');
     assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),true);
@@ -654,7 +654,7 @@ test('severity rationale is visible and explicitly saved for its own finding', a
   data.capabilities={finding_metadata:true,finding_fields:['severity','severity_rationale']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',route=>{const body=route.request().postDataJSON();writes.push(body);return route.fulfill({json:{finding:{fid:body.fid,...body.patch}}});});
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   assert.ok(await page.getByText('Original rationale',{exact:true}).isVisible());
   await page.getByRole('button',{name:'Edit severity rationale for First finding'}).click();
   await page.getByLabel('Severity rationale for First finding',{exact:true}).fill('Corrected rationale');
@@ -670,7 +670,7 @@ test('active metadata controls warn about uncoordinated local and sync overwrite
   const page=await browser.newPage();const data=structuredClone(fixture);
   data.capabilities={finding_metadata:true,finding_fields:['severity']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   assert.equal(await page.getByLabel('severity for Example finding').isEnabled(),true);
   const warning=page.locator('.metadata-warning');
   assert.match(await warning.innerText(),/local.*sync.*overwrit/i);
@@ -695,7 +695,7 @@ test('read-only rationale remains visible as inert text without an editor', asyn
   const page=await browser.newPage();const data=structuredClone(fixture);
   data.programs[0].lanes[0].findings[0].severity_rationale='<img src=x onerror="window.pwned=1">';
   await page.route('**/api/data',route=>route.fulfill({json:data}));
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   assert.ok(await page.getByText('<img src=x onerror="window.pwned=1">',{exact:true}).isVisible());
   assert.equal(await page.locator('#app img').count(),0);
   assert.equal(await page.getByRole('button',{name:/Edit severity rationale/}).count(),0);
@@ -708,7 +708,7 @@ test('failed rationale save preserves the draft and warns to refresh', async () 
   data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.route('**/api/finding',route=>route.fulfill({status:500,body:'failed'}));
-  await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();
   await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).click();
   await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).fill('Unsaved draft');
   await page.getByRole('button',{name:'Save severity rationale for Example finding'}).click();
@@ -723,7 +723,7 @@ test('rationale editor and overwrite warning stay accessible on mobile themes', 
   data.programs[0].lanes[0].findings[0].severity_rationale='Synthetic rationale';
   data.capabilities={finding_metadata:true,finding_fields:['severity_rationale']};
   await page.route('**/api/data',route=>route.fulfill({json:data}));await page.goto(base);
-  await page.getByRole('button',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Programs',exact:true}).click();
   for(const themeName of ['light','dark','dusk']) {
     await setTheme(page,themeName);
     assert.ok(await page.locator('.metadata-warning').isVisible());

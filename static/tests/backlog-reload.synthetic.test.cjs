@@ -9,10 +9,10 @@ test('reload during backlog backoff retains request without promising a retry', 
   try {
     const [chunk]=await once(proc.stdout,'data');const base=`http://127.0.0.1:${Number(String(chunk).trim())}`;
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
-    const page=await browser.newPage();await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();let posts=0;
+    const page=await browser.newPage();await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();await page.getByText(/Shared draft ready/).waitFor();let posts=0;
     await page.route('**/api/collaboration?*',route=>{if(route.request().method()!=='POST')return route.continue();posts++;return route.fulfill({status:503,contentType:'application/json',body:'{"error":"retained_scan_backlog"}'});});
     await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('draft\n');await page.getByText(/Retrying the exact request/).waitFor();
-    await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+    await page.reload();await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
     await page.getByRole('button',{name:'Inspect original save'}).waitFor();assert.match(await page.locator('#report-status').innerText(),/retry stopped.*inspect/i);
     await page.waitForTimeout(1200);assert.equal(posts,1);assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'draft\n');assert.equal(fs.readFileSync(report,'utf8'),'original\n');
   }finally{if(browser)await browser.close();if(proc.exitCode===null&&proc.signalCode===null){const done=once(proc,'exit');proc.kill();await done;}fs.rmSync(tmp,{recursive:true,force:true});}

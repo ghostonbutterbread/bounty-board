@@ -20,16 +20,16 @@ test('lazy scoped observations render as inert text and pending reads cannot cro
     await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1' ? route.continue() : route.abort());
     await page.goto(`http://127.0.0.1:${port}`);
     await page.getByRole('button',{name:'Open workspace'}).click();
-    await page.getByRole('button',{name:'Gadgets',exact:true}).click();
+    await page.getByRole('link',{name:'Gadgets',exact:true}).click();
     assert.match(await page.locator('#app').innerText(),/archived/);
     assert.match(await page.locator('#app').innerText(),/residual/);
     assert.equal(seen.filter(u=>u.includes('/api/map-observation?')).length,0);
     await page.getByRole('button',{name:'Open observation'}).click();
     await page.getByText(/alpha Capability:/).waitFor();
     assert.equal(await page.locator('#app img').count(),0);
-    assert.equal(await page.locator('#app a').count(),0);
+    assert.equal(await page.locator('#app a:not([data-section])').count(),0); // section tabs are links; observation text must add none
     assert.equal(seen.filter(u=>u.includes('evil.invalid')).length,0);
-    await page.getByRole('button',{name:'MapStore',exact:true}).click();
+    await page.getByRole('link',{name:'MapStore',exact:true}).click();
     assert.match(await page.locator('#app').innerText(),/not recorded/i);
     const missing=page.locator('.record').filter({hasText:'alpha missing'});
     await missing.getByRole('button',{name:'Open observation'}).click();
@@ -65,17 +65,17 @@ test('nonfinite map input leaves the healthy program usable in a real browser', 
     await page.route('**/*',route=>new URL(route.request().url()).hostname==='127.0.0.1' ? route.continue() : route.abort());
     await page.goto(`http://127.0.0.1:${port}`);
     await page.getByRole('button',{name:'Open workspace'}).click();
-    await page.getByRole('button',{name:'MapStore',exact:true}).click();
+    await page.getByRole('link',{name:'MapStore',exact:true}).click();
     const availability=page.getByRole('region',{name:'Data availability'});
     await availability.locator('summary').click();
     assert.match(await availability.innerText(),/Map inaccessible or invalid/);
     await page.locator('#program-select').selectOption('web_bounty/beta');
     assert.match(await page.locator('#app').innerText(),/beta gadget/);
-    await page.getByRole('button',{name:'Gadgets',exact:true}).click();
+    await page.getByRole('link',{name:'Gadgets',exact:true}).click();
     await page.getByRole('button',{name:'Open observation'}).click();
     await page.getByText(/beta Capability:/).waitFor();
     assert.equal(await page.locator('#app img').count(),0);
-    assert.equal(await page.locator('#app a').count(),0);
+    assert.equal(await page.locator('#app a:not([data-section])').count(),0); // section tabs are links; observation text must add none
   } finally {
     if(browser)await browser.close();
     child.kill('SIGTERM'); await new Promise(resolve=>child.exitCode!==null||child.signalCode!==null ? resolve() : child.once('exit',resolve));

@@ -10,7 +10,7 @@ async function run(fn){
  const data=fixture();let source={content:'Original',revision:'1'},fail=false;const requests=[];
  const server=http.createServer((req,res)=>{requests.push([req.method,req.url]);if(req.method!=='GET'){res.writeHead(405);return res.end();}const p=new URL(req.url,'http://localhost').pathname;if(p==='/api/data'){res.setHeader('content-type','application/json');return res.end(JSON.stringify(data));}if(p==='/api/report'){res.writeHead(fail?503:200,{'content-type':'application/json'});return res.end(JSON.stringify(source));}const file=path.join(root,p==='/'?'index.html':p.slice(1));if(!file.startsWith(root+path.sep)){res.writeHead(403);return res.end();}fs.readFile(file,(e,b)=>{if(e){res.writeHead(404);return res.end();}res.setHeader('content-type',({'.html':'text/html','.js':'text/javascript','.css':'text/css'})[path.extname(file)]||'text/plain');res.end(b);});});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;let browser;
- try {browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome'});const context=await browser.newContext();const page=await context.newPage();page.setDefaultTimeout(2000);const external=[];await context.route('**/*',r=>r.request().url().startsWith(base+'/')?r.continue():(external.push(r.request().url()),r.abort()));const open=async()=>{await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();};await fn({page,data,base,open,setFailure:v=>fail=v,setSource:v=>source=v});assert.deepEqual(external,[]);assert.equal(requests.some(([method])=>method!=='GET'),false);assert.equal(requests.some(([,url])=>url.startsWith('/missing')),false);
+ try {browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome'});const context=await browser.newContext();const page=await context.newPage();page.setDefaultTimeout(2000);const external=[];await context.route('**/*',r=>r.request().url().startsWith(base+'/')?r.continue():(external.push(r.request().url()),r.abort()));const open=async()=>{await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();};await fn({page,data,base,open,setFailure:v=>fail=v,setSource:v=>source=v});assert.deepEqual(external,[]);assert.equal(requests.some(([method])=>method!=='GET'),false);assert.equal(requests.some(([,url])=>url.startsWith('/missing')),false);
  }finally{if(browser)await browser.close();await new Promise(r=>server.close(r));}
 }
 async function edit(page,value){await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(value);}
@@ -38,8 +38,8 @@ test('identified root storage failure blocks refresh and keeps the draft accessi
   if(process.env.SYNTHETIC_BASELINE_ENTRY) await page.route('**/app.js',async route=>{const response=await route.fetch();let body=await response.text();for(const before of ['if(hasUnrecoverableDraft()) {blockRefresh();render();return;}','if(hasUnrecoverableDraft()) blockRefresh();']){assert.ok(body.includes(before));body=body.replace(before,before.replace('hasUnrecoverableDraft()','false'));}await route.fulfill({response,body});});
   await page.addInitScript(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key.startsWith('bounty-board-report-draft-v2:'))throw new DOMException('quota','QuotaExceededError');return set.call(this,key,value);};});
   await open();await edit(page,'Memory only');assert.match(await page.locator('#report-status').innerText(),/storage unavailable/i);
-  await page.getByRole('button',{name:'Coverage',exact:true}).click();data.root_identity='b'.repeat(64);await page.getByRole('button',{name:'Refresh'}).click();
-  await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);assert.match(await page.locator('#app').innerText(),/Refresh blocked/i);await page.getByRole('button',{name:'Reports',exact:true}).click();assert.match(await page.locator('.CodeMirror').innerText(),/Memory only/);
+  await page.getByRole('link',{name:'Coverage',exact:true}).click();data.root_identity='b'.repeat(64);await page.getByRole('button',{name:'Refresh'}).click();
+  await page.waitForFunction(()=>!document.querySelector('#refresh').disabled);assert.match(await page.locator('#app').innerText(),/Refresh blocked/i);await page.getByRole('link',{name:'Reports',exact:true}).click();assert.match(await page.locator('.CodeMirror').innerText(),/Memory only/);
 }));
 
 
@@ -47,7 +47,7 @@ test('conflict survives source reversion and browser reload', {timeout:15000},()
   const report=data.programs[0].lanes[0].reports[0];await open();await edit(page,'Draft');report.content='Changed';report.revision='2';
   await page.getByRole('button',{name:'Refresh'}).click();await page.getByText(/^Conflict:/).waitFor();report.content='Original';report.revision='1';
   await page.getByRole('button',{name:'Refresh'}).click();await page.getByText(/^Conflict:/).waitFor();
-  page.on('dialog',dialog=>dialog.accept());await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  page.on('dialog',dialog=>dialog.accept());await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
   assert.match(await page.locator('#report-status').innerText(),/^Conflict:/);assert.match(await page.locator('.CodeMirror').innerText(),/Draft/);
 }));
 
@@ -126,7 +126,7 @@ test('late cross-tab event after root switch exposes the original draft for reco
   assert.ok((await recovery.innerText()).includes(report.id));
   const text=recovery.getByRole('textbox',{name:'Recover draft text'});assert.equal(await text.inputValue(),original);
   await text.focus();await page.keyboard.press('Control+A');assert.equal(await text.evaluate(el=>el.value.slice(el.selectionStart,el.selectionEnd)),original);
-  await page.getByRole('button',{name:'Dashboard',exact:true}).click();assert.equal(await page.locator('#breadcrumb').innerText(),'Dashboard');
+  await page.getByRole('link',{name:'Dashboard',exact:true}).click();assert.equal(await page.locator('#breadcrumb').innerText(),'Dashboard');
   assert.equal(await text.inputValue(),original);
   const [download]=await Promise.all([page.waitForEvent('download',{timeout:10000}),recovery.getByRole('button',{name:'Download draft'}).click({timeout:10000,noWaitAfter:true})]);
   let bytes='';for await(const chunk of await download.createReadStream())bytes+=chunk.toString();assert.equal(bytes,original);
@@ -142,7 +142,7 @@ test('multiple memory-only drafts remain selectable during unrelated storage eve
   await page.addInitScript(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key.startsWith('bounty-board-report-draft-v2:'))throw new DOMException('quota','QuotaExceededError');return set.call(this,key,value);};});
   await open();await edit(page,'First only in memory');
   await page.locator('#report-select').selectOption('second');await edit(page,'Second only in memory');
-  await page.getByRole('button',{name:'Dashboard',exact:true}).click();
+  await page.getByRole('link',{name:'Dashboard',exact:true}).click();
   const recovery=page.locator('#draft-recovery'),cards=recovery.locator('.recovery-draft');assert.equal(await cards.count(),2);
   assert.ok((await cards.nth(0).innerText()).includes(data.programs[0].id));assert.ok((await cards.nth(0).innerText()).includes(lane.name));
   assert.ok((await cards.nth(1).innerText()).includes('second'));assert.ok((await cards.nth(0).innerText()).includes('a'.repeat(64)));

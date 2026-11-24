@@ -23,8 +23,8 @@ async function fixture(run) {
   }
 }
 async function open(page,base) {
-  page.setDefaultTimeout(8000); await page.goto(base); await page.getByRole('button',{name:'Programs',exact:true}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click(); await page.getByText(/Shared draft ready/).waitFor();
+  page.setDefaultTimeout(8000); await page.goto(base); await page.getByRole('link',{name:'Programs',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click(); await page.getByText(/Shared draft ready/).waitFor();
 }
 
 test('save acknowledgment and unchanged poll preserve cursor and undo', {timeout:30000}, async()=>fixture(async({browser,base})=>{
@@ -69,7 +69,7 @@ test('failed unsent shared edit is restored and retried after reload', {timeout:
   await page.route('**/api/collaboration?*',failPost);
   await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('offline unsent draft');
   await page.getByText(/Shared save failed/).waitFor();
-  await page.reload();await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.reload();await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.locator('.CodeMirror').waitFor();
   assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror').CodeMirror.getValue()),'offline unsent draft');
   await page.unroute('**/api/collaboration?*',failPost);

@@ -54,7 +54,7 @@
   // /findings/<id>, which parseRoute() turns into the row highlight.
   function hrefFor(target={}) {
     if(!target || typeof target!=='object' || target.view==='dashboard')return '#/dashboard';
-    if(target.view==='recent')return '#/recent';
+    if(target.view==='recent')return recentRoute(target.query);
     const program=target.program==null ? state.program : String(target.program);
     if(!program)return '#/programs';
     const lane=target.lane!=null ? String(target.lane) : program===state.program ? state.lane : String((list(programs().find(p=>String(p.id)===program)?.lanes)||[])[0]?.name ?? '');
@@ -66,7 +66,7 @@
   // through the one navigate(); modified clicks, other buttons, links with a
   // target and clicks a module already handled are left to the browser.
   function openRoute(route) {
-    if(route.view!=='program'){navigate({view:route.view});return true;}
+    if(route.view!=='program'){navigate(route);return true;}
     const ok=moduleNavigate({program:route.program || undefined,lane:route.lane || undefined,section:route.section,report:route.report || undefined,finding:route.highlight || undefined});
     if(!ok)toast('That item is not in the loaded data. Refresh the board and try again.','warning');
     return ok;
@@ -397,7 +397,17 @@
   }
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
   themeButton.addEventListener('click', () => openMenu(themeButton,[{heading:'Theme'},...THEMES.map(([key,label,glyph])=>({label,icon:glyph,checked:document.documentElement.dataset.theme===key,onSelect:()=>applyTheme(key)}))],{label:'Theme',align:'end'}));
-  document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {state.view=button.dataset.view;state.routeNotice='';routePush=true;render();}));
+  // Sidebar items and section tabs are links (middle-click and Ctrl/Cmd+click
+  // open a new tab); a plain left click keeps the in-app behaviour.
+  const plainClick = event => event.button===0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+  // Hrefs follow the current program route and Recent filters. Modules change
+  // the Recent filters without a render, so they are also refreshed just before
+  // the pointer or keyboard can use them (hover status, middle-click, menu).
+  function syncNavLinks() {
+    document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('href',b.dataset.view==='recent' ? recentRoute(state.recentQuery) : b.dataset.view==='program' ? programRoute() : '#/dashboard'));
+  }
+  for(const type of ['pointerover','pointerdown','focusin','contextmenu'])document.querySelector('.sidebar .nav')?.addEventListener(type,syncNavLinks,true);
+  document.querySelectorAll('[data-view]').forEach(link => link.addEventListener('click', event => {if(!plainClick(event))return;event.preventDefault();state.view=link.dataset.view;state.routeNotice='';routePush=true;render();}));
   // Collapsible sidebar (icon rail); the preference persists per browser origin.
   const shell=document.querySelector('#shell'), sidebarToggle=document.querySelector('#sidebar-toggle');
   function setSidebar(collapsed) {
@@ -422,10 +432,11 @@
     const box=document.querySelector('#recent-programs'), label=document.querySelector('#recent-label');if(!box)return;
     const items=recentPrograms().map(r=>programs().find(p=>String(p.id)===r.program)).filter(Boolean);
     label.hidden=!items.length;
-    box.innerHTML=items.map(p=>`<button type="button" class="side-link${state.view==='program' && String(p.id)===state.program?' current':''}" data-recent-program="${esc(p.id)}" title="${esc(p.family||'')} / ${esc(programLabel(p))}">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(programLabel(p))}</span></button>`).join('');
+    box.innerHTML=items.map(p=>`<a class="side-link${state.view==='program' && String(p.id)===state.program?' current':''}" href="${esc(hrefFor({program:p.id,lane:String(p.id)===state.program ? state.lane : undefined,section:state.section}))}" data-recent-program="${esc(p.id)}" title="${esc(p.family||'')} / ${esc(programLabel(p))}">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(programLabel(p))}</span></a>`).join('');
   }
   document.querySelector('#recent-programs')?.addEventListener('click',event=>{
-    const button=event.target.closest('[data-recent-program]');if(!button)return;
+    const button=event.target.closest('[data-recent-program]');if(!button || !plainClick(event))return;
+    event.preventDefault();
     navigate({view:'program',program:button.dataset.recentProgram,section:state.section});
   });
   document.querySelector('#refresh').addEventListener('click', load);
@@ -810,7 +821,7 @@
     const picker=`<button type="button" class="button" data-program-picker ${programs().length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>`;
     if (!p || !lane) return `${title(p?.name || 'Programs',p?'No lanes are available for this program.':'No programs are available.',`<div class="switcher">${selectors()}${picker}</div>`)}<div class="stack">${rootWarning()}${availability([])}<div class="panel state">${p?'This program has no lane data.':'Configure the program root in the backend and refresh.'}</div></div>`;
     // Gadgets and MapStore tabs are drop targets for modules that move findings.
-    const nav=sections.map(([key,label])=>`<button data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}${key==='map'||key==='gadgets'?' drop-target':''}" ${key==='map'||key==='gadgets'?`data-drop-target="${key}"`:''} ${state.section===key?'aria-current="page"':''}>${icon(SECTION_ICONS[key])}<span>${esc(label)}</span><span class="count">${key==='reports' && reportsIncomplete(lane) ? '–' : rows(key)?.length ?? '–'}</span></button>`).join('');
+    const nav=sections.map(([key,label])=>`<a href="${esc(hrefFor({section:key,report:key==='reports' && state.report ? state.report : undefined}))}" data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}${key==='map'||key==='gadgets'?' drop-target':''}" ${key==='map'||key==='gadgets'?`data-drop-target="${key}"`:''} ${state.section===key?'aria-current="page"':''}>${icon(SECTION_ICONS[key])}<span>${esc(label)}</span><span class="count">${key==='reports' && reportsIncomplete(lane) ? '–' : rows(key)?.length ?? '–'}</span></a>`).join('');
     const origin=state.programOrigin==='default' && programs().length>1 ? `<p class="context-note">${icon('info-circle')}<span>Showing the first program because none was chosen yet. Use Switch program or the Program menu to choose another.</span></p>` : '';
     const header=`<div class="titlebar"><div><p class="eyebrow">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(p.family||'Program workspace')} / ${esc(lane.name)}</span></p><h1>${esc(p.name||p.id)}</h1>${origin}</div><div class="switcher">${selectors()}${picker}</div></div>`;
     return `${header}<div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div><div><strong>${rows('findings') ? rows('findings').filter(isNotSubmitted).length : 'Unknown'}</strong><span>Not submitted</span></div></div></section>${availability([{...p,lanes:[lane]}])}<div class="layout"><div class="stack"><nav class="tabs workspace-nav" aria-label="Workspace sections">${nav}</nav>${sectionContent()}</div></div></div>`;
@@ -1547,6 +1558,7 @@
     portfolioAction.hidden=!state.data?.portfolio_unloaded;
     portfolioButton.disabled=!!state.data?._portfolioLoading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
+    syncNavLinks();
     document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':'Programs';
     const trail=document.querySelector('#breadcrumb-trail'), crumbProgram=state.view==='program' && !state.loading ? currentProgram() : null;
     if(trail)trail.innerHTML=crumbProgram ? [programLabel(crumbProgram),state.lane,(sections.find(([k])=>k===state.section)||[])[1]].filter(Boolean).map(part=>`<span class="sep" aria-hidden="true">/</span> <span class="crumb-current">${esc(part)}</span>`).join(' ') : '';
@@ -1598,16 +1610,23 @@
   }
   // ---- Hash routing: #/dashboard, #/recent or #/programs/<program>/<lane>/<section>[/<report>] ----
   // Incoming links may also use #/programs/<program>/<lane>/findings/<finding id>.
-  function routeFor() {
-    if(state.view==='recent')return '#/recent';
-    if(state.view!=='program')return '#/dashboard';
+  // #/recent?<query>: the Recent view's filters (recent-reports.js owns the
+  // keys and validation; the app only stores and round-trips the string).
+  function recentRoute(query) { return `#/recent${query ? '?'+String(query) : ''}`; }
+  function programRoute() {
     if(!state.program)return '#/programs';
     return `#/programs/${encodeURIComponent(state.program)}/${encodeURIComponent(state.lane)}/${state.section}${state.section==='reports' && state.report ? '/'+encodeURIComponent(state.report) : ''}`;
   }
+  function routeFor() {
+    if(state.view==='recent')return recentRoute(state.recentQuery);
+    if(state.view!=='program')return '#/dashboard';
+    return programRoute();
+  }
   function parseRoute(hash) {
-    const parts=String(hash||'').replace(/^#\/?/,'').split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
+    const raw=String(hash||'').replace(/^#\/?/,''), mark=raw.indexOf('?');
+    if((mark<0 ? raw : raw.slice(0,mark))==='recent')return {view:'recent',recentQuery:mark<0 ? '' : raw.slice(mark+1)};
+    const parts=raw.split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
     if(parts[0]==='dashboard')return {view:'dashboard'};
-    if(parts[0]==='recent')return {view:'recent'};
     if(parts[0]==='programs'){
       const section=sections.some(([k])=>k===parts[3])?parts[3]:'findings', rest=parts.slice(4).join('/');
       return {view:'program',program:parts[1]||'',lane:parts[2]||'',section,report:section==='reports'?rest:'',...(section==='findings' && rest ? {highlight:rest} : {})};
@@ -1623,6 +1642,7 @@
   function navigate(next={}, options={}) {
     const missingProgram=next.program ? !programs().some(p=>String(p.id)===String(next.program)) : false;
     if(next.view)state.view=next.view;
+    if(next.view==='recent' && typeof next.recentQuery==='string')state.recentQuery=next.recentQuery;
     if(next.program!==undefined && next.program!==state.program){
       ++laneGeneration;state.program=next.program;state.lane=next.lane||'';state.report='';state.filters=emptyFilters();normalizeSelection();
     } else if(next.lane && next.lane!==state.lane && (list(currentProgram()?.lanes)||[]).some(l=>String(l.name)===next.lane)){
@@ -1641,6 +1661,10 @@
     const route=parseRoute(location.hash);
     if(!route || !state.data || location.hash===routeFor())return;
     navigate(route,{fromHistory:true});
+  });
+  app.addEventListener('click',event=>{
+    const tab=event.target.closest('a[data-section]');if(!tab || !plainClick(event))return;
+    event.preventDefault();state.section=tab.dataset.section;state.highlight='';routePush=true;render();
   });
   app.addEventListener('toggle',event=>{if(event.target.matches?.('[data-report-browser]'))writeStore('bounty-board-report-list-open',event.target.open);},true);
   app.addEventListener('focusout',event=>{if(!phaseStatus.contains(event.relatedTarget) && !portfolioAction.contains(event.relatedTarget))retryDeferredApply();});
@@ -1780,6 +1804,7 @@
   const initialRoute=parseRoute(location.hash);
   if(initialRoute){
     state.view=initialRoute.view;
+    if(initialRoute.view==='recent')state.recentQuery=initialRoute.recentQuery;
     if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
   }
   // Public UI helpers for feature modules (see style.css header for tokens).

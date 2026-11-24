@@ -21,7 +21,7 @@ test.before(async()=>{await new Promise(r=>server.listen(0,'127.0.0.1',r));base=
 after(async()=>{await browser?.close();await new Promise(r=>server.close(r));});
 const editor=p=>p.getByRole('textbox',{name:'Severity rationale for Finding'});
 const copy=p=>p.getByLabel('Pending severity rationale — copy before leaving');
-async function open(p){await p.goto(base);await p.getByRole('button',{name:'Programs',exact:true}).click();}
+async function open(p){await p.goto(base);await p.getByRole('link',{name:'Programs',exact:true}).click();}
 async function refresh(p){await p.getByRole('button',{name:'Refresh'}).click();await p.waitForFunction(()=>!document.querySelector('#refresh').disabled);}
 
 test('a hidden and replaced-root rationale remains copyable without becoming a new-root editor',async()=>{
@@ -47,8 +47,8 @@ test('strict legacy writer receives exactly the documented own keys',async()=>{
 for(const unidentified of [null,'malformed']) test(`unidentified instance ${unidentified} becomes copy-only after refresh`,async()=>{
   instance=unidentified;writes=[];const p=await browser.newPage();await open(p);
   await p.getByRole('button',{name:'Edit severity rationale for Finding'}).click();await editor(p).fill('unknown origin');
-  await p.getByRole('button',{name:'Dashboard',exact:true}).click();assert.equal(await copy(p).inputValue(),'unknown origin');
-  await p.getByRole('button',{name:'Programs',exact:true}).click();assert.equal(await editor(p).inputValue(),'unknown origin');
+  await p.getByRole('link',{name:'Dashboard',exact:true}).click();assert.equal(await copy(p).inputValue(),'unknown origin');
+  await p.getByRole('link',{name:'Programs',exact:true}).click();assert.equal(await editor(p).inputValue(),'unknown origin');
   await refresh(p);assert.equal(await editor(p).count(),0);assert.equal(await copy(p).inputValue(),'unknown origin');assert.equal(writes.length,0);
   await p.getByRole('button',{name:'Edit severity rationale for Finding'}).click();await p.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal(await copy(p).inputValue(),'unknown origin');await p.close();
 });
@@ -70,8 +70,8 @@ test('storage failure, focused search and navigation retain the in-tab rationale
   await p.addInitScript(()=>{for(const name of ['getItem','setItem','removeItem'])Object.defineProperty(Storage.prototype,name,{value(){throw new Error('blocked');}});});
   await open(p);await p.getByRole('button',{name:'Edit severity rationale for Finding'}).click();await editor(p).fill('only in tab');
   const search=p.getByLabel('Search findings');await search.fill('not found');assert.equal(await search.evaluate(el=>document.activeElement===el),true);assert.equal(await copy(p).inputValue(),'only in tab');
-  await p.getByRole('button',{name:'Dashboard',exact:true}).click();assert.equal(await copy(p).inputValue(),'only in tab');
-  await p.getByRole('button',{name:'Programs',exact:true}).click();await p.getByLabel('Search findings').fill('');assert.equal(await editor(p).inputValue(),'only in tab');await p.close();
+  await p.getByRole('link',{name:'Dashboard',exact:true}).click();assert.equal(await copy(p).inputValue(),'only in tab');
+  await p.getByRole('link',{name:'Programs',exact:true}).click();await p.getByLabel('Search findings').fill('');assert.equal(await editor(p).inputValue(),'only in tab');await p.close();
 });
 
 test('late metadata failures remain individually copyable across navigation until discarded',async()=>{
@@ -79,9 +79,9 @@ test('late metadata failures remain individually copyable across navigation unti
   await p.route('**/api/meta',async route=>{calls++;if(calls===1){arrived();await gate;}await route.fulfill({status:409,json:{error:'finding_changed'}}).catch(()=>{});});
   try {
     await open(p);await p.getByLabel('severity for Finding').selectOption('HIGH');await seen;
-    await p.getByRole('button',{name:'Dashboard',exact:true}).click();release();
+    await p.getByRole('link',{name:'Dashboard',exact:true}).click();release();
     const pending=p.getByLabel('Pending severity value — copy before leaving');await pending.waitFor();assert.equal(await pending.inputValue(),'HIGH');
-    await p.getByRole('button',{name:'Programs',exact:true}).click();await p.getByLabel('severity for Finding').selectOption('HIGH');
+    await p.getByRole('link',{name:'Programs',exact:true}).click();await p.getByLabel('severity for Finding').selectOption('HIGH');
     await p.waitForFunction(()=>document.querySelectorAll('[data-discard-metadata]').length===2);assert.deepEqual(await pending.allTextContents(),['HIGH','HIGH']);
     await p.getByRole('button',{name:'Discard pending value'}).first().click();assert.equal(await pending.count(),1);assert.equal(await pending.inputValue(),'HIGH');
   } finally {release();await p.close();}

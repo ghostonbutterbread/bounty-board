@@ -25,7 +25,7 @@ test('report index warning survives later lane apply and clears after refresh', 
     await page.route('**/api/lane?*',async route=>{const response=await route.fetch();ready();await gate;await route.fulfill({response});});
     await page.goto(`http://127.0.0.1:${port}`);await arrived;
     await page.getByRole('button',{name:'Open workspace'}).click();
-    await page.getByRole('button',{name:'Reports',exact:true}).click();
+    await page.getByRole('link',{name:'Reports',exact:true}).click();
     await page.getByText('No reports loaded.').waitFor();
     const summary=page.getByRole('region',{name:'Data availability'});
     assert.match(await summary.innerText(),/Inaccessible or invalid: 1 lane/);
@@ -84,7 +84,7 @@ test('lane-first warnings retain their owners until complete snapshot replaces t
     assert.match(await summary.innerText(),/Map inaccessible or invalid:\s*1 lane/);
     // The index rereads a now-fixed ledger, but does not replace displayed findings.
     fs.writeFileSync(path.join(lane,'ledgers/ledger.json'),JSON.stringify({findings:[]}));
-    await page.getByRole('button',{name:'Reports',exact:true}).click();
+    await page.getByRole('link',{name:'Reports',exact:true}).click();
     await page.getByText('No reports loaded.').waitFor();
     await summary.locator('summary').click();
     const text=await summary.innerText();
@@ -186,7 +186,7 @@ test('selected report body received before root swap is never rendered', {timeou
     await page.route('**/api/report?*',async route=>{const response=await route.fetch();assert.equal(response.status(),200);ready();await gate;await route.fulfill({response});});
     await page.goto(`http://127.0.0.1:${port}`);
     await page.getByRole('button',{name:'Open workspace'}).click();
-    await page.getByRole('button',{name:'Reports',exact:true}).click();await arrived;
+    await page.getByRole('link',{name:'Reports',exact:true}).click();await arrived;
     fs.renameSync(path.join(root,'source'),path.join(root,'old-source'));fs.mkdirSync(path.join(root,'source'));release();
     await page.getByText('Report could not be loaded. Refresh the workspace to retry.').waitFor({timeout:5000});
     assert.equal(await page.locator('.CodeMirror').count(),0);
@@ -210,7 +210,7 @@ test('selected report index received before root swap is never rendered', {timeo
     await page.route('**/api/lane-reports?*',async route=>{const response=await route.fetch();assert.equal(response.status(),200);ready();await gate;await route.fulfill({response});});
     await page.goto(`http://127.0.0.1:${port}`);
     await page.getByRole('button',{name:'Open workspace'}).click();
-    await page.getByRole('button',{name:'Reports',exact:true}).click();await arrived;
+    await page.getByRole('link',{name:'Reports',exact:true}).click();await arrived;
     fs.renameSync(path.join(root,'source'),path.join(root,'old-source'));fs.mkdirSync(path.join(root,'source'));release();
     await page.getByText(/Selected reports could not be loaded or the source changed/).waitFor({timeout:5000});
     assert.equal(await page.locator('#report-select, .CodeMirror').count(),0);

@@ -20,7 +20,7 @@ test('recover a saved shared draft by its old path after source deletion or rena
   try {
     const base=await start();browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN || '/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
     const page=await browser.newPage();page.setDefaultTimeout(12000);
-    async function open(){await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();await page.getByRole('button',{name:'Reports',exact:true}).click();}
+    async function open(){await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();}
     await open();await page.getByText(/Shared draft ready/).waitFor();
     await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('stored draft\n');
     await page.getByText(/Shared draft ready/).waitFor();
