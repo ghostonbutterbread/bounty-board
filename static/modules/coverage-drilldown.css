@@ -12,3 +12,4 @@
 .cd-table details p{margin:4px 0 0;white-space:pre-wrap}
 .cd-table summary{cursor:pointer;color:var(--text-2)}
 .cd-table code{font-family:var(--font-mono);font-size:var(--text-xs)}
+.cd-table td .id,.cd-table td .hint{display:block;margin-top:2px}

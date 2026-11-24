@@ -419,6 +419,7 @@ input[data-metadata]:disabled{border-color:transparent;background:transparent;pa
 /* Live report view: editor plus artifacts. Side by side when the panel is
    wide enough for both; stacked (artifacts below) otherwise. */
 .report-panel{container-type:inline-size}
+.report-panel>br{display:none}
 .report-workspace{display:grid;gap:var(--space-4);min-width:0}
 .report-main{min-width:0}
 .report-side{min-width:0}
