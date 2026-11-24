@@ -22,6 +22,11 @@
   // different refresh. Existing drafts from them remain copy-only afterward.
   const rationaleKey = (program,lane,id) => JSON.stringify([/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? ['instance',state.data.root_instance] : ['unidentified',state.unidentifiedRoot],program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
+  // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
+  // window.BoardModules and mount into host elements after every render.
+  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, api:window.BoardAPI});
+  window.BoardModules = window.BoardModules || [];
+  window.registerBoardModule = module => {window.BoardModules.push(module);try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}};
   const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
   let unidentifiedSequence=0;
   let metadataDraftSequence=0;
@@ -462,6 +467,13 @@
     const kind=report.kind == null ? 'Ownership not provided' : (kindNames[report.kind] || String(report.kind));
     const owner=Array.isArray(report.owner_fids) && report.owner_fids.length ? `Finding owner IDs: ${report.owner_fids.map(display).join(', ')}` : '';
     const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>`;
+    if(state.data?.capabilities?.live_edit){
+      // The live editor module owns this host; it persists across renders.
+      const program=currentProgram();
+      if(!report.path || !program)return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">This report has no file path and cannot be opened.</div></section>`;
+      const host=`data-family="${esc(program.family)}" data-program="${esc(program.name)}" data-lane="${esc(state.lane)}" data-path="${esc(report.path)}" data-report-id="${esc(report.id)}"`;
+      return `<section class="panel panel-pad report-panel"><h2>Reports</h2>${picker}<div id="live-report-host" ${host}><div class="state">Opening editor…</div></div><div id="report-artifacts-host" ${host}></div></section>`;
+    }
     if(report.content == null && report.path){
       if(!report.loadState) {
         report.loadState='loading';const program=currentProgram(), lane=state.lane, snapshot=state.data, selection=laneGeneration;
@@ -989,6 +1001,7 @@
       editor.codemirror.on('change',()=>updateDraft(draft,editor.value()));
     }
     renderRecovery();
+    for(const module of window.BoardModules || []){try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}}
     if(!state.loading){loadSelectedLane();loadSelectedReports();}
   }
   app.addEventListener('click',async event=>{

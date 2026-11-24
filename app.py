@@ -309,11 +309,14 @@ def valid_tailnet_host(host):
 
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
                 collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
-                report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None):
+                report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
+                live_edit_dir=None):
     import os
     import tempfile
     import threading
     from collaborative_engine import CollaborationStore, GitUnavailableError
+    if live_edit_dir is not None and (collaboration_dir is not None or report_autosave or experimental_fixture_publish):
+        raise ValueError('live editing replaces the shared-draft store, report autosave and fixture publication')
     if retention_max_operations is not None and (type(retention_max_operations) is not int or retention_max_operations < 1):
         raise ValueError('invalid retention operation limit')
     if retention_min_free_bytes is not None and (type(retention_min_free_bytes) is not int or retention_min_free_bytes < 0):
@@ -348,6 +351,14 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     if collaboration:
         with collaboration.observation():
             collaboration.bind_source(root)
+    live = None
+    live_root = root_snapshot() if live_edit_dir is not None else None
+    if live_edit_dir is not None:
+        from live_editing import LiveReports
+        from report_publisher import generated_navigation
+        if live_root is None:
+            raise ValueError('data root is unavailable')
+        live = LiveReports(live_root[0], live_edit_dir, editable=lambda relative, text: not generated_navigation(relative, text))
     collaboration_lock = threading.RLock()
     portfolio_scan = threading.BoundedSemaphore(1)
     lane_reads = threading.BoundedSemaphore(8)
@@ -782,6 +793,138 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             finally:
                 os.close(directory)
 
+        def live_relative(self, extra=()):
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
+            required = {'family', 'program', 'lane', 'path'}
+            if not required <= set(params) or set(params) - required - set(extra) or any(len(v) != 1 for v in params.values()):
+                raise ValueError('invalid selector')
+            family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
+            if (family not in FAMILIES or lane not in FAMILIES[family] or
+                    not program or program.startswith('_') or program in ('.', '..') or '/' in program or '\0' in program or
+                    '\0' in path or path.startswith('/') or Path(path).suffix.lower() != '.md' or
+                    any(p in ('', '.', '..') for p in path.split('/'))):
+                raise ValueError('invalid selector')
+            return f'{family}/{program}/{lane}/reports/{path}', {k: params[k][0] for k in extra if k in params}
+
+        def live_read_json(self, limit):
+            if (not self.trusted_request(require_origin=True) or
+                    self.headers.get('X-Requested-With') != 'Bounty-Board' or
+                    self.headers.get('Content-Type', '').lower() != 'application/json' or
+                    self.headers.get('Transfer-Encoding')):
+                raise PermissionError('untrusted')
+            lengths = self.headers.get_all('Content-Length', [])
+            if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= limit:
+                raise ValueError('invalid length')
+            payload = json.loads(self.rfile.read(int(lengths[0])))
+            if not isinstance(payload, dict):
+                raise ValueError('invalid payload')
+            return payload
+
+        def live_request(self, method):
+            import re
+            import sqlite3
+            from live_editing import MAX_BYTES, NotEditable, ReportUnavailable, UnresolvedConflict
+            view = urlsplit(self.path).path[len('/api/live/'):]
+            sha = re.compile(r'[a-f0-9]{64}')
+            try:
+                if method == 'GET':
+                    if view == 'events':
+                        return self.live_events()
+                    extra = {'report': (), 'history': ('before',), 'revision': ('revision',), 'sync-conflict': ('name',)}.get(view)
+                    if extra is None:
+                        return self.reply(404, {'error': 'not_found'})
+                    relative, args = self.live_relative(extra)
+                    if view == 'report':
+                        return self.reply(200, live.open(relative))
+                    if view == 'history':
+                        before = args.get('before')
+                        if before is not None and (not before.isascii() or not before.isdecimal() or len(before) > 18):
+                            raise ValueError('invalid cursor')
+                        return self.reply(200, {'events': live.history_page(relative, int(before) if before else None)})
+                    if view == 'revision':
+                        if not sha.fullmatch(args.get('revision', '')):
+                            raise ValueError('invalid revision')
+                        return self.reply(200, {'content': live.revision(relative, args['revision'])})
+                    return self.reply(200, live.sync_conflict(relative, args.get('name', '')))
+                extra = {'save': (), 'restore': (), 'sync-conflict': ('name',)}.get(view)
+                if extra is None:
+                    return self.reply(404, {'error': 'not_found'})
+                relative, args = self.live_relative(extra)
+                payload = self.live_read_json(2 * MAX_BYTES + 4096)
+                if root_snapshot() != live_root:
+                    return self.reply(409, {'error': 'root_changed', 'message': 'The data root changed; restart the Board.'})
+                client = payload.get('client')
+                if not isinstance(client, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,64}', client):
+                    raise ValueError('invalid client')
+                author = payload.get('author', 'Board editor')
+                if not isinstance(author, str) or not 0 < len(author) <= 60 or not author.isprintable():
+                    raise ValueError('invalid author')
+                base = payload.get('base')
+                if not isinstance(base, str) or not sha.fullmatch(base):
+                    raise ValueError('invalid base')
+                allowed = {'save': {'base', 'content', 'client', 'author'}, 'restore': {'base', 'revision', 'client', 'author'},
+                           'sync-conflict': {'base', 'content', 'action', 'client', 'author'}}[view]
+                if set(payload) - allowed:
+                    raise ValueError('unexpected fields')
+                if view == 'save':
+                    return self.reply(200, live.save(relative, base, payload.get('content'), author=author, client=client))
+                if view == 'restore':
+                    revision = payload.get('revision')
+                    if not isinstance(revision, str) or not sha.fullmatch(revision):
+                        raise ValueError('invalid revision')
+                    return self.reply(200, live.restore(relative, revision, base, author=author, client=client))
+                action = payload.get('action')
+                if action not in ('apply', 'discard'):
+                    raise ValueError('invalid action')
+                return self.reply(200, live.resolve_sync_conflict(relative, args.get('name', ''), action, base=base,
+                                                                 content=payload.get('content'), author=author, client=client))
+            except PermissionError:
+                return self.reply(403, {'error': 'untrusted_origin'})
+            except UnresolvedConflict:
+                return self.reply(422, {'error': 'unresolved_conflict', 'message': 'Resolve the marked conflict before saving.'})
+            except NotEditable as exc:
+                return self.reply(403, {'error': 'not_editable', 'reason': str(exc)})
+            except KeyError:
+                return self.reply(404, {'error': 'revision_or_copy_not_found'})
+            except (ReportUnavailable, FileNotFoundError, NotADirectoryError):
+                return self.reply(404, {'error': 'report_not_found_or_unavailable'})
+            except (ValueError, UnicodeError, json.JSONDecodeError):
+                return self.reply(400, {'error': 'invalid_request'})
+            except (OSError, sqlite3.Error):
+                return self.reply(503, {'error': 'live_edit_unavailable', 'message': 'Your text is kept in this browser; retrying.'})
+
+        def live_events(self):
+            import queue
+            relative, _ = self.live_relative()
+            if not self.server.live_streams.acquire(blocking=False):
+                return self.reply(503, {'error': 'too_many_streams'}, {'Retry-After': '5'})
+            subscriber = live.subscribe(relative)
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('X-Accel-Buffering', 'no')
+                self.end_headers()
+                self.wfile.write(b'retry: 2000\n\n')
+                self.wfile.flush()
+                while not live.stopped.is_set():
+                    try:
+                        event = subscriber.get(timeout=15)
+                    except queue.Empty:
+                        self.wfile.write(b': keep-alive\n\n')
+                        self.wfile.flush()
+                        continue
+                    if event is None:
+                        break
+                    self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                pass
+            finally:
+                live.unsubscribe(relative, subscriber)
+                self.server.live_streams.release()
+                self.close_connection = True
+
         def do_GET(self):
             import hashlib
             import os
@@ -789,6 +932,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
             url = urlsplit(self.path)
+            if url.path.startswith('/api/live/'):
+                if live is None:
+                    return self.reply(404, {'error': 'live_edit_disabled'})
+                return self.live_request('GET')
             if url.path == '/api/collaboration':
                 return self.collaboration_admitted()
             if url.path == '/api/collaboration/recovery':
@@ -846,6 +993,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'report_edit': False,
                                           'collaboration': collaboration is not None,
                                           'report_autosave': report_autosave,
+                                          'live_edit': live is not None,
                                           'fixture_publish': experimental_fixture_publish}
                 if phased and before:
                     result['capabilities']['source_authoritative'] = phase != 'summary'
@@ -990,6 +1138,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.reply(403, {'error': 'editing_disabled', 'message': 'Report writes are disabled; retain your draft.'})
 
         def do_POST(self):
+            if urlsplit(self.path).path.startswith('/api/live/'):
+                if live is None:
+                    return self.reply(404, {'error': 'live_edit_disabled'})
+                return self.live_request('POST')
             if urlsplit(self.path).path == '/api/collaboration':
                 return self.collaboration_admitted(write=True)
             self.do_PUT()
@@ -1101,6 +1253,15 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             pass
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.collaboration_slots = threading.BoundedSemaphore(4)
+    server.live_streams = threading.BoundedSemaphore(32)
+    server.live = live
+    if live is not None:
+        close = server.server_close
+
+        def server_close():
+            live.close()
+            close()
+        server.server_close = server_close
     server.static_root = Path(__file__).parent / 'static'
     server.writer = Path(writer).absolute() if writer else None
     server.writer_enabled = bool(accept_uncoordinated_writes and writer_available(server.writer))
@@ -1121,6 +1282,10 @@ def parse_config(argv=None):
     parser.add_argument('--collaboration-max-bytes', type=int, help='maximum SQLite database size in bytes (default 512 MiB; minimum 65536)')
     parser.add_argument('--experimental-fixture-publish', action='store_true', help='dangerous test-only source writes, restricted to TMPDIR')
     parser.add_argument('--report-autosave', action='store_true', help='opt in to experimental source publication; external writers and sync can race')
+    parser.add_argument('--live-edit', action='store_true',
+                        help='edit reports in the Board: autosave to Markdown, merge outside changes, push updates live')
+    parser.add_argument('--live-edit-dir', type=Path, default=Path.home() / '.local/state/bounty-board/live-edit',
+                        help='private history directory for --live-edit (outside the data root)')
     from report_publisher import DEFAULT_MAX_OPERATIONS, DEFAULT_MIN_FREE_BYTES
     parser.add_argument('--retention-max-operations', type=int, default=DEFAULT_MAX_OPERATIONS,
                         help='maximum retained publication entries (default 1000)')
@@ -1161,6 +1326,8 @@ def parse_config(argv=None):
         parser.error('collaboration max bytes must be at least 65536')
     if args.retention_max_operations < 1 or args.retention_min_free_bytes < 0:
         parser.error('retention operations must be positive and free-space floor non-negative')
+    if args.live_edit and (args.collaboration_dir or args.report_autosave or args.experimental_fixture_publish):
+        parser.error('--live-edit replaces --collaboration-dir, --report-autosave and --experimental-fixture-publish')
     return args
 
 
@@ -1174,6 +1341,7 @@ def main():
                 **({} if args.retention_max_operations == DEFAULT_MAX_OPERATIONS else {'retention_max_operations': args.retention_max_operations}),
                 **({} if args.retention_min_free_bytes == DEFAULT_MIN_FREE_BYTES else {'retention_min_free_bytes': args.retention_min_free_bytes}),
                 **({'report_autosave': True} if args.report_autosave else {}),
+                **({'live_edit_dir': args.live_edit_dir} if args.live_edit else {}),
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
 
