@@ -140,3 +140,13 @@ Evidence on the final tree (TMPDIR under the fixer scratch directory, `--test-co
 - Screenshots: `bb-agents/fix/screens/` (row menu, move preview, palette, report view in light and dark; dusk dashboard and report), checked by eye.
 
 Residual limits: the Syncthing timing rule was tested on synthetic files only, as in the review; clients idle for over 14 days whose base was pruned get a whole-document conflict (never a silent overwrite); the eviction window and prune cadence are constants (`EVICT_SECONDS`, `PRUNE_SECONDS`, `BASE_DAYS`).
+
+## Review round 2
+
+- Same independent reviewer re-checked `a21b7e8..32e9f21`: **ACCEPT**; all ten round-1 findings fixed. Three new items, fixed in `e4e177a` with regression tests in `tests/test_live_editing.py` (red on `32e9f21`, green on `e4e177a`):
+  - A (should-fix): a save released the base it started from, so a retry after a lost response became a whole-document conflict. Now the incoming base is kept until the client's next successful save.
+  - B (minor): `subscribe()` observed before adding the subscriber, absorbing an outside change silently. Now it listens first.
+  - C (minor): text was stored and referenced in separate locked steps, so another report's release could drop it in between. `History.record(text=...)` now stores and records atomically; every write path uses it.
+- Narrow re-review of `32e9f21..e4e177a`: **ACCEPT**, no new defects (live Python 37/37, live editor browser 8/8 twice).
+- Final gates on `e4e177a` (orchestrator, `--test-concurrency=1`): `tests/safe_suite.py` 275 run OK (1 skipped by design); `npm test` 159/159; broad browser suite (38 files) 236/236. Real-BBH ledger e2e last run on `32e9f21` (PASS); `e4e177a` touches only `live_editing.py` and its tests.
+- Not done: activation. No service restart, no Hoster deployment, no Tailscale or Syncthing change, no push.
