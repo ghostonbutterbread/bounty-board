@@ -359,6 +359,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         if live_root is None:
             raise ValueError('data root is unavailable')
         live = LiveReports(live_root[0], live_edit_dir, editable=lambda relative, text: not generated_navigation(relative, text))
+    from search_index import SearchIndex
+    from report_publisher import generated_navigation as _generated_navigation
+    search_index = SearchIndex(root_snapshot, FAMILIES, read_file, ledger, _generated_navigation)
+    search_slots = threading.BoundedSemaphore(4)
     collaboration_lock = threading.RLock()
     portfolio_scan = threading.BoundedSemaphore(1)
     lane_reads = threading.BoundedSemaphore(8)
@@ -925,6 +929,39 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 self.server.live_streams.release()
                 self.close_connection = True
 
+        def search_request(self, url):
+            from search_index import KINDS, MAX_QUERY
+            try:
+                params = parse_qs(url.query, keep_blank_values=True, strict_parsing=bool(url.query),
+                                  encoding='utf-8', errors='strict', max_num_fields=4)
+                if not set(params) <= {'q', 'limit', 'program', 'kind'} or any(len(v) != 1 for v in params.values()):
+                    raise ValueError('invalid parameters')
+                query = params.get('q', [''])[0]
+                if len(query) > MAX_QUERY or '\0' in query:
+                    raise ValueError('invalid query')
+                limit = 8
+                if 'limit' in params:
+                    raw = params['limit'][0]
+                    if not raw.isascii() or not raw.isdecimal() or len(raw) > 3 or not 1 <= int(raw) <= 50:
+                        raise ValueError('invalid limit')
+                    limit = int(raw)
+                program = params.get('program', [''])[0]
+                if len(program) > 200 or '\0' in program or ('program' in params and not program):
+                    raise ValueError('invalid program')
+                kinds = KINDS
+                if 'kind' in params:
+                    kinds = tuple(params['kind'][0].split(','))
+                    if not kinds or len(set(kinds)) != len(kinds) or any(k not in KINDS for k in kinds):
+                        raise ValueError('invalid kind')
+            except (ValueError, UnicodeError):
+                return self.reply(400, {'error': 'invalid_search', 'message': 'Invalid search parameters.'})
+            if not search_slots.acquire(blocking=False):
+                return self.reply(503, {'error': 'search_busy'}, {'Retry-After': '1'})
+            try:
+                return self.reply(200, search_index.search(query, limit=limit, program=program or None, kinds=kinds))
+            finally:
+                search_slots.release()
+
         def do_GET(self):
             import hashlib
             import os
@@ -936,6 +973,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 if live is None:
                     return self.reply(404, {'error': 'live_edit_disabled'})
                 return self.live_request('GET')
+            if url.path == '/api/search':
+                return self.search_request(url)
             if url.path == '/api/collaboration':
                 return self.collaboration_admitted()
             if url.path == '/api/collaboration/recovery':
@@ -1262,6 +1301,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             live.close()
             close()
         server.server_close = server_close
+    server.search_index = search_index
+    plain_close = server.server_close
+
+    def close_with_search():
+        search_index.close()
+        plain_close()
+    server.server_close = close_with_search
     server.static_root = Path(__file__).parent / 'static'
     server.writer = Path(writer).absolute() if writer else None
     server.writer_enabled = bool(accept_uncoordinated_writes and writer_available(server.writer))

@@ -1,0 +1,509 @@
+"""Background, memory-bounded search index over programs, findings and reports.
+
+The index is a read-only view built with the same safe readers the Board uses
+(`read_file`, `ledger`). A single background thread refreshes it incrementally:
+a lane's ledger is re-parsed only when its stat signature changes and a report
+is re-read only when its (mtime, size, inode) changes. Each lane is replaced
+atomically, so searches never wait for a refresh; the only lock is the pass
+lock that serializes refreshes. Nothing here writes to the data root.
+"""
+import heapq
+import os
+import re
+import stat as stat_module
+import threading
+import time
+from pathlib import Path
+
+SEVERITY_RANK = {'EXCEPTIONAL': 6, 'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'INFO': 1}
+KINDS = ('program', 'finding', 'report')
+MAX_TERMS = 6
+MAX_QUERY = 200
+_CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f  ]')
+_SPACE = re.compile(r'\s+')
+_HEADING = re.compile(r'^#{1,6}\s+(.+?)\s*#*\s*$')
+
+
+def fold(text):
+    """Lowercase without changing length, so offsets map back to the original."""
+    return ''.join(c.lower() if len(c.lower()) == 1 else c for c in text)
+
+
+def plain(text):
+    return _SPACE.sub(' ', _CONTROL.sub(' ', text)).strip()
+
+
+def parse_terms(query):
+    return [t for t in fold(plain(query)).split(' ') if t][:MAX_TERMS]
+
+
+def ranges_for(text, terms, limit=8):
+    """Merged [start, end] spans of every term in `text` (for safe highlighting)."""
+    low = fold(text)
+    spans = []
+    for term in terms:
+        start = low.find(term)
+        while start != -1 and len(spans) < limit * 3:
+            spans.append([start, start + len(term)])
+            start = low.find(term, start + len(term))
+    spans.sort()
+    merged = []
+    for span in spans:
+        if merged and span[0] <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], span[1])
+        else:
+            merged.append(span)
+    return merged[:limit]
+
+
+def _signature(stat):
+    return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def _title_of(text, fallback):
+    for line in text.split('\n', 40)[:40]:
+        match = _HEADING.match(line.strip())
+        if match:
+            return plain(match.group(1))[:160] or fallback
+    return fallback
+
+
+class SearchIndex:
+    def __init__(self, root_snapshot, families, read_file, ledger, generated_navigation, *,
+                 interval=5.0, max_report_chars=60_000, max_total_chars=24_000_000, max_reports=60_000):
+        self._root_snapshot = root_snapshot
+        self._families = families
+        self._read_file = read_file
+        self._ledger = ledger
+        self._generated_navigation = generated_navigation
+        self.interval = interval
+        self.max_report_chars = max_report_chars
+        self.max_total_chars = max_total_chars
+        self.max_reports = max_reports
+        self._lanes = {}
+        self._instance = None
+        self._built = False
+        self._warnings = ()
+        self._chars = 0
+        self._report_count = 0
+        self._pass_lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stopped = threading.Event()
+        self._first_pass = threading.Event()
+        self._thread = None
+        self._start_lock = threading.Lock()
+        self._last_pass = 0.0
+        self._last_search = 0.0
+        self.passes = 0
+
+    # ---- lifecycle -------------------------------------------------------
+    def start(self):
+        with self._start_lock:
+            if self._thread is None and not self._stopped.is_set():
+                self._thread = threading.Thread(target=self._run, name='board-search-index', daemon=True)
+                self._thread.start()
+
+    def close(self):
+        self._stopped.set()
+        self._wake.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
+
+    def _run(self):
+        while not self._stopped.is_set():
+            self._wake.clear()
+            try:
+                self.refresh()
+            except Exception:  # keep serving the last good index; retry next pass
+                self._warnings = tuple(sorted(set(self._warnings) | {'refresh_failed'}))
+            idle = time.monotonic() - self._last_search > 60
+            self._wake.wait(None if idle else self.interval)
+
+    def invalidate(self):
+        """Drop everything (root changed); the next pass rebuilds from scratch."""
+        self._lanes = {}
+        self._instance = None
+        self._built = False
+        self._first_pass.clear()
+        self._chars = self._report_count = 0
+        self._wake.set()
+
+    # ---- indexing --------------------------------------------------------
+    def refresh(self):
+        with self._pass_lock:
+            snapshot = self._root_snapshot()
+            if snapshot is None:
+                self._lanes, self._instance, self._built = {}, None, False
+                self._warnings = ('root_unavailable',)
+                return
+            if snapshot[2] != self._instance:
+                self._lanes, self._instance, self._built = {}, snapshot[2], False
+            root = snapshot[0]
+            warnings = set()
+            budget = {'chars': 0, 'reports': 0}
+            seen = set()
+            for family, lane_names in self._families.items():
+                base = root / family
+                try:
+                    if base.is_symlink() or not base.is_dir():
+                        continue
+                    programs = sorted(base.iterdir())
+                except OSError:
+                    warnings.add('discovery_incomplete')
+                    continue
+                for program in programs:
+                    if self._stopped.is_set():
+                        return
+                    try:
+                        if program.name.startswith('_') or program.is_symlink() or not program.is_dir():
+                            continue
+                        lanes = sorted(program.iterdir())
+                    except OSError:
+                        warnings.add('discovery_incomplete')
+                        continue
+                    for lane in lanes:
+                        try:
+                            if lane.name not in lane_names or lane.is_symlink() or not lane.is_dir():
+                                continue
+                        except OSError:
+                            continue
+                        key = (family, program.name, lane.name)
+                        seen.add(key)
+                        self._lanes[key] = self._scan_lane(lane, key, self._lanes.get(key), budget, warnings)
+            for key in set(self._lanes) - seen:
+                self._lanes.pop(key, None)
+            if self._root_snapshot() != snapshot:
+                self._lanes, self._instance, self._built = {}, None, False
+                return
+            self._chars, self._report_count = budget['chars'], budget['reports']
+            self._warnings = tuple(sorted(warnings))
+            self._built = True
+            self._first_pass.set()
+            self._last_pass = time.monotonic()
+            self.passes += 1
+
+    def _scan_lane(self, lane, key, old, budget, warnings):
+        family, program, name = key
+        try:
+            ledger_sig = _signature(os.lstat(lane / 'ledgers' / 'ledger.json'))
+        except OSError:
+            ledger_sig = None
+        if old is not None and old['ledger_sig'] == ledger_sig:
+            raw_findings = old['raw_findings']
+        else:
+            lane_warnings = []
+            raw = self._ledger(lane, lane_warnings) if ledger_sig is not None else None
+            raw_findings = [{k: f.get(k) for k in ('fid', 'title', 'class_name', 'severity', 'status',
+                                                    'report_path', 'evidence_path')} for f in raw or []]
+            if 'ledger_unavailable_or_invalid' in lane_warnings:
+                warnings.add('ledger_unavailable')
+        old_reports = old['reports'] if old is not None else {}
+        reports = {}
+        base = lane / 'reports'
+        if base.is_dir() and not base.is_symlink():
+            for rel, filename, stat in self._walk(base, warnings):
+                if budget['reports'] >= self.max_reports:
+                    warnings.add('report_limit')
+                    break
+                budget['reports'] += 1
+                sig = _signature(stat)
+                previous = old_reports.get(rel)
+                room = budget['chars'] < self.max_total_chars
+                if previous is not None and previous['sig'] == sig and (previous['has_text'] or not room):
+                    entry = previous
+                else:
+                    entry = self._read_report(lane, rel, filename, sig, stat.st_mtime, room, warnings)
+                budget['chars'] += len(entry['text'])
+                if not entry['has_text']:
+                    warnings.add('content_limit' if entry['unread'] != 'error' else 'content_unavailable')
+                elif entry['truncated']:
+                    warnings.add('content_truncated')
+                reports[rel] = entry
+        owners = self._ownership(lane, raw_findings)
+        findings = []
+        for f in raw_findings:
+            fid = f.get('fid')
+            if fid is None:
+                continue
+            link = None
+            for field, kind in (('report_path', 'report'), ('evidence_path', 'evidence')):
+                target = self._relative_report(lane, base, f.get(field))
+                if target in reports and not reports[target]['nav']:
+                    link = {'path': target, 'kind': kind}
+                    break
+            title = plain(str(f.get('title') or ''))
+            fields = {'fid': plain(str(fid)), 'title': title, 'class': plain(str(f.get('class_name') or '')),
+                      'severity': plain(str(f.get('severity') or '')), 'status': plain(str(f.get('status') or ''))}
+            findings.append({**fields, 'low': {k: fold(v) for k, v in fields.items()}, 'link': link})
+        for rel, entry in reports.items():
+            registered = owners['report_path'].get(rel, [])
+            evidence = owners['evidence_path'].get(rel, [])
+            entry['owner_fids'] = [str(x) for x in registered or evidence]
+            entry['report_kind'] = ('registered_report' if registered else 'generated_evidence' if evidence
+                                    else 'generated_report' if entry['generated'] else 'unregistered')
+        return {'family': family, 'program': program, 'lane': name, 'ledger_sig': ledger_sig,
+                'raw_findings': raw_findings, 'findings': findings, 'reports': reports}
+
+    @staticmethod
+    def _walk(base, warnings):
+        """Yield (relative path, name, lstat) of regular .md files; never follows symlinks."""
+        stack = [(str(base), '')]
+        while stack:
+            directory, prefix = stack.pop()
+            try:
+                with os.scandir(directory) as entries:
+                    listing = sorted(entries, key=lambda e: e.name)
+            except OSError:
+                warnings.add('reports_unavailable')
+                continue
+            for entry in listing:
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append((entry.path, prefix + entry.name + '/'))
+                    elif entry.name[-3:].lower() == '.md':
+                        stat = entry.stat(follow_symlinks=False)
+                        if stat_module.S_ISREG(stat.st_mode):
+                            yield prefix + entry.name, entry.name, stat
+                except OSError:
+                    continue
+
+    def _read_report(self, lane, rel, filename, sig, mtime, room, warnings):
+        stem = filename[:-3]
+        entry = {'sig': sig, 'mtime': mtime, 'title': stem, 'text': '', 'low': '', 'path_low': fold(rel), 'title_low': fold(stem), 'base_low': fold(stem),
+                 'has_text': False, 'truncated': False, 'nav': False, 'generated': False,
+                 'unread': 'budget', 'owner_fids': [], 'report_kind': 'unregistered'}
+        if not room:
+            return entry
+        try:
+            text = self._read_file(lane, 'reports/' + rel).decode('utf-8')
+        except (OSError, ValueError, UnicodeError):
+            entry['unread'] = 'error'
+            return entry
+        entry['nav'] = bool(self._generated_navigation(rel, text))
+        entry['generated'] = '<!-- generated: bounty-core-finding-report -->' in text
+        entry['title'] = _title_of(text, stem)
+        entry['title_low'] = fold(entry['title'])
+        if entry['nav']:
+            entry['has_text'] = True
+            return entry
+        capped = text[:self.max_report_chars]
+        entry['truncated'] = len(capped) < len(text)
+        entry['text'] = _CONTROL.sub(' ', capped)
+        entry['low'] = fold(entry['text'])
+        entry['has_text'] = True
+        entry['unread'] = ''
+        return entry
+
+    @staticmethod
+    def _relative_report(lane, base, recorded):
+        if not isinstance(recorded, str) or not recorded:
+            return None
+        candidate = Path(recorded)
+        if not candidate.is_absolute():
+            candidate = lane / candidate
+        try:
+            return Path(os.path.normpath(candidate)).relative_to(Path(os.path.normpath(base))).as_posix()
+        except ValueError:
+            return None
+
+    def _ownership(self, lane, raw_findings):
+        base = lane / 'reports'
+        owners = {'report_path': {}, 'evidence_path': {}}
+        for f in raw_findings:
+            fid = f.get('fid')
+            if not fid:
+                continue
+            for field in ('report_path', 'evidence_path'):
+                rel = self._relative_report(lane, base, f.get(field))
+                if rel:
+                    owners[field].setdefault(rel, []).append(fid)
+        return owners
+
+    # ---- state -----------------------------------------------------------
+    def state(self):
+        if not self._built:
+            return 'building'
+        return 'partial' if self._warnings else 'ready'
+
+    # ---- search ----------------------------------------------------------
+    def search(self, query, *, limit=8, program=None, kinds=KINDS):
+        started = time.perf_counter()
+        self._last_search = time.monotonic()
+        snapshot = self._root_snapshot()
+        if snapshot is None or snapshot[2] != self._instance:
+            if self._instance is not None:
+                self.invalidate()
+            self._wake.set()
+            self.start()
+        elif time.monotonic() - self._last_pass > self.interval / 2:
+            self._wake.set()
+        self.start()
+        if not self._built:
+            # A cold index gets a short grace period so the first query is useful.
+            self._first_pass.wait(1.5)
+            snapshot = self._root_snapshot()
+        terms = parse_terms(query)
+        lanes = list(self._lanes.values())
+        groups = {'programs': [], 'findings': [], 'reports': []}
+        counts = {kind: 0 for kind in KINDS}
+        if terms and self._instance is not None and snapshot is not None and snapshot[2] == self._instance:
+            if program:
+                lanes = [l for l in lanes if program in (f"{l['family']}/{l['program']}", l['program'])]
+            full = ' '.join(terms)
+            heaps = {kind: [] for kind in KINDS}
+            now = time.time()
+            seq = 0
+            if 'program' in kinds:
+                seen = {}
+                for l in lanes:
+                    entry = seen.setdefault((l['family'], l['program']), {'lanes': [], 'findings': 0, 'reports': 0})
+                    entry['lanes'].append(l['lane'])
+                    entry['findings'] += len(l['findings'])
+                    entry['reports'] += sum(1 for r in l['reports'].values() if not r['nav'])
+                for (family, name), info in seen.items():
+                    score = self._score_program(terms, full, fold(name), fold(f'{family}/{name}'))
+                    if score:
+                        counts['program'] += 1
+                        seq += 1
+                        heapq.heappush(heaps['program'], (score, -seq, {'kind': 'program', 'id': f'{family}/{name}',
+                                       'name': name, 'family': family, 'lanes': info['lanes'],
+                                       'finding_count': info['findings'], 'report_count': info['reports'],
+                                       'score': score, 'title_ranges': ranges_for(name, terms),
+                                       'target': {'program': f'{family}/{name}', 'section': 'findings'}}))
+                        if len(heaps['program']) > limit:
+                            heapq.heappop(heaps['program'])
+            for l in lanes:
+                pid = f"{l['family']}/{l['program']}"
+                if 'finding' in kinds:
+                    for f in l['findings']:
+                        score = self._score_finding(terms, full, f['low'])
+                        if not score:
+                            continue
+                        counts['finding'] += 1
+                        score += SEVERITY_RANK.get(f['severity'].upper(), 0)
+                        seq += 1
+                        if len(heaps['finding']) >= limit and (score, -seq) < heaps['finding'][0][:2]:
+                            continue
+                        link = f['link']
+                        report = None
+                        if link:
+                            r = l['reports'][link['path']]
+                            report = {'path': link['path'], 'title': r['title'], 'kind': link['kind'],
+                                      'target': {'program': pid, 'lane': l['lane'], 'section': 'reports', 'report': link['path']}}
+                        item = {'kind': 'finding', 'fid': f['fid'], 'title': f['title'] or 'Untitled finding',
+                                'severity': f['severity'], 'status': f['status'], 'class': f['class'],
+                                'program': pid, 'program_name': l['program'], 'lane': l['lane'], 'score': score,
+                                'title_ranges': ranges_for(f['title'], terms), 'report': report,
+                                'target': {'program': pid, 'lane': l['lane'], 'section': 'findings', 'finding': f['fid']}}
+                        heapq.heappush(heaps['finding'], (score, -seq, item))
+                        if len(heaps['finding']) > limit:
+                            heapq.heappop(heaps['finding'])
+                if 'report' in kinds:
+                    for rel, r in l['reports'].items():
+                        if r['nav']:
+                            continue
+                        hit = self._score_report(terms, full, r, now)
+                        if not hit:
+                            continue
+                        score, position = hit
+                        counts['report'] += 1
+                        seq += 1
+                        if len(heaps['report']) >= limit and (score, -seq) < heaps['report'][0][:2]:
+                            continue
+                        snippet = self._snippet(r, terms, position)
+                        item = {'kind': 'report', 'path': rel, 'title': r['title'], 'program': pid,
+                                'program_name': l['program'], 'lane': l['lane'], 'report_kind': r['report_kind'],
+                                'owner_fids': r['owner_fids'][:5], 'score': round(score, 2),
+                                'snippet': snippet, 'snippet_ranges': ranges_for(snippet, terms) if snippet else [],
+                                'title_ranges': ranges_for(r['title'], terms), 'modified': int(r['mtime']),
+                                'truncated': r['truncated'] or not r['has_text'],
+                                'target': {'program': pid, 'lane': l['lane'], 'section': 'reports', 'report': rel}}
+                        heapq.heappush(heaps['report'], (score, -seq, item))
+                        if len(heaps['report']) > limit:
+                            heapq.heappop(heaps['report'])
+            for kind, group in (('program', 'programs'), ('finding', 'findings'), ('report', 'reports')):
+                groups[group] = [item for _, _, item in sorted(heaps[kind], key=lambda x: (-x[0], -x[1]))]
+        return {'query': plain(query), 'index_state': self.state(), 'root_instance': self._instance,
+                'limit': limit, 'counts': counts, 'results': groups, 'warnings': list(self._warnings),
+                'took_ms': round((time.perf_counter() - started) * 1000, 2)}
+
+    # ---- scoring ---------------------------------------------------------
+    @staticmethod
+    def _text_score(term, text, exact, prefix, word, substring):
+        if text == term:
+            return exact
+        if text.startswith(term):
+            return prefix
+        if text.find(term) == -1:
+            return 0
+        return word if (' ' + term) in (' ' + text) or any(sep + term in text for sep in ('-', '_', '/', '.')) else substring
+
+    def _score_program(self, terms, full, name, pid):
+        total = 0
+        for term in terms:
+            score = self._text_score(term, name, 100, 80, 60, 40) or (20 if term in pid else 0)
+            if not score:
+                return 0
+            total += score
+        return total + (40 if name == full else 0)
+
+    def _score_finding(self, terms, full, low):
+        total = 0
+        for term in terms:
+            best = max(self._text_score(term, low['fid'], 100, 70, 50, 50),
+                       self._text_score(term, low['title'], 60, 65, 55, 40),
+                       self._text_score(term, low['class'], 40, 35, 30, 15),
+                       self._text_score(term, low['severity'], 35, 35, 15, 15),
+                       self._text_score(term, low['status'], 30, 30, 15, 15))
+            if not best:
+                return 0
+            total += best
+        if low['title'] == full:
+            total += 60
+        elif low['title'].startswith(full):
+            total += 30
+        return total
+
+    def _score_report(self, terms, full, r, now):
+        title = r['title_low']
+        path = r['path_low']
+        base = r['base_low']
+        total = 0
+        position = None
+        for term in terms:
+            best = max(self._text_score(term, title, 90, 60, 50, 45),
+                       self._text_score(term, base, 70, 55, 45, 40),
+                       40 if term in path else 0)
+            if not best and r['low']:
+                at = r['low'].find(term)
+                if at != -1:
+                    best = 10 + (3 if r['low'].find(term, at + len(term)) != -1 else 0)
+                    if position is None:
+                        position = (at, len(term))
+            if not best:
+                return None
+            total += best
+        if title == full:
+            total += 60
+        age_days = max(0.0, (now - r['mtime']) / 86400)
+        total += 5 * max(0.0, 1 - age_days / 60) + (3 if r['owner_fids'] else 0)
+        return total, position
+
+    @staticmethod
+    def _snippet(r, terms, position):
+        text = r['text']
+        if not text:
+            return ''
+        if position is None:
+            at = next((r['low'].find(t) for t in terms if r['low'].find(t) != -1), -1)
+            if at == -1:
+                body = [l for l in text.split('\n') if l.strip() and not l.lstrip().startswith('#')]
+                return plain(' '.join(body))[:160]
+            position = (at, len(terms[0]))
+        start = max(0, position[0] - 60)
+        end = min(len(text), position[0] + position[1] + 100)
+        snippet = plain(text[start:end])
+        return ('…' if start else '') + snippet + ('…' if end < len(text) else '')
