@@ -45,7 +45,50 @@
   }
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
   // window.BoardModules and mount into host elements after every render.
-  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, api:window.BoardAPI, ui:window.BoardUI});
+  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, hrefFor, api:window.BoardAPI, ui:window.BoardUI});
+  // ---- Real links (feat/board-report-links-recent) ----
+  // Every in-app destination is an <a href> in the hash route format, so
+  // middle-click, Ctrl/Cmd/Shift+click and "Open link in new tab" work
+  // natively. hrefFor(target) takes the ctx.navigate target shape and returns
+  // exactly what routeFor() produces for that view; a finding adds
+  // /findings/<id>, which parseRoute() turns into the row highlight.
+  function hrefFor(target={}) {
+    if(!target || typeof target!=='object' || target.view==='dashboard')return '#/dashboard';
+    if(target.view==='recent')return '#/recent';
+    const program=target.program==null ? state.program : String(target.program);
+    if(!program)return '#/programs';
+    const lane=target.lane!=null ? String(target.lane) : program===state.program ? state.lane : String((list(programs().find(p=>String(p.id)===program)?.lanes)||[])[0]?.name ?? '');
+    const section=target.section!=null ? String(target.section) : target.report!=null ? 'reports' : 'findings';
+    const tail=section==='reports' && target.report!=null ? '/'+encodeURIComponent(String(target.report)) : section==='findings' && target.finding!=null ? '/'+encodeURIComponent(String(target.finding)) : '';
+    return `#/programs/${encodeURIComponent(program)}/${encodeURIComponent(lane)}/${section}${tail}`;
+  }
+  // Plain left clicks on in-app links stay in the page (no reload) and go
+  // through the one navigate(); modified clicks, other buttons, links with a
+  // target and clicks a module already handled are left to the browser.
+  function openRoute(route) {
+    if(route.view!=='program'){navigate({view:route.view});return true;}
+    const ok=moduleNavigate({program:route.program || undefined,lane:route.lane || undefined,section:route.section,report:route.report || undefined,finding:route.highlight || undefined});
+    if(!ok)toast('That item is not in the loaded data. Refresh the board and try again.','warning');
+    return ok;
+  }
+  document.addEventListener('click',event=>{
+    if(event.defaultPrevented || event.button!==0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || !state.data)return;
+    const link=event.target.closest?.('a[href^="#/"]');
+    if(!link || (link.target && link.target!=='_self') || link.hasAttribute('download'))return;
+    const route=parseRoute(link.getAttribute('href'));if(!route)return;
+    event.preventDefault();openRoute(route);
+  });
+  // Relative modification time ("5 min ago"); callers put the absolute time in a title.
+  function relativeTime(seconds, now=Date.now()/1000) {
+    if(typeof seconds!=='number' || !Number.isFinite(seconds))return '';
+    const d=Math.max(0,now-seconds);
+    if(d<60)return 'just now';
+    if(d<3600)return `${Math.floor(d/60)} min ago`;
+    if(d<86400)return `${Math.floor(d/3600)} h ago`;
+    if(d<86400*30)return `${Math.floor(d/86400)} d ago`;
+    return new Date(seconds*1000).toISOString().slice(0,10);
+  }
+  const absoluteTime = seconds => typeof seconds==='number' && Number.isFinite(seconds) ? new Date(seconds*1000).toLocaleString() : '';
   // Taxonomy seam (static/modules/taxonomy.js): display-time labels only; the raw
   // class and severity stay as recorded and remain what filters and edits use.
   const taxonomy = () => window.BoardTaxonomy?.ready?.() ? window.BoardTaxonomy : null;
@@ -354,7 +397,7 @@
   }
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
   themeButton.addEventListener('click', () => openMenu(themeButton,[{heading:'Theme'},...THEMES.map(([key,label,glyph])=>({label,icon:glyph,checked:document.documentElement.dataset.theme===key,onSelect:()=>applyTheme(key)}))],{label:'Theme',align:'end'}));
-  document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {state.view=button.dataset.view;routePush=true;render();}));
+  document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {state.view=button.dataset.view;state.routeNotice='';routePush=true;render();}));
   // Collapsible sidebar (icon rail); the preference persists per browser origin.
   const shell=document.querySelector('#shell'), sidebarToggle=document.querySelector('#sidebar-toggle');
   function setSidebar(collapsed) {
@@ -391,12 +434,16 @@
     const ps=programs();
     if (state.dashboardProgram && !ps.some(p=>String(p.id)===state.dashboardProgram)) state.dashboardProgram='';
     if (!ps.some(p=>String(p.id)===state.program)) {
+      if(state.programOrigin==='route' && state.program && ps.length)state.routeNotice=`The linked program "${state.program}" was not found. Showing another program instead.`;
       const last=readStore('bounty-board-last-program',null);
       if(last && typeof last.program==='string' && ps.some(p=>String(p.id)===last.program)){state.program=last.program;state.programOrigin='last-used';if(typeof last.lane==='string' && !state.lane)state.lane=last.lane;}
       else {state.program=ps.length ? String(ps[0].id) : '';state.programOrigin='default';}
     }
     const lanes=list(currentProgram()?.lanes)||[];
-    if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
+    if (!lanes.some(l=>String(l.name)===state.lane)) {
+      if(state.programOrigin==='route' && state.lane && lanes.length && !state.routeNotice)state.routeNotice=`The linked lane "${state.lane}" was not found in this program. Showing ${lanes[0].name} instead.`;
+      state.lane=lanes.length ? String(lanes[0].name) : '';
+    }
   }
   let pendingReportRefresh=null;
   let loadGeneration=0, applyGeneration=0, renderGeneration=0;
@@ -633,6 +680,15 @@
     const id=String(finding.id), path=typeof finding.report_path==='string' ? finding.report_path.replace(/^reports\//,'') : null;
     return reports.find(r=>r.id!=null && ((Array.isArray(r.owner_fids) && r.owner_fids.map(String).includes(id) && r.kind==='registered_report') || (path && r.path===path))) || null;
   };
+  // Report id (its path) for a finding: from the loaded report index, else
+  // derived from a relative reports/... report_path while the index is not
+  // loaded. A stale derived link opens the report view's not-found message.
+  const reportIdFor = (lane, finding) => {
+    const report=reportFor(lane,finding);if(report)return String(report.id);
+    if(Array.isArray(lane?.reports) && !reportsIncomplete(lane))return null;
+    const path=typeof finding?.report_path==='string' && finding.report_path.startsWith('reports/') ? finding.report_path.slice(8) : '';
+    return path.toLowerCase().endsWith('.md') && !path.split('/').some(part=>!part || part==='.' || part==='..') ? path : null;
+  };
   function workspaceTarget() {
     if(state.dashboardProgram){const p=programs().find(p=>String(p.id)===state.dashboardProgram);if(p)return {program:p,lane:String(p.id)===state.program?state.lane:(list(p.lanes)||[])[0]?.name,why:'Dashboard filter'};}
     const p=currentProgram();if(!p)return null;
@@ -679,9 +735,9 @@
     // Bulk reclassify (ledger actions) for one raw class, from its expanded row.
     const review=kind==='class' && group.key!=='none' && classWritable() && window.BoardLedgerActions?.openClassReview ? `<div class="drill-actions"><span class="hint">${group.items.length} ${group.items.length===1?'finding':'findings'} with class <code>${esc(group.key)}</code></span><button type="button" class="button sm" data-class-review="${esc(group.key)}" aria-label="Review and reclassify ${esc(group.key)} findings">${icon('pencil')}<span>Reclassify</span></button></div>` : '';
     return `<div class="drill" id="drill-${esc(kind)}-${esc(group.key.replace(/[^a-z0-9_-]/gi,'_'))}">${review}${sorted.map(({p,l,items})=>`<div class="drill-group"><h4>${icon('folder-o')}<span>${esc(programLabel(p))} / ${esc(l.name)}</span><span class="count">${items.length}</span></h4><ul>${items.sort((a,b)=>sevRank(a.f.severity)-sevRank(b.f.severity)).map(({f})=>{
-      const report=reportFor(l,f);
+      const report=reportIdFor(l,f);
       const target=`data-program="${esc(p.id)}" data-lane="${esc(l.name)}"`;
-      return `<li>${kind!=='sev'?sevBadge(f.severity):statusBadge(f.status)||''}<button type="button" class="link-button truncate" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</button><span class="meta">${kind==='cat' && f.class?`<span class="badge outline">${esc(f.class)}</span>`:''}<span class="id">${esc(f.id??'')}</span>${isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<button type="button" class="link-button" data-goto-report="${esc(report.id)}" ${target}>${icon('file-text-o')} Report</button>`:''}</span></li>`;
+      return `<li>${kind!=='sev'?sevBadge(f.severity):statusBadge(f.status)||''}<a class="link-button truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta">${kind==='cat' && f.class?`<span class="badge outline">${esc(f.class)}</span>`:''}<span class="id">${esc(f.id??'')}</span>${isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<a class="link-button" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target}>${icon('file-text-o')} Report</a>`:''}</span></li>`;
     }).join('')}</ul></div>`).join('')}</div>`;
   }
   function breakdown(kind, groups, total) {
@@ -716,11 +772,11 @@
       const pl=list(p.lanes), fs=pl ? pl.flatMap(l=>list(l.findings)||[]) : [], known=pl && pl.every(l=>Array.isArray(l.findings));
       const top=fs.length ? fs.reduce((best,f)=>sevRank(f.severity)<sevRank(best.severity)?f:best,fs[0]).severity : null;
       const search=[p.id,p.name,p.family,...(pl||[]).map(l=>l.name)].join(' ').toLowerCase();
-      return `<tr data-program-row data-search="${esc(search)}"><td><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><span class="id" style="display:block">${esc(p.family||'Family not provided')}</span></td><td class="num">${pl?pl.length:'Unavailable'}</td><td class="num">${known?fs.length:'Unknown'}</td><td class="num">${known?fs.filter(isNotSubmitted).length:'Unknown'}</td><td>${top!=null && top!==''?sevBadge(top):'<span class="hint">None</span>'}</td></tr>`;
+      return `<tr data-program-row data-search="${esc(search)}"><td><a class="link-button" href="${esc(hrefFor({program:p.id,lane:(pl||[])[0]?.name ?? '',section:'findings'}))}" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</a><span class="id" style="display:block">${esc(p.family||'Family not provided')}</span></td><td class="num">${pl?pl.length:'Unavailable'}</td><td class="num">${known?fs.length:'Unknown'}</td><td class="num">${known?fs.filter(isNotSubmitted).length:'Unknown'}</td><td>${top!=null && top!==''?sevBadge(top):'<span class="hint">None</span>'}</td></tr>`;
     }).join('');
     return `${title('Dashboard','A portfolio view of the records currently loaded.',controls)}
       <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}${openOnly?' Finding counts include not-submitted work only.':''}</p></div><div class="open-workspace"><button class="button primary" data-go-program ${target?'':'disabled'}>${icon('arrow-right')}<span>Open workspace</span></button><button type="button" class="button" data-program-picker ${options.length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>${target?`<p class="target-note">Opens <strong>${esc(programLabel(target.program))}</strong>${target.lane?` / ${esc(target.lane)}`:''}<span class="badge outline">${esc(target.why)}</span></p>`:''}</div></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records',openOnly?' (not submitted)':'')}${stat(state.data?.portfolio_unloaded ? 'Unknown' : state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
-      ${availability(ps)}<div class="dashboard-grid"><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?`Counts from all loaded ${scope}.`:`Incomplete data: counts include loaded ${scope} only, not portfolio totals.`} Select a row to list matching findings by program.</p>${sevGroups.length?breakdown('sev',sevGroups):'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad" aria-label="Finding classes"><div class="blockhead"><h2>Finding classes</h2>${catGroups.length?`<div class="segmented" role="group" aria-label="Group classes"><button type="button" data-class-group="class" aria-pressed="${!byCategory}">By class</button><button type="button" data-class-group="category" aria-pressed="${byCategory}">By category</button></div>`:''}</div><p class="hint">${byCategory?`Raw classes grouped by display-time category rules on loaded ${scope}. Raw classes stay unchanged; Unclassified keeps the raw label.`:`Classification on loaded ${scope}; not coverage.`} Select a row to list matches.</p>${byCategory?breakdown('cat',catGroups):clsGroups.length?breakdown('class',clsGroups):'<div class="state">No classified findings available.</div>'}</section><section class="panel wide"><div class="panel-head"><div><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p></div></div>${ps.length?`<div class="program-search"><div class="input-icon">${icon('search')}<input id="program-search" type="search" aria-label="Search programs" placeholder="Search programs" value="${esc(state.programQuery||'')}" autocomplete="off"></div><span class="hint num" id="program-search-count"></span></div><div class="table-wrap"><table class="program-table"><thead><tr><th>Program</th><th>Lanes</th><th>Findings</th><th>Not submitted</th><th>Highest severity</th></tr></thead><tbody>${programRows}</tbody></table><div class="state" id="program-search-empty" hidden>No programs match this search.</div></div>`:discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for all loaded findings.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
+      ${availability(ps)}<div class="dashboard-grid"><div id="dashboard-recent-host" class="wide"></div><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?`Counts from all loaded ${scope}.`:`Incomplete data: counts include loaded ${scope} only, not portfolio totals.`} Select a row to list matching findings by program.</p>${sevGroups.length?breakdown('sev',sevGroups):'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad" aria-label="Finding classes"><div class="blockhead"><h2>Finding classes</h2>${catGroups.length?`<div class="segmented" role="group" aria-label="Group classes"><button type="button" data-class-group="class" aria-pressed="${!byCategory}">By class</button><button type="button" data-class-group="category" aria-pressed="${byCategory}">By category</button></div>`:''}</div><p class="hint">${byCategory?`Raw classes grouped by display-time category rules on loaded ${scope}. Raw classes stay unchanged; Unclassified keeps the raw label.`:`Classification on loaded ${scope}; not coverage.`} Select a row to list matches.</p>${byCategory?breakdown('cat',catGroups):clsGroups.length?breakdown('class',clsGroups):'<div class="state">No classified findings available.</div>'}</section><section class="panel wide"><div class="panel-head"><div><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p></div></div>${ps.length?`<div class="program-search"><div class="input-icon">${icon('search')}<input id="program-search" type="search" aria-label="Search programs" placeholder="Search programs" value="${esc(state.programQuery||'')}" autocomplete="off"></div><span class="hint num" id="program-search-count"></span></div><div class="table-wrap"><table class="program-table"><thead><tr><th>Program</th><th>Lanes</th><th>Findings</th><th>Not submitted</th><th>Highest severity</th></tr></thead><tbody>${programRows}</tbody></table><div class="state" id="program-search-empty" hidden>No programs match this search.</div></div>`:discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for all loaded findings.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
   function applyProgramSearch() {
     const input=app.querySelector('#program-search');if(!input)return;
@@ -742,7 +798,7 @@
     return `${header}<div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div><div><strong>${rows('findings') ? rows('findings').filter(isNotSubmitted).length : 'Unknown'}</strong><span>Not submitted</span></div></div></section>${availability([{...p,lanes:[lane]}])}<div class="layout"><div class="stack"><nav class="tabs workspace-nav" aria-label="Workspace sections">${nav}</nav>${sectionContent()}</div></div></div>`;
   }
   const FILTERS=[['severity','Severity','severities'],['class','Class','classes'],['status','Status','statuses'],['submission','Submission','submission states'],['age','First seen','first seen dates']];
-  const emptyFilters = () => ({severity:[],class:[],status:[],submission:[],age:[],query:''});
+  const emptyFilters = () => ({severity:[],class:[],status:[],submission:[],age:[],query:'',reports:''});
   // First-seen age buckets are disjoint so the multi-select stays meaningful
   // (pick "Last 7 days" and "8 to 30 days" for the last month).
   const AGE_BUCKETS=['Last 7 days','8 to 30 days','31 to 90 days','Older than 90 days','No date recorded'];
@@ -831,7 +887,7 @@
     const f=state.filters, query=f.query.trim().toLowerCase();
     const filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
     const program=currentProgram(), laneName=state.lane;
-    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="date">${seenCell(r)}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
+    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${(rid=>rid?`<a class="report-ref" href="${esc(hrefFor({program:program?.id,lane:laneName,section:'reports',report:rid}))}" title="Open report ${esc(rid)}">${icon('file-text-o')}<span>Report</span></a>`:'')(reportIdFor(currentLane(),r))}${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="date">${seenCell(r)}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
     const chips=FILTERS.flatMap(([k,label])=>(f[k]||[]).map(v=>`<span class="chip" data-filter-chip><span class="chip-key">${esc(label)}</span><span>${esc(v)}</span><button type="button" data-remove-filter="${k}" data-value="${esc(v)}" aria-label="Remove filter ${esc(label)} ${esc(v)}">${icon('times')}</button></span>`));
     const anyFilter=chips.length || query;
@@ -917,17 +973,45 @@
     const partial=reportsIncomplete(currentLane()) && Array.isArray(rows('reports'));
     return savedSharedRecovery()+(partial ? '<div class="message warning">Report list is incomplete; some reports may be unavailable.</div>' : '')+reportEditor();
   }
+  // Browsable list of the lane's reports as real links, newest first.
+  // Generated navigation is hidden unless asked for; the filter hides rows
+  // in place (applyReportFilter) without a re-render.
+  function reportBrowser(all) {
+    const program=currentProgram();if(!program)return '';
+    const navCount=all.filter(r=>r.kind==='generated_navigation').length, showNav=state.reportNav===true;
+    const items=all.filter(r=>r.id!=null && (showNav || r.kind!=='generated_navigation')).sort((a,b)=>(typeof b.modified==='number'?b.modified:-1)-(typeof a.modified==='number'?a.modified:-1) || String(a.path??a.id).localeCompare(String(b.path??b.id)));
+    const open=readStore('bounty-board-report-list-open',true)!==false;
+    const kinds={registered_report:'Registered',generated_report:'Generated',generated_evidence:'Evidence',generated_navigation:'Navigation',unregistered:'Unregistered'};
+    const rowsHtml=items.map(r=>{
+      const name=String(r.title || r.name || r.id), path=String(r.path ?? ''), owners=Array.isArray(r.owner_fids) ? r.owner_fids.map(String) : [];
+      const when=relativeTime(r.modified);
+      return `<li data-report-row data-search="${esc([name,path,...owners].join(' ').toLowerCase())}"><a class="report-link" href="${esc(hrefFor({program:program.id,lane:state.lane,section:'reports',report:r.id}))}"${String(r.id)===state.report?' aria-current="page"':''}><span class="report-link-title">${esc(name)}</span>${path && path!==name?`<span class="report-link-path">${esc(path)}</span>`:''}</a><span class="report-link-meta">${owners.length?`<span class="id">${esc(owners[0])}</span>`:''}${kinds[r.kind]?`<span class="badge outline">${esc(kinds[r.kind])}</span>`:''}${when?`<time datetime="${esc(new Date(r.modified*1000).toISOString())}" title="${esc(absoluteTime(r.modified))}">${esc(when)}</time>`:''}</span></li>`;
+    }).join('');
+    return `<details class="report-browser" data-report-browser${open?' open':''}><summary>Reports in this lane <span class="count">${items.length}</span></summary><div class="report-browser-tools"><div class="input-icon">${icon('search')}<input id="report-filter" type="search" aria-label="Filter reports in this lane" placeholder="Filter by name, path or finding" value="${esc(state.filters.reports||'')}" autocomplete="off"></div>${navCount?`<label class="report-nav-toggle"><input type="checkbox" id="report-nav-toggle"${showNav?' checked':''}> Show generated navigation (${navCount})</label>`:''}<span class="hint num" id="report-filter-count"></span></div>${items.length?`<ul class="report-links" aria-label="Reports in this lane">${rowsHtml}</ul>`:''}<p class="state" id="report-filter-empty"${items.length?' hidden':''}>${items.length?'No reports match this filter.':'Only generated navigation in this lane.'}</p><p class="hint">Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></details>`;
+  }
+  function applyReportFilter() {
+    const input=app.querySelector('#report-filter');if(!input)return;
+    const q=input.value.trim().toLowerCase();let shown=0;
+    const rowsEl=[...app.querySelectorAll('[data-report-row]')];
+    for(const row of rowsEl){const match=!q || q.split(/\s+/).every(t=>row.dataset.search.includes(t));row.hidden=!match;if(match)shown++;}
+    const empty=app.querySelector('#report-filter-empty');if(empty && rowsEl.length)empty.hidden=shown>0;
+    const count=app.querySelector('#report-filter-count');if(count)count.textContent=q?`${shown} of ${rowsEl.length}`:'';
+  }
   function reportEditor() {
     if(state.data?.portfolio_unloaded && !currentLane()?._reportsLoaded)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports are loading.</div></section>';
     if(state.data?.reports_loading && !currentLane()?._reportsLoaded)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports are loading.</div></section>';
     const all=rows('reports'); if(!all)return unavailable('Reports');
     if(!all.length)return `<section class="panel panel-pad"><h2>Reports</h2><div class="state">${reportsIncomplete(currentLane())?'No reports loaded.':'No reports in this lane.'}</div></section>`;
+    // A report opened from a link or route that is not in this lane gets a
+    // clear message (with the lane's list) instead of another report.
+    if(state.report && state.report===state.linkedReport && !all.some(r=>String(r.id)===state.report))return `<section class="panel panel-pad"><h2>Reports</h2><div class="message warning" role="alert" data-report-missing>Report not found in this lane: <code>${esc(state.report)}</code>. It may have been moved, renamed or deleted, or the link is out of date. Choose a report below.</div>${reportBrowser(all)}</section>`;
+    state.linkedReport='';
     if(!all.some(r=>String(r.id)===state.report)) state.report=String(all[0].id??'');
     const report=reportById(state.report); if(!report || report.id==null)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports need stable IDs before they can be opened.</div></section>';
     const kindNames={registered_report:'Registered report',generated_report:'Generated report',generated_evidence:'Generated evidence',generated_navigation:'Generated navigation',unregistered:'Unregistered artifact',unknown:'Ownership unknown'};
     const kind=report.kind == null ? 'Ownership not provided' : (kindNames[report.kind] || String(report.kind));
     const owner=Array.isArray(report.owner_fids) && report.owner_fids.length ? `Finding owner IDs: ${report.owner_fids.map(display).join(', ')}` : '';
-    const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>`;
+    const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>${reportBrowser(all)}`;
     if(state.data?.capabilities?.live_edit){
       // The live editor module owns this host; it persists across renders.
       const program=currentProgram();
@@ -1440,17 +1524,20 @@
     // Module hosts survive re-renders when they still describe the same report,
     // so a live editor session is not torn down by unrelated updates.
     const keptHosts=['live-report-host','report-artifacts-host'].map(id=>app.querySelector(`#${id}`)).filter(Boolean);
+    const reportListScroll=app.querySelector('.report-links')?.scrollTop || 0;
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
     portfolioAction.hidden=!state.data?.portfolio_unloaded;
     portfolioButton.disabled=!!state.data?._portfolioLoading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
-    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':'Programs';
+    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':'Programs';
     const trail=document.querySelector('#breadcrumb-trail'), crumbProgram=state.view==='program' && !state.loading ? currentProgram() : null;
     if(trail)trail.innerHTML=crumbProgram ? [programLabel(crumbProgram),state.lane,(sections.find(([k])=>k===state.section)||[])[1]].filter(Boolean).map(part=>`<span class="sep" aria-hidden="true">/</span> <span class="crumb-current">${esc(part)}</span>`).join(' ') : '';
     if(state.loading) app.innerHTML=skeleton();
     else if(state.error) app.innerHTML=`<div class="panel empty error-state" role="alert">${icon('exclamation-circle')}<h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
-    else app.innerHTML=state.view==='dashboard'?dashboard():workspace();
+    else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():workspace();
     for(const old of keptHosts){const fresh=app.querySelector(`#${old.id}`);if(fresh && ['family','program','lane','path','reportId'].every(k=>fresh.dataset[k]===old.dataset[k]))fresh.replaceWith(old);}
+    const reportList=app.querySelector('.report-links');if(reportList && reportListScroll)reportList.scrollTop=reportListScroll;
+    if(state.routeNotice && !state.loading)app.insertAdjacentHTML('afterbegin',`<div class="message warning" role="alert">${esc(state.routeNotice)} <button type="button" class="link-button" data-dismiss-route-notice>Dismiss</button></div>`);
     if(state.metadataPending && !app.querySelector('#metadata-message')) app.insertAdjacentHTML('afterbegin','<div class="message warning" role="status">Updating metadata; waiting for confirmation. Displayed values are the last loaded or confirmed values.</div>');
     if(state.metadataErrors.length) app.insertAdjacentHTML('afterbegin',state.metadataErrors.map(error=>`<div class="message warning" role="alert">${esc(error)}</div>`).join(''));
     if(state.metadataDrafts.size) app.insertAdjacentHTML('afterbegin',[...state.metadataDrafts.values()].map(d=>`<div class="message warning" role="alert">${esc(d.message)}<label>Pending ${esc(d.field)} value — copy before leaving<textarea readonly rows="2">${esc(d.value)}</textarea></label><button type="button" data-discard-metadata="${d.sequence}">Discard pending value</button></div>`).join(''));
@@ -1473,6 +1560,7 @@
     }
     renderRecovery();
     applyProgramSearch();
+    applyReportFilter();
     renderRecent();
     if(focusKey){const el=app.querySelector(`${focusKey[2]?'.tabs ':''}[${focusKey[0]}="${CSS.escape(focusKey[1])}"]`);el?.focus({preventScroll:true});}
     if(state.scrollToHighlight){const row=app.querySelector(`tr.highlight`);if(row){state.scrollToHighlight=false;row.scrollIntoView({block:'center',behavior:'smooth'});}}
@@ -1481,12 +1569,19 @@
     for(const module of window.BoardModules || []){try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}}
     if(!state.loading){loadSelectedLane();loadSelectedReports();retryDeferredApply();}
   }
+  // Recent reports view: the page frame only; static/modules/recent-reports.js
+  // fills #recent-reports-host (filters, list, paging) from /api/recent-reports.
+  function recentView() {
+    return `${title('Recent reports','Reports across every program and lane, by last modified time.')}<div class="stack">${rootWarning()}<div id="recent-reports-host"><div class="panel state">Loading recent reports…</div></div></div>`;
+  }
   function skeleton() {
     const line=w=>`<span class="skeleton sk-line" style="width:${w}%"></span>`;
     return `<div class="skeleton-page" aria-busy="true"><p class="skeleton-caption">${icon('circle-o-notch fa-spin')}Loading workspace…</p><div class="panel panel-pad"><span class="skeleton sk-title"></span>${line(42)}<div class="stats">${('<div class="stat">'+line(30)+line(60)+'</div>').repeat(4)}</div></div><div class="dashboard-grid"><div class="panel panel-pad">${line(35)}${line(90)}${line(80)}${line(70)}</div><div class="panel panel-pad">${line(35)}${line(85)}${line(75)}${line(60)}</div></div></div>`;
   }
-  // ---- Hash routing: #/dashboard or #/programs/<program>/<lane>/<section>[/<report>] ----
+  // ---- Hash routing: #/dashboard, #/recent or #/programs/<program>/<lane>/<section>[/<report>] ----
+  // Incoming links may also use #/programs/<program>/<lane>/findings/<finding id>.
   function routeFor() {
+    if(state.view==='recent')return '#/recent';
     if(state.view!=='program')return '#/dashboard';
     if(!state.program)return '#/programs';
     return `#/programs/${encodeURIComponent(state.program)}/${encodeURIComponent(state.lane)}/${state.section}${state.section==='reports' && state.report ? '/'+encodeURIComponent(state.report) : ''}`;
@@ -1494,7 +1589,11 @@
   function parseRoute(hash) {
     const parts=String(hash||'').replace(/^#\/?/,'').split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
     if(parts[0]==='dashboard')return {view:'dashboard'};
-    if(parts[0]==='programs')return {view:'program',program:parts[1]||'',lane:parts[2]||'',section:sections.some(([k])=>k===parts[3])?parts[3]:'findings',report:parts.slice(4).join('/')};
+    if(parts[0]==='recent')return {view:'recent'};
+    if(parts[0]==='programs'){
+      const section=sections.some(([k])=>k===parts[3])?parts[3]:'findings', rest=parts.slice(4).join('/');
+      return {view:'program',program:parts[1]||'',lane:parts[2]||'',section,report:section==='reports'?rest:'',...(section==='findings' && rest ? {highlight:rest} : {})};
+    }
     return null;
   }
   function syncRoute() {
@@ -1504,6 +1603,7 @@
     routePush=false;
   }
   function navigate(next={}, options={}) {
+    const missingProgram=next.program ? !programs().some(p=>String(p.id)===String(next.program)) : false;
     if(next.view)state.view=next.view;
     if(next.program!==undefined && next.program!==state.program){
       ++laneGeneration;state.program=next.program;state.lane=next.lane||'';state.report='';state.filters=emptyFilters();normalizeSelection();
@@ -1511,8 +1611,9 @@
       ++laneGeneration;state.lane=next.lane;state.report='';state.filters=emptyFilters();
     }
     if(next.section && sections.some(([k])=>k===next.section))state.section=next.section;
-    if(next.report!==undefined)state.report=next.report;
+    if(next.report!==undefined){state.report=next.report;state.linkedReport=next.report;}
     state.highlight=next.highlight ?? '';state.scrollToHighlight=!!next.highlight;
+    state.routeNotice=missingProgram ? `The linked program "${next.program}" was not found. Showing another program instead.` : '';
     if(state.view==='program' && next.program!==undefined && !options.fromHistory)markProgramUsed();
     routePush=!options.fromHistory;
     closePopover(false);
@@ -1523,6 +1624,7 @@
     if(!route || !state.data || location.hash===routeFor())return;
     navigate(route,{fromHistory:true});
   });
+  app.addEventListener('toggle',event=>{if(event.target.matches?.('[data-report-browser]'))writeStore('bounty-board-report-list-open',event.target.open);},true);
   app.addEventListener('focusout',event=>{if(!phaseStatus.contains(event.relatedTarget) && !portfolioAction.contains(event.relatedTarget))retryDeferredApply();});
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
@@ -1573,7 +1675,6 @@
     else if(target.hasAttribute('data-discard-current-path')){recoveryPaths.delete(recoveryPathKey());render();}
     else if(target.hasAttribute('data-discard-path')){for(const [key,path] of recoveryPaths)if(String(path.sequence)===target.dataset.discardPath){recoveryPaths.delete(key);break;}render();}
     else if(target.hasAttribute('data-go-program')){if(state.dashboardProgram && state.program!==state.dashboardProgram){++laneGeneration;state.program=state.dashboardProgram;state.lane='';state.report='';state.filters=emptyFilters();normalizeSelection();}state.view='program';markProgramUsed();routePush=true;render();}
-    else if(target.hasAttribute('data-open-program')){++laneGeneration;if(state.program!==target.dataset.openProgram)state.filters=emptyFilters();state.program=target.dataset.openProgram;state.lane='';state.report='';normalizeSelection();state.view='program';state.section='findings';markProgramUsed();routePush=true;render();}
     else if(target.dataset.section){state.section=target.dataset.section;state.highlight='';routePush=true;render();}
     else if(target.hasAttribute('data-program-picker')){
       const fromDashboard=state.view==='dashboard';
@@ -1583,8 +1684,7 @@
     else if(target.hasAttribute('data-dash-work')){state.dashWork=target.dataset.dashWork==='open'?'open':'all';writeStore('bounty-board-dashboard-work',state.dashWork);render();}
     else if(target.hasAttribute('data-class-group')){state.classGroupBy=target.dataset.classGroup==='category'?'category':'class';writeStore('bounty-board-class-group',state.classGroupBy);state.dashExpanded='';render();}
     else if(target.hasAttribute('data-breakdown')){state.dashExpanded=state.dashExpanded===target.dataset.breakdown?'':target.dataset.breakdown;render();}
-    else if(target.hasAttribute('data-goto-finding')){state.filters=emptyFilters();navigate({view:'program',program:target.dataset.program,lane:target.dataset.lane,section:'findings',highlight:target.dataset.gotoFinding});}
-    else if(target.hasAttribute('data-goto-report')){navigate({view:'program',program:target.dataset.program,lane:target.dataset.lane,section:'reports',report:target.dataset.gotoReport});}
+    else if(target.hasAttribute('data-dismiss-route-notice')){state.routeNotice='';render();}
     else if(target.hasAttribute('data-sort')){
       const key=target.dataset.sort, current=state.sort||{};
       const first=SORT_FIRST_DIR[key]||'asc', second=first==='asc'?'desc':'asc';
@@ -1619,6 +1719,7 @@
     else if(el.id==='program-select'){++laneGeneration;state.program=el.value;state.lane='';state.report='';state.filters=emptyFilters();normalizeSelection();markProgramUsed();routePush=true;render();}
     else if(el.id==='lane-select'){++laneGeneration;state.lane=el.value;state.report='';state.filters=emptyFilters();markProgramUsed();routePush=true;render();}
     else if(el.id==='report-select'){state.report=el.value;routePush=true;render();}
+    else if(el.id==='report-nav-toggle'){state.reportNav=el.checked;render();app.querySelector('#report-nav-toggle')?.focus();}
     else if(el.dataset.metadata){
       const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
       const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
@@ -1635,6 +1736,7 @@
     }
     if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(rationaleKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
     if(el.id==='program-search'){state.programQuery=el.value;applyProgramSearch();}
+    if(el.id==='report-filter'){state.filters.reports=el.value;applyReportFilter();}
     if(el.id==='finding-search'){const pos=el.selectionStart;state.filters.query=el.value;render();const input=document.querySelector('#finding-search');input?.focus();input?.setSelectionRange(pos,pos);}
     if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}
   });
@@ -1660,12 +1762,12 @@
   const initialRoute=parseRoute(location.hash);
   if(initialRoute){
     state.view=initialRoute.view;
-    if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.programOrigin='route';}
+    if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
   }
   // Public UI helpers for feature modules (see style.css header for tokens).
   window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker,
     navigate:(route)=>navigate(route||{}), severityKey:sevKey, severityRank:sevRank, severityBadge:sevBadge,
-    statusBadge, submissionState, isNotSubmitted, icon, escape:esc,
+    statusBadge, submissionState, isNotSubmitted, icon, escape:esc, hrefFor, relativeTime, absoluteTime,
     // provider(row, {program, lane}) returns extra row-menu items for a finding.
     registerFindingActions:provider=>{if(typeof provider==='function')findingActionProviders.push(provider);}});
   claimTab().then(load);

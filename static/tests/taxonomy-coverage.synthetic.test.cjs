@@ -73,6 +73,7 @@ test('taxonomy labels and coverage drill-down render from real API data', async 
     assert.equal(await host.locator('#cd-search').evaluate(el => document.activeElement === el), true);
     // Evidence refs matching a report in this lane open it in the Board.
     await host.locator('#cd-search').fill('');
+    assert.match(await host.locator('[data-cd-report]').first().getAttribute('href'), /^#\/programs\/[^/]+\/[^/]+\/reports\/.+\.md$/, 'evidence report refs are real links');
     await host.locator('[data-cd-report]').first().click();
     await page.waitForFunction(() => document.querySelector('#report-select'));
     assert.match(await page.locator('#report-select').innerText(), /idor-notes\.md/);

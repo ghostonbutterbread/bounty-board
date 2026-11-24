@@ -50,14 +50,18 @@
     field.append(icon('fa-search'), input, el('kbd', 'kbd search-kbd', 'Esc'));
     status = el('div', 'search-status hint'); status.setAttribute('role', 'status');
     list = el('div', 'search-results'); list.id = 'global-search-results'; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Search results');
-    const foot = el('div', 'search-foot hint', 'Up and down to move, Enter to open, Shift+Enter to open a finding’s report, Esc to close.');
+    const foot = el('div', 'search-foot hint', 'Up and down to move, Enter to open, Ctrl or Cmd+Enter for a new tab, Shift+Enter to open a finding’s report, Esc to close.');
     dialog.append(field, status, list, foot); overlay.append(dialog); document.body.append(overlay);
     overlay.addEventListener('mousedown', event => { if (event.target === overlay) close(); });
     input.addEventListener('input', () => { clearTimeout(timer); retries = 0; timer = setTimeout(run, 120); if (!input.value.trim()) run(); });
     input.addEventListener('keydown', onKey);
-    list.addEventListener('mousedown', event => event.preventDefault()); // keep focus in the input
+    list.addEventListener('mousedown', event => { if (event.button === 0) event.preventDefault(); }); // keep focus in the input
+    // Results are real links: middle-click, Ctrl/Cmd/Shift+click and the context
+    // menu open them natively in a new tab; a plain click navigates in-app.
     list.addEventListener('click', event => {
       const row = event.target.closest('[data-index]'); if (!row) return;
+      if (event.target.closest('a') && (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)) return;
+      event.preventDefault();
       const action = event.target.closest('[data-action]')?.dataset.action;
       choose(Number(row.dataset.index), action === 'report');
     });
@@ -103,7 +107,9 @@
         const index = items.length; items.push(entry);
         const row = el('div', 'search-item'); row.id = `global-search-option-${index}`; row.dataset.index = String(index); row.setAttribute('role', 'option'); row.setAttribute('aria-selected', 'false');
         row.append(icon(entry.icon || 'fa-circle-o'));
-        const body = el('div', 'search-body');
+        const href = entry.target && ctx.hrefFor ? ctx.hrefFor(entry.target) : '';
+        const body = el(href ? 'a' : 'div', href ? 'search-body search-link' : 'search-body');
+        if (href) { body.href = href; body.tabIndex = -1; }
         const head = el('div', 'search-head');
         head.append(entry.node || highlighted(entry.title, entry.ranges));
         if (entry.severity) { const badge = el('span', 'search-badge', entry.severity); badge.dataset.severity = entry.severity.toLowerCase(); head.append(badge); }
@@ -111,7 +117,7 @@
         if (entry.subtitle) body.append(el('div', 'search-sub hint', entry.subtitle));
         if (entry.snippet) { const snippet = el('div', 'search-snippet'); snippet.append(highlighted(entry.snippet, entry.snippetRanges)); body.append(snippet); }
         row.append(body);
-        if (entry.reportTarget) { const b = el('button', 'button subtle search-open-report', 'Open report'); b.type = 'button'; b.tabIndex = -1; b.dataset.action = 'report'; row.append(b); }
+        if (entry.reportTarget) { const b = el('a', 'button subtle search-open-report', 'Open report'); b.href = ctx.hrefFor ? ctx.hrefFor(entry.reportTarget) : '#'; b.tabIndex = -1; b.dataset.action = 'report'; row.append(b); }
         group.append(row);
       }
       list.append(group);
@@ -192,6 +198,13 @@
     const keep = opener?.isConnected && opener !== document.body ? opener : document.querySelector('#main');
     keep?.focus?.({ preventScroll: true }); opener = null;
   }
+  // Ctrl/Cmd+Enter: open the active result (Shift: its report) in a new tab; the palette stays open.
+  function openInNewTab(index, openReport) {
+    const entry = items[index]; if (!entry || !ctx.hrefFor) return;
+    const target = openReport ? entry.reportTarget : entry.target; if (!target) return;
+    remember(input.value);
+    window.open(ctx.hrefFor(target), '_blank', 'noopener');
+  }
   function onKey(event) {
     const key = event.key;
     if (key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
@@ -199,6 +212,7 @@
     else if (key === 'ArrowUp') { event.preventDefault(); if (items.length) setActive((active - 1 + items.length) % items.length); }
     else if (key === 'Home' && event.ctrlKey) { event.preventDefault(); if (items.length) setActive(0); }
     else if (key === 'End' && event.ctrlKey) { event.preventDefault(); if (items.length) setActive(items.length - 1); }
+    else if (key === 'Enter' && !event.isComposing && (event.ctrlKey || event.metaKey)) { event.preventDefault(); openInNewTab(active, event.shiftKey); }
     else if (key === 'Enter' && !event.isComposing) { event.preventDefault(); choose(active, event.shiftKey); }
     else if (key === 'Tab') event.preventDefault(); // the palette is a single-control modal
   }

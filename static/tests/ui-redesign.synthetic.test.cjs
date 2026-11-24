@@ -47,7 +47,8 @@ test('dashboard breakdown lists findings by program and opens the finding; histo
   assert.match(await drill.innerText(), /acme-cloud \/ web/);
   assert.match(await drill.innerText(), /umbrella-desktop \/ exe/);
   assert.equal(await critical.evaluate(el => el === document.activeElement), true, 'focus stays on the expanded row');
-  await drill.getByRole('button', {name: 'Invoice export reachable across organizations by numeric ID'}).click();
+  // Drill-down entries are real links (open in a new tab with a modified click).
+  await drill.getByRole('link', {name: 'Invoice export reachable across organizations by numeric ID'}).click();
   await page.locator('tr.highlight[data-finding-id="AC-102"]').waitFor();
   assert.equal(await page.locator('#program-select').inputValue(), 'web_bounty/acme-cloud');
   assert.equal(await page.locator('#lane-select').inputValue(), 'web');
@@ -62,7 +63,7 @@ test('dashboard breakdown lists findings by program and opens the finding; histo
   // A report link in a drill-down opens that exact report.
   await page.getByRole('button', {name: 'Dashboard', exact: true}).click();
   await page.locator('[data-breakdown="class:ssrf"]').click();
-  await page.locator('.drill').getByRole('button', {name: /Report/}).click();
+  await page.locator('.drill').getByRole('link', {name: /Report/}).click();
   await page.locator('.CodeMirror').waitFor();
   assert.equal(await page.locator('#report-select').inputValue(), 'ac-202-webhook-ssrf.md');
   assert.match(new URL(page.url()).hash, /\/api\/reports\/ac-202-webhook-ssrf\.md$/);

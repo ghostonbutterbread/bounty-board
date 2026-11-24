@@ -41,3 +41,9 @@
 .search-followup[hidden]{display:none}
 .search-follow-text{flex:1;font-size:var(--text-md)}
 @media(max-width:760px){.search-inline{width:100%;min-width:0}.search-inline>input{padding-right:10px}.search-inline>.search-kbd{display:none}.search-overlay{padding-top:4vh}}
+/* Results are real links (feat/board-report-links-recent); the main link covers the whole row. */
+.search-item{position:relative}
+.search-link{display:block;color:inherit;text-decoration:none}
+.search-link:hover{text-decoration:none}
+.search-link::after{content:"";position:absolute;inset:0;border-radius:inherit}
+.search-open-report{position:relative;z-index:1}

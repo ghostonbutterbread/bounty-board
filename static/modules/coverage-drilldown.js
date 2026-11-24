@@ -140,7 +140,8 @@
       const statusCell = r => `${esc(STATUS_LABEL[r.status] || r.status)}${r.prior_status ? `<span class="id">Was ${esc(STATUS_LABEL[r.prior_status] || r.prior_status)}; mapped item changed since</span>` : ''}`;
       const refs = r => (Array.isArray(r.evidence_refs) ? r.evidence_refs : []).map(ref => {
         const rep = reportForRef(ref, reports);
-        return rep ? `<button class="link-button" data-cd-report="${esc(rep.id)}">${esc(String(ref))}</button>` : `<code>${esc(display(ref))}</code>`;
+        // A real link: plain clicks navigate in-app (app.js), modified clicks open a new tab.
+        return rep ? `<a class="link-button" href="${esc(ctx.hrefFor({program: ctx.state.program, lane: ctx.state.lane, section: 'reports', report: String(rep.id)}))}" data-cd-report="${esc(rep.id)}">${esc(String(ref))}</a>` : `<code>${esc(display(ref))}</code>`;
       }).join('<br>') || '<span class="muted">No evidence recorded</span>';
       const display = ctx.display;
       const rowsHtml = shown.map(r => {
@@ -203,9 +204,7 @@
       if (box) { box.focus(); box.setSelectionRange(ui.q.length, ui.q.length); }
     };
     host.onclick = e => {
-      if (e.target.id === 'cd-more') { ui.limit += 40; paint(); return; }
-      const id = e.target.dataset?.cdReport;
-      if (id != null) { if (!ctx.navigate?.({section: 'reports', report: String(id)})) { ctx.state.section = 'reports'; ctx.state.report = String(id); ctx.render(); } }
+      if (e.target.id === 'cd-more') { ui.limit += 40; paint(); }
     };
   }
 
