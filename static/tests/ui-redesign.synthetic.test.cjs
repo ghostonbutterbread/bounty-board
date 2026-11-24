@@ -121,6 +121,7 @@ test('multi-select filters, chips, persisted sort and row actions', {timeout: 60
   assert.equal(await page.locator('[data-filter-chip]').count(), 2);
   await page.getByRole('button', {name: 'Remove filter Severity HIGH'}).click();
   assert.equal(await page.locator('tr[data-finding-id]').count(), 1);
+  assert.equal(await page.getByRole('button', {name: 'Remove filter Severity CRITICAL'}).evaluate(el => el === document.activeElement), true, 'focus moves to the next chip');
   await page.getByRole('button', {name: 'Clear all'}).click();
   assert.equal(await page.locator('tr[data-finding-id]').count(), 5);
   // Severity sort ranks by the severity scale and persists across reloads.

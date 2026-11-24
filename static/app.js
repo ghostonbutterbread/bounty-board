@@ -1499,7 +1499,7 @@
       writeStore('bounty-board-finding-sort',state.sort);render();
     }
     else if(target.classList.contains('filter-trigger')){if(popover?.trigger===target)closePopover(true);else openFilter(target);}
-    else if(target.hasAttribute('data-remove-filter')){const key=target.dataset.removeFilter;state.filters[key]=(state.filters[key]||[]).filter(v=>v!==target.dataset.value);render();app.querySelector('[data-remove-filter]')?.focus() || app.querySelector('#finding-search')?.focus();}
+    else if(target.hasAttribute('data-remove-filter')){const key=target.dataset.removeFilter;state.filters[key]=(state.filters[key]||[]).filter(v=>v!==target.dataset.value);render();(app.querySelector('[data-remove-filter]') || app.querySelector('#finding-search'))?.focus();}
     else if(target.hasAttribute('data-clear-filters')){state.filters=emptyFilters();render();app.querySelector('#finding-search')?.focus();}
     else if(target.hasAttribute('data-row-menu')){if(popover?.trigger===target)closePopover(true);else openRowMenu(target);}
     else if(target.hasAttribute('data-rationale-edit')){
