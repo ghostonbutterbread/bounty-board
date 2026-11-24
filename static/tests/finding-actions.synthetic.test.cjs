@@ -279,7 +279,7 @@ test('drag selected rows onto a class row and one row onto a severity row',{time
   const dialog=page.getByRole('dialog',{name:'Set class to idor for 2 findings?'});
   await dialog.getByRole('button',{name:'Set class to idor'}).click();
   await until(()=>finding('alpha','A02').class_name==='idor' && finding('alpha','A03').class_name==='idor','classes moved');
-  // A category with several raw classes refuses the drop; a single row needs no confirm.
+  // A single row needs no confirm.
   await page.locator('li[data-finding-id="B01"]').waitFor();
   await page.locator('li[data-finding-id="B01"] a.link-button').dragTo(page.locator('.breakdown-row[data-breakdown="sev:low"]'));
   await until(()=>finding('beta','B01').severity==='LOW','B01 severity');
