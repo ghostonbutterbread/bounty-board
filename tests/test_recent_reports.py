@@ -80,6 +80,17 @@ class IndexTests(Base):
         self.assertEqual(with_nav['items'][0]['report_kind'], 'generated_navigation')
         self.assertEqual(with_nav['total'], 6)
 
+    def test_navigation_stays_hidden_when_the_content_budget_is_spent(self):
+        cold = make_index(self.root)
+        self.addCleanup(cold.close)
+        cold.max_total_chars = 0  # no stored text for any report
+        cold.refresh()
+        out = cold.recent()
+        self.assertNotIn('index/xss.md', [i['path'] for i in out['items']])
+        self.assertEqual([i['path'] for i in cold.recent(include_navigation=True)['items']][0], 'index/xss.md')
+        titles = {i['path']: i['title'] for i in out['items']}
+        self.assertEqual(titles['sqli.md'], 'SQLi in search')
+
     def test_linked_finding_and_severity(self):
         items = {i['path']: i for i in self.index.recent()['items']}
         self.assertEqual(items['confirmed/xss-profile.md']['finding'], {'fid': 'AC-1', 'severity': 'HIGH', 'title': 'Stored XSS in profile bio'})

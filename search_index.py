@@ -278,19 +278,23 @@ class SearchIndex:
         entry = {'sig': sig, 'mtime': mtime, 'title': stem, 'text': '', 'low': '', 'path_low': fold(rel), 'title_low': fold(stem), 'base_low': fold(stem),
                  'has_text': False, 'truncated': False, 'nav': False, 'generated': False,
                  'unread': 'budget', 'owner_fids': [], 'report_kind': 'unregistered'}
-        if not room:
-            return entry
         try:
             text = self._read_file(lane, 'reports/' + rel).decode('utf-8')
         except (OSError, ValueError, UnicodeError):
             entry['unread'] = 'error'
             return entry
+        # Classify and title every report, even past the budget: the budget
+        # bounds stored text, and without this a navigation stub would show
+        # in Recent as a normal report once the budget is spent.
         entry['nav'] = bool(self._generated_navigation(rel, text))
         entry['generated'] = '<!-- generated: bounty-core-finding-report -->' in text
         entry['title'] = _title_of(text, stem)
         entry['title_low'] = fold(entry['title'])
         if entry['nav']:
             entry['has_text'] = True
+            entry['unread'] = ''
+            return entry
+        if not room:
             return entry
         capped = text[:self.max_report_chars]
         entry['truncated'] = len(capped) < len(text)
