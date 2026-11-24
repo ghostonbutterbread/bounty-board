@@ -62,7 +62,9 @@ Machine shared by six agents (load average above 20), so timings are slow.
 
 - `node --test --test-concurrency=1 static/tests/live-editor.synthetic.test.cjs`: 8/8 pass (two contexts see each other's edits, re-render keeps the node and focus, history; outside write in an idle editor; different-line browser + outside edits merged in file and both editors; overlapping edit, markers, Keep mine with a setext underline in my side; typing during a held save not lost (plus an outside write); offline, tab closed, server restarted, backup merged on reopen; generated navigation read-only and switching reports flushes pending text; unknown Syncthing copy review and apply).
 - `python3 -m unittest tests.test_live_editing`: 18/18 pass. `tests.test_live_api`: 7/7 pass.
-- Full counts for `npm test` and `tests/safe_suite.py` are in the final branch report.
+- `npm test` (bounded browser selection, now including the live editor suite): 123/123 pass.
+- `python3 -W error::ResourceWarning tests/safe_suite.py`: 180 run, 178 pass, 1 skipped, 1 failure: `test_collaboration_process...test_source_read_is_serialized_across_two_servers` timed out ("server did not start" within 10 s) at load average about 28. It does not touch live code; rerun alone, `tests.test_collaboration_process` passes 3/3. That run started before the server fix commit, so the live tests were rerun afterwards: `tests.test_live_editing` 18/18 and `tests.test_live_api` 7/7 pass.
+- An independent read-only review of the client and server found the late-write conflict loss, the setext separator ambiguity, autosave stalling after a temporary not_editable, a missed change between open and subscribe, lock-less backup theft, double recovery and open SSE on parked sessions. All are fixed on this branch.
 - Screenshots (synthetic data, not committed): `$TMPDIR/screenshots/live-editor-idle.png`, `live-editor-conflict.png` (written when `LIVE_EDITOR_SCREENSHOTS` is set).
 
 ## Gaps and follow-ups

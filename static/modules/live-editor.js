@@ -355,7 +355,7 @@
       if (!data || data.client === CLIENT) return;
       if (s.missing) { refresh(s); return; }
       if (data.revision === s.base) return;
-      if (s.dirty || s.inflight !== null || s.conflict) { s.pendingRemote = true; flash(s, 'New changes saved elsewhere. They will be merged when this saves.'); return; }
+      if (s.dirty || s.inflight !== null || s.conflict) { s.pendingRemote = true; if (!s.conflict) flash(s, 'New changes saved elsewhere. They will be merged when this saves.'); return; }
       const author = data.author === OUTSIDE ? OUTSIDE : data.client ? `${data.author || 'Board editor'} in another tab` : (data.author || OUTSIDE);
       refresh(s, author);
     });
