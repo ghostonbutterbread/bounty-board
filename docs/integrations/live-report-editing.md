@@ -22,11 +22,61 @@ Ryu edits reports from his machine (Abommie) through the Board; agents may updat
 
 ## Evidence
 
-- `tests/test_live_editing.py` (16) and `tests/test_live_api.py` (7) pass locally on Ghost (Python 3.14, synthetic roots under TMPDIR).
+- Base commit: `tests/test_live_editing.py` (16) and `tests/test_live_api.py` (7) passed locally on Ghost (Python 3.14, synthetic roots under TMPDIR).
+- Client branch evidence: see "Browser client" below.
+
+## Browser client (`static/modules/live-editor.js`, `.css`)
+
+Loaded by one line under `<!-- Feature modules -->` in `static/index.html`; no other app.js/style.css/index.html change. Registers `live-editor` through `window.registerBoardModule` and mounts into `#live-report-host` when `capabilities.live_edit` is true.
+
+Contract as implemented:
+
+- `base` = server revision the editor text is based on. Each local edit marks the session dirty, writes a browser backup `{base, text, client, updated}` to localStorage, and debounces a save (700 ms; Ctrl/Cmd+S saves now). One save in flight per report.
+- Save response, editor unchanged: apply `content` minimally (common prefix/suffix, `replaceRange`; cursor and scroll kept), `base = revision`, clear dirty and backup. Editor changed meanwhile: keep the text, `base = sent_revision`, save again. Conflict, editor unchanged: load the marker text, `base = revision`, pause autosave, banner with per-block Keep mine / Keep saved, Keep all, Show; marker blocks highlighted. Conflict while typing: keep the old base and save again after the debounce (the server marks the overlap against the newest text).
+- Remote `changed` (other client or outside writer) while clean: fetch `/api/live/report` and apply minimally with an "Updated by ..." / "Updated outside the Board" notice; own client id ignored; while dirty the next save merges. An epoch counter drops refresh results that started before a save completed. SSE reconnects with backoff (1 s doubling to 30 s) and re-fetches after reconnecting and after the first subscribe.
+- Offline / 5xx / 429 / timeouts: status Offline, banner "Offline, kept in this browser, retrying.", retry with backoff and on the `online` event. 404 shows "missing" and polls; 403 not_editable makes the editor read-only and resumes saving if the report becomes editable again; 409 root_changed and other refusals stop with a Retry button, text kept.
+- Recovery: each tab holds a Web Lock (`bounty-board-live-client:<id>`) for its lifetime. On open, backups for the same root/report whose owner lock is not held are sent with their saved base (server merges) and the user sees "Recovered unsaved text from this browser...". Backups equal to the server text are dropped. Backups with markers reopen in conflict mode. Without Web Locks (insecure origins) a backup counts as orphaned after 60 s without a heartbeat; dirty sessions rewrite their backup every 10 s.
+- Syncthing copies: banner per copy; Review shows the server's merged preview; Apply (only when not conflicted), Load into editor to resolve (the resolving save goes through `sync-conflict apply`, which archives and removes the copy), Discard (archived first).
+- History drawer: friendly labels (Opened from disk, Changed outside the Board, Edited by X (this tab), Merged changes, Restored by X, Conflicting edit kept for review, Syncthing copy archived), relative times, view a revision (safe `ctx.markdown`), restore via `/api/live/restore`, Load older.
+- Status pill: Opening / Saved / Saving / Unsaved / Merged / Conflict / Offline / Not saved / Read-only.
+- Persistence across app renders: the session element is moved into the new `#live-report-host` and CodeMirror refreshed; focus is restored when the render removed it. Leaving a report parks the session: pending text is flushed, SSE closed, and the session destroyed once clean (dirty/conflicted sessions stay alive until saved).
+- Undo history restarts whenever foreign text enters the editor, so Ctrl+Z cannot remove someone else's text and autosave it.
+- Author defaults to "Board editor"; `localStorage['bounty-board-live-author']` overrides it.
+
+### Server changes on this branch
+
+- A write that lands between the final check and the exchange and conflicts with the Board text used to stay only in history (the Board text was on disk and the editor got markers; a client re-sending from its old base then erased it). Now the late version is put back on disk as the head, the conflict is returned against it, and the change is broadcast. Test: `test_conflicting_write_between_check_and_exchange_stays_on_disk`.
+- Conflict markers are 15 characters wide (`git merge-file --marker-size=15`), so a Markdown setext underline (`=======`) inside a side is not taken for the separator. `has_markers` still refuses older 7-wide markers. Test: `test_setext_underline_is_not_a_conflict_separator`.
+- `save()` broadcasts a head change on the conflict path too.
+
+### Decisions
+
+- No server API changes; the client uses the existing endpoints only.
+- Backups are per tab (key includes the client id) so two tabs never overwrite each other's unsaved text.
+- Clearing undo history on foreign text trades some undo convenience for never undoing someone else's text.
+- `BoardLiveEditor` is exposed on `window` for synthetic tests and diagnostics only.
+
+## Evidence (this branch)
+
+Machine shared by six agents (load average above 20), so timings are slow.
+
+- `node --test --test-concurrency=1 static/tests/live-editor.synthetic.test.cjs`: 8/8 pass (two contexts see each other's edits, re-render keeps the node and focus, history; outside write in an idle editor; different-line browser + outside edits merged in file and both editors; overlapping edit, markers, Keep mine with a setext underline in my side; typing during a held save not lost (plus an outside write); offline, tab closed, server restarted, backup merged on reopen; generated navigation read-only and switching reports flushes pending text; unknown Syncthing copy review and apply).
+- `python3 -m unittest tests.test_live_editing`: 18/18 pass. `tests.test_live_api`: 7/7 pass.
+- Full counts for `npm test` and `tests/safe_suite.py` are in the final branch report.
+- Screenshots (synthetic data, not committed): `$TMPDIR/screenshots/live-editor-idle.png`, `live-editor-conflict.png` (written when `LIVE_EDITOR_SCREENSHOTS` is set).
+
+## Gaps and follow-ups
+
+- Systems without `renameat2(RENAME_EXCHANGE)` fall back to `rename` with no late-write detection (Linux has it).
+- A third late write during the restore of a second one, if it conflicts, keeps only the newest on disk; both are in history.
+- Parked sessions in conflict stay alive in memory without a visible pointer from other reports.
+- No presence (who else is editing) and no per-character cursors; merges are line based.
+- Author identity is a local preference, not authenticated.
+- The global `.preview` style collision is recorded in `BUGFIXES.md` (affects the non-live editor; the live editor overrides it).
 
 ## Pending
 
-- Live editor client module, UI redesign, Bounty Board to-do items (parallel subagent branches), integration, independent review, Docker-isolated gates.
+- UI redesign and other Board items (parallel branches), integration, independent review, Docker-isolated gates.
 
 ## Activation boundary
 

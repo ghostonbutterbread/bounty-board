@@ -58,6 +58,35 @@ The writer retains displaced source versions for later observation, but this is 
 
 This is a practical preflight, **not a hard disk quota**: other processes can consume space after the check, open old file descriptors can grow retained inodes, hardlinks can change, filesystem overhead and SQLite/Git growth vary, and the SQLite size cap does not cover retained files. The observation lock coordinates only publishers using the same store and lock, not sync replicas or outside writers. Monitor disk usage and stop external writers/sync. To manage backups, stop all board writers first and preserve the complete private store, including the SQLite database and publication directory, together; do not remove individual operation directories that the database may still need for recovery. A new store starts a separate shared history, so review and preserve drafts before switching. The guard uses a directory metadata cache invalidated by entry changes; it assumes a coherent local filesystem and cooperating publishers, not hostile manipulation of the private directory or independently synced locks.
 
+### Optional live report editing
+
+`--live-edit` turns the Reports section into a live editor. Edits autosave to the Markdown file (no save button); the Board server merges each save with changes made meanwhile by agents, other tabs, editors or Syncthing, and pushes updates to open editors.
+
+```sh
+python3 app.py --root /path/to/data --port 9001 --live-edit \
+  --live-edit-dir /path/to/private/live-edit   # default ~/.local/state/bounty-board/live-edit
+```
+
+The history directory must be private (mode 0700) and outside the data root; it keeps every version the Board saw or wrote. `--live-edit` cannot be combined with `--collaboration-dir`, `--report-autosave` or `--experimental-fixture-publish`. Merges need `git` on the server's `PATH`; without it, every concurrent edit is shown as a conflict.
+
+In the editor:
+
+- The status pill shows Saved, Saving, Unsaved, Merged, Conflict, Offline or Read-only. Ctrl/Cmd+S saves immediately.
+- Changes from elsewhere appear in an idle editor with an "Updated by ..." notice. Edits to different lines merge automatically.
+- Overlapping edits are never resolved silently: the editor shows conflict markers, pauses autosave, and offers Keep mine / Keep saved per block (or for all). The server refuses text that still contains markers.
+- Unsaved text is kept in this browser (localStorage, per origin) until the server confirms it. If the server is unreachable the editor says so and retries; if the tab is closed first, the next tab that opens the report sends the kept text with its original base so the server merges it.
+- Syncthing conflict copies next to the report are offered for review: Apply the merged result, load it into the editor to resolve, or discard it (archived in history first). Copies of a lost Board write are merged back automatically.
+- History lists observed, outside, Board, merged and restored versions; any version can be viewed and restored (restore also merges).
+- Generated navigation is read-only.
+- Undo restarts whenever text from elsewhere enters the editor, so undo never removes someone else's text.
+
+Limits:
+
+- Run one Board process per data root. Saves are serialized inside one process only.
+- The file is replaced with an atomic exchange after a final check, and a write that lands between check and exchange is recovered and merged. A program that keeps the old file open and writes through that descriptor after the exchange can still lose that write. Agents and editors should write with temp-file-and-rename.
+- Browser backups are per origin and per browser profile; clearing site data removes them.
+- There is no authentication. The Tailscale Serve trust boundary above applies; anyone who can reach the Board can edit reports.
+
 ### Optional finding edits
 
 To enable finding severity, class, status, and severity-rationale changes using a compatible BBH writer, supply its absolute launcher path **and** explicitly acknowledge the overwrite risk:
