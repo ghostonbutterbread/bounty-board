@@ -141,7 +141,7 @@ test('row menu by keyboard, searchable class picker and submission state',{timeo
   await sub.getByText(/Recorded locally: Submitted, result duplicate\. Nothing was sent to a platform\./).waitFor();
   assert.deepEqual(ledger('alpha').find(f=>f.fid==='D02').submission,{state:'submitted',result:'duplicate',report:'R-1'});
   const call=calls().at(-1);assert.equal(calls().length,before+1);
-  assert.deepEqual(call.slice(call.indexOf('--set-submission')),['--set-submission','D02','--submission-state','submitted','--submission-result','duplicate','--submission-report','R-1']);
+  assert.deepEqual(call.slice(call.indexOf('--set-submission')),['--set-submission','D02','--submission-state','submitted','--submission-result','duplicate','--submission-report=R-1']);
   await sub.getByRole('button',{name:'Cancel'}).click();
   await page.locator('tr[data-finding-id="D02"] .finding-meta').getByText('submitted',{exact:true}).waitFor();
 }));

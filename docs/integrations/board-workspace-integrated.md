@@ -97,3 +97,36 @@ From the feature dossiers (unchanged):
 8. Search: should MapStore entries and coverage questions be searchable?
 9. Taxonomy: the six decisions in `taxonomy-cleanup-proposal.md` (compound labels, agent names as classes, P0, UNKNOWN backlog, placeholders, ranges); BBH writing a normalized class; a kind alias table.
 10. Live editing: activation (service flags, `--live-edit` on the real service, Hoster move) and authenticated author identity remain operator decisions.
+
+## Review round 1
+
+An independent review returned BLOCK (one blocker, four should-fix, five minor). Every demonstrated defect is fixed at its owning module with a regression test. The reviewer's repro scripts were copied to the fixer scratch directory with the repo path updated (originals untouched).
+
+| # | Finding | Fix | Commit | Regression test |
+|---|---------|-----|--------|-----------------|
+| 1 | Auto-resolve of a Syncthing copy holding an older Board write brought back a deliberately deleted line | `_auto_resolve` merges only when the copy is the newest Board write, the single change after it is the one that replaced it, and the copy was created no later than that change was seen. A copy that later Board saves built on (no outside change since) is archived and removed without merging. Everything else stays listed for review. `GET /api/live/report` only lists copies; only the watcher resolves them | f446fea | `test_stale_board_copy_never_brings_back_a_deleted_line`, `test_copy_turning_up_after_a_later_outside_change_needs_review`, `test_open_never_writes_for_a_conflict_copy`, updated `test_lost_board_write_conflict_copy_is_merged_automatically` |
+| 2 | Coalescing dropped a merged revision another tab still used as a base | `bases` now records `(report, revision, client, last used)`: `open` hands out shared bases, `save` hands the returned revision and sent text to that client. Coalescing removes a replaced text only if no event and no base row still refers to it | f446fea | `test_coalesced_merged_revision_stays_a_merge_base` |
+| 3 | `--submission-report` / `--title` values starting with `-` made BBH exit 2 and switched the writer off | Passed as `--opt=value` | a7459e8 | `test_values_starting_with_a_dash_reach_the_writer_intact` (fake writer now mirrors argparse) |
+| 4 | U+2028 etc. in add-finding fields injected note fields | Shared `LINE_CHAR` also rejects U+0085, U+2028, U+2029 (add finding, submission report, move title and capability) | a7459e8 | `test_unicode_line_breaks_are_refused_in_single_line_values` |
+| 5 | Search budget not enforced across refreshes | Cached text is reused only while the budget has room; otherwise the entry is dropped with `content_limit` | 6bffb63 | `test_content_budget_holds_across_refreshes` |
+| 6 | Full report copy kept per autosave | After a successful save the client's older private bases are released and unused blobs dropped; history pruning runs hourly (not only at startup) and keeps bases used in the last 14 days and every history entry; WAL size limited | f446fea | `test_autosaves_keep_only_blobs_that_can_still_be_used` |
+| 7 | Non-UTF-8 late write replaced with U+FFFD | `_adopt` and the displaced-write paths decode strictly; on failure the original bytes are put back, the report becomes not editable (`not_utf8`) and the save returns 403 `not_editable` | f446fea | `test_non_utf8_late_write_is_put_back_and_editing_stops` (both race points) |
+| 8 | Outside rename right after the exchange never announced | After every write the identity is cleared, so the watcher re-reads the file once and announces any outside version | f446fea | `test_outside_write_right_after_a_save_is_announced` |
+| 9 | Submission report with surrounding whitespace failed verification and disabled the writer | Stripped before the command is built and before verification | a7459e8 | `test_submission_report_is_stripped_before_writing_and_checking` |
+| 10 | `.netrc`, `.npmrc`, `.pgpass` not flagged sensitive | Whole file name matched against the sensitive list | 6bffb63 | `test_sensitive_names` (extended) |
+
+Unproven risks also addressed:
+
+- Live document cache: documents with no editor are evicted after 10 minutes idle; `/api/live/events` returns 404 for a missing or non-UTF-8 report without creating an entry or holding a stream slot (f446fea; `test_events_for_a_missing_report_are_refused_and_idle_documents_evicted`, `test_event_stream_for_missing_report_is_refused_without_leaking_a_slot`). Reopening an evicted document does not add duplicate history entries.
+- GET side effects: `GET /api/live/report` no longer writes for conflict copies (f446fea).
+- Half-finished moves: a retry finishes annotating the original when the MapStore entry exists but the finding lacks the pointer; a retry to the other store, or after annotation, is still `already_reclassified` (a7459e8; `test_reclassify_retry_finishes_a_half_finished_move`).
+
+Visual fixes (f45e478): menus and popovers no longer fade in from opacity 0 (the screenshot caught the row menu mid-fade, so the table showed through); every modal `<dialog>` has a themed `::backdrop`; `--overlay` is stronger in all three themes, which also dims the page behind the search palette. `integrated-workspace.synthetic.test.cjs` checks menu opacity and the dialog backdrop.
+
+Decisions made while fixing:
+
+- A copy that the head already builds on is removed without asking (its text is archived in history as a `sync_conflict` entry). This keeps the editor free of stale copies; it never changes the report.
+- The "copy created no later than the change was seen" check uses the copy's ctime with a 2 s allowance. Syncthing renames the losing file at the moment the winner arrives, so a genuine lost write passes; a stale copy turning up later goes to review.
+- A late non-UTF-8 write wins over the Board save. The user's text stays in the browser and in history (as the board entry), and the report turns read-only until it is valid UTF-8 again.
+
+Residual limits: the Syncthing timing rule was tested on synthetic files only, as in the review; clients idle for over 14 days whose base was pruned get a whole-document conflict (never a silent overwrite); the eviction window and prune cadence are constants (`EVICT_SECONDS`, `PRUNE_SECONDS`, `BASE_DAYS`).
