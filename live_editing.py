@@ -36,6 +36,9 @@ from pathlib import Path
 
 MAX_BYTES = 5_000_000
 MARKER_TAG = '(Bounty Board)'
+# Wider than git's default 7 so a Markdown setext underline ('=======') inside
+# a conflict cannot be mistaken for the separator.
+MARKER_SIZE = 15
 EDIT_LABELS = (f'your edit {MARKER_TAG}', f'saved version {MARKER_TAG}')
 COPY_LABELS = (f'current file {MARKER_TAG}', f'Syncthing conflict copy {MARKER_TAG}')
 HISTORY_PAGE = 50
@@ -68,8 +71,11 @@ def revision_of(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
+_MARKER_LINE = re.compile(r'(?:<{7,}|>{7,}) .*' + re.escape(MARKER_TAG))
+
+
 def has_markers(text):
-    return any(line.startswith(('<<<<<<< ', '>>>>>>> ')) and line.endswith(MARKER_TAG) for line in text.split('\n'))
+    return any(_MARKER_LINE.fullmatch(line) for line in text.split('\n'))
 
 
 def _normalize(text):
@@ -87,7 +93,8 @@ def _encode(text, crlf):
 def _whole_conflict(mine, saved, labels):
     def block(text):
         return text if text.endswith('\n') or not text else text + '\n'
-    return f'<<<<<<< {labels[0]}\n{block(mine)}=======\n{block(saved)}>>>>>>> {labels[1]}\n'
+    return (f"{'<' * MARKER_SIZE} {labels[0]}\n{block(mine)}{'=' * MARKER_SIZE}\n{block(saved)}"
+            f"{'>' * MARKER_SIZE} {labels[1]}\n")
 
 
 def merge3(base, mine, saved, workdir, labels=EDIT_LABELS):
@@ -107,7 +114,7 @@ def merge3(base, mine, saved, workdir, labels=EDIT_LABELS):
                 stream.write(text.encode('utf-8'))
             paths.append(path)
         try:
-            result = subprocess.run(['git', 'merge-file', '-p', '-L', labels[0], '-L', 'base', '-L', labels[1],
+            result = subprocess.run(['git', 'merge-file', '-p', f'--marker-size={MARKER_SIZE}', '-L', labels[0], '-L', 'base', '-L', labels[1],
                                      '--', *paths], capture_output=True, timeout=20, check=False)
         except (OSError, subprocess.SubprocessError):
             # Without a merge tool, hand both versions to the person editing.
@@ -452,9 +459,39 @@ class LiveReports:
             theirs = _normalize(displaced.decode('utf-8', 'replace'))
             self.history.record(doc.relative, self.history.put(theirs), 'external', 'Changed outside the Board')
             merged, conflicted = merge3(previous, target, theirs, self.workdir)
-            if conflicted or merged == target:
+            if conflicted:
+                # Nothing may leave the disk on a conflict: put the late
+                # writer's version back as the head, so the editor resolves
+                # against it and a save from the old base conflicts again.
+                merged, conflicted = self._restore_displaced(doc, previous, target, displaced, theirs)
+            if conflicted or merged == doc.text:
                 return merged, conflicted
             target, kind = merged, 'merged'
+        raise ReportUnavailable('report keeps changing; retry')
+
+    def _restore_displaced(self, doc, previous, target, displaced, theirs):
+        for _ in range(5):
+            dir_fd, name = _open_parent(self.root, doc.relative)
+            try:
+                again = _replace(dir_fd, name, displaced, doc.raw)
+            except _Changed as changed:
+                self._adopt(doc, changed.current)
+                return merge3(previous, target, doc.text, self.workdir)
+            finally:
+                os.close(dir_fd)
+            sha = self.history.put(theirs)
+            self.history.record(doc.relative, sha, 'external', 'Changed outside the Board')
+            doc.text, doc.head, doc.raw, doc.crlf = theirs, sha, displaced, _crlf(displaced)
+            self._refresh_identity(doc)
+            if again is None:
+                return merge3(previous, target, doc.text, self.workdir)
+            # Yet another late write: keep it too and merge it with theirs.
+            later = _normalize(again.decode('utf-8', 'replace'))
+            self.history.record(doc.relative, self.history.put(later), 'external', 'Changed outside the Board')
+            combined, clash = merge3(previous, theirs, later, self.workdir)
+            if clash:
+                combined = later  # keep the newest on disk; both are in history
+            displaced, theirs = _encode(combined, doc.crlf), combined
         raise ReportUnavailable('report keeps changing; retry')
 
     def _adopt(self, doc, data):
@@ -494,11 +531,13 @@ class LiveReports:
                 target, conflicted = merge3(self.history.text(relative, base), content, doc.text, self.workdir)
             if not conflicted and target != doc.text:
                 target, conflicted = self._write(doc, target, kind, author, client)
+            if doc.head != before:
+                self._broadcast(doc, {'type': 'changed', 'revision': doc.head,
+                                      'author': author if not conflicted else 'Changed outside the Board',
+                                      **({'client': client} if not conflicted else {})})
             if conflicted:
                 self.history.record(relative, sent, 'conflict_draft', author, client)
                 return {'status': 'conflict', 'revision': doc.head, 'content': target, 'sent_revision': sent}
-            if doc.head != before:
-                self._broadcast(doc, {'type': 'changed', 'revision': doc.head, 'author': author, 'client': client})
             return {'status': 'saved' if doc.text == content else 'merged', 'revision': doc.head,
                     'content': doc.text, 'sent_revision': sent}
 

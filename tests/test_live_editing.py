@@ -119,6 +119,38 @@ class LiveEngineTests(unittest.TestCase):
         self.assertIn(revision_of(late), [e['revision'] for e in self.live.history_page(REL)])
         self.assertEqual(self.staging(), [])
 
+    def test_conflicting_write_between_check_and_exchange_stays_on_disk(self):
+        opened = self.live.open(REL)
+        late = BASE.replace('middle line', 'middle (raced)')
+
+        def race():
+            with open(self.report, 'w') as stream:
+                stream.write(late)
+        self.hooks['before_exchange'] = race
+        events = self.live.subscribe(REL)
+        mine = BASE.replace('middle line', 'middle (me)')
+        result = self.live.save(REL, opened['revision'], mine, client='a')
+        self.assertEqual(result['status'], 'conflict')
+        self.assertEqual(self.report.read_text(), late)
+        self.assertEqual(result['revision'], revision_of(late))
+        self.assertIn('middle (me)', result['content'])
+        self.assertIn('middle (raced)', result['content'])
+        self.assertEqual(events.get_nowait()['revision'], revision_of(late))
+        # A client that kept typing re-sends from its old base: still a conflict,
+        # the raced text is not erased.
+        again = self.live.save(REL, opened['revision'], mine + 'more\n', client='a')
+        self.assertEqual(again['status'], 'conflict')
+        self.assertEqual(self.report.read_text(), late)
+
+    def test_setext_underline_is_not_a_conflict_separator(self):
+        opened = self.live.open(REL)
+        self.report.write_text(BASE.replace('middle line', 'middle from agent'))
+        result = self.live.save(REL, opened['revision'], BASE.replace('middle line', 'Heading\n======='), client='a')
+        self.assertEqual(result['status'], 'conflict')
+        separators = [line for line in result['content'].split('\n') if line and set(line) == {'='}]
+        self.assertEqual(sorted(separators), ['=======', '=' * 15])
+        self.assertTrue(has_markers('<<<<<<< your edit (Bounty Board)\n'), 'older 7-wide markers are still refused')
+
     def test_crlf_line_endings_are_preserved(self):
         self.report.write_bytes(BASE.replace('\n', '\r\n').encode())
         opened = self.live.open(REL)
