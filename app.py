@@ -352,7 +352,9 @@ def writer_features(writer):
     if result.returncode != 0:
         return frozenset()
     required = {'submission': ('--set-submission', '--submission-state', '--submission-result', '--submission-report'),
-                'add_finding': ('--from-file',)}
+                'add_finding': ('--from-file',),
+                # Permanent delete of an archived finding (BBH refuses any other status).
+                'delete': ('--delete-finding',)}
     features = {name for name, options in required.items() if all(o in result.stdout for o in options)}
     try:
         # Probe with --help as the second argument, like every other probe, so
@@ -376,6 +378,7 @@ def ledger_action_capabilities(server):
         'submission': {'enabled': 'submission' in features, 'states': list(SUBMISSION_STATES),
                        'results': list(SUBMISSION_RESULTS), 'local_only': True},
         'add_finding': {'enabled': 'add_finding' in features},
+        'delete': {'enabled': 'delete' in features, 'requires_status': 'archive'},
         'reclassify': {store: ({'enabled': True} if 'reclassify' in features else {'enabled': False, 'reason': RECLASSIFY_UNSUPPORTED})
                        for store in ('gadgets', 'map')},
     }
@@ -1472,7 +1475,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.collaboration_admitted(write=True)
             # Ledger actions share the metadata lock with PATCH /api/finding.
             action = {'/api/finding/submission': self.set_submission, '/api/finding/new': self.add_finding,
-                      '/api/finding/reclassify': self.reclassify_finding}.get(urlsplit(self.path).path)
+                      '/api/finding/reclassify': self.reclassify_finding, '/api/finding/delete': self.delete_finding}.get(urlsplit(self.path).path)
             if action:
                 with metadata_write_lock:
                     return action()
@@ -1900,6 +1903,51 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 patchfile = Path(temp) / 'patch.json'
                 patchfile.write_text(json.dumps(patch), encoding='utf-8')
                 return self.run_writer(self.hunter_args(program, family, lane, '--edit-finding', fid, '--patch-file', str(patchfile)), verify_finding, lane_path=lane_path)
+
+        def delete_finding(self):
+            """Permanently delete one archived finding via BBH --delete-finding.
+
+            Archive is the recoverable state; this is the permanent step. The
+            Board refuses before invoking BBH unless the current status is
+            archive, and verifies afterwards that the FID is gone. BBH exit 1
+            means it refused and wrote nothing (writer stays enabled when the
+            ledger is unchanged); exit 3 means deleted with warnings."""
+            payload = self.ledger_action_payload({'fid', 'expected_revision'}, 'delete')
+            if not payload:
+                return
+            family, program, lane, fid = (payload[k] for k in ('family', 'program', 'lane', 'fid'))
+            checked = self.finding_precheck(family, program, lane, fid, payload['root_instance'], payload['expected_revision'])
+            if not checked:
+                return
+            lane_path, finding = checked
+            if finding.get('status') != 'archive':
+                return self.reply(409, {'error': 'not_archived', 'message': 'Only archived findings can be deleted. Archive it first.'})
+            ledger_path = lane_path / 'ledgers/ledger.json'
+            try:
+                original = ledger_path.read_bytes()
+            except OSError:
+                return self.reply(409, {'error': 'unsafe_writer_tree'})
+
+            def verify(_result):
+                remaining = ledger(lane_path, [])
+                if remaining is None or any(f.get('fid') == fid for f in remaining):
+                    return None
+                return 200, {'deleted': fid, 'warnings': False}
+
+            def refused(result):
+                if result.returncode == 3:
+                    outcome = verify(result)
+                    if outcome is not None:
+                        outcome[1].update(warnings=True, revisions=self.rebased_revisions(lane_path))
+                    return outcome
+                try:
+                    unchanged = ledger_path.read_bytes() == original
+                except OSError:
+                    unchanged = False
+                if result.returncode == 1 and unchanged:
+                    return 409, {'error': 'delete_refused', 'message': 'BBH refused to delete this finding; nothing was changed.'}
+                return None
+            return self.run_writer(self.hunter_args(program, family, lane, '--delete-finding', fid), verify, refused, lane_path=lane_path)
 
         def rebased_revisions(self, lane_path):
             """Old->new revisions for entries this write left byte-for-byte unchanged.

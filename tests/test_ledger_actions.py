@@ -79,6 +79,24 @@ elif '--from-file' in args:
         data['findings'].append({'fid': fid, 'title': fields['Title'], 'class_name': fields['Class'],
                                  'severity': fields['Severity'], 'first_seen': '2026-01-02T00:00:00Z',
                                  'submission': {'state': 'not_submitted'}})
+elif '--delete-finding' in args:
+    # Mirrors the BBH contract: refuse (exit 1, no write) unless status is
+    # archive; remove the entry, delete generated reports for the FID, keep a
+    # minimal tombstone; exit 3 means deleted with warnings.
+    fid = opt('--delete-finding')
+    match = [f for f in data['findings'] if f['fid'] == fid]
+    status = (match[0].get('status') or (match[0].get('current') or {}).get('status')) if match else None
+    if mode == 'delete-refuse' or status != 'archive':
+        print(f'refusing to delete {fid}', file=sys.stderr)
+        sys.exit(1)
+    if mode != 'delete-keep':
+        data['findings'] = [f for f in data['findings'] if f['fid'] != fid]
+    reports = path.parent.parent / 'reports'
+    for file in sorted(reports.rglob('*.md')):
+        if fid.lower() in file.relative_to(reports).as_posix().lower() and 'generated: bounty-core-finding-report' in file.read_text():
+            file.unlink()
+    with (path.parent / 'deleted-findings.jsonl').open('a') as f:
+        f.write(json.dumps({'fid': fid}) + '\n')
 if mode == 'touch-other':
     for f in data['findings']:
         if f['fid'] == 'D02':
@@ -87,6 +105,8 @@ if mode == 'touch-other':
 tmp = path.with_name('ledger.json.tmp')
 tmp.write_text(json.dumps(data))
 tmp.replace(path)
+if mode == 'delete-warn' and '--delete-finding' in args:
+    sys.exit(3)
 '''.replace('PYTHON', sys.executable)
 
 
