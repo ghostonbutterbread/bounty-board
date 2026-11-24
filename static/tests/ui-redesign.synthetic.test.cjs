@@ -145,6 +145,9 @@ test('multi-select filters, chips, persisted sort and row actions', {timeout: 60
   await page.keyboard.press('Enter');
   await page.locator('.CodeMirror').waitFor();
   assert.equal(await page.locator('#report-select').inputValue(), 'ac-101-stored-xss.md');
+  // Non-live editor: the EasyMDE toolbar keeps a normal height (the report
+  // preview rule no longer matches the toolbar's "preview" button).
+  assert.ok((await page.locator('.editor-toolbar').boundingBox()).height < 60);
   // Drop-target hooks and module hosts exist for other feature modules.
   assert.equal(await page.locator('.tabs [data-section="map"].drop-target').count(), 1);
   assert.equal(await page.locator('.tabs [data-section="gadgets"].drop-target').count(), 1);

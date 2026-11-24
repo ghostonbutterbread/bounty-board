@@ -1,21 +1,28 @@
-/* Report artifacts panel (feat/board-report-artifacts). Theme variables only. */
+/* Report artifacts panel. Redesign tokens only (see the header of style.css).
+   In the live report view the panel sits in .report-side: a card beside the
+   editor on wide panels, below it otherwise. In the non-live views it follows
+   the source and preview columns. */
 #report-artifacts-host:empty{display:none}
-.artifacts{margin-top:18px;padding-top:14px;border-top:1px solid var(--border)}
-.artifacts-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.artifacts-head h3{margin:0;font-size:15px}
+#report-artifacts-host{container-type:inline-size}
+.artifacts{margin-top:var(--space-4);padding-top:var(--space-4);border-top:1px solid var(--border)}
+.report-side .artifacts{margin:0;padding:var(--space-4);border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface-2)}
+.artifacts-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);flex-wrap:wrap}
+.artifacts-head h3{margin:0;font-size:var(--text-base);font-weight:600}
 .artifacts-actions,.artifact-buttons{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.artifacts a.button{text-decoration:none;display:inline-flex;align-items:center;gap:2px}
-.artifact-group h4{margin:14px 0 6px;font-size:13px;color:var(--muted)}
+.artifacts a.button{text-decoration:none;display:inline-flex;align-items:center;gap:4px}
+.artifacts .hint{font-size:var(--text-sm)}
+.artifact-group h4{margin:var(--space-4) 0 6px;font-size:var(--text-xs);font-weight:600;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em}
 .artifact-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
-.artifact-row{border:1px solid var(--border);border-radius:6px;background:var(--table);padding:8px 10px}
+.artifact-row{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:8px 10px}
 .artifact-main{display:flex;gap:10px;align-items:flex-start}
-.artifact-icon{width:22px;flex:none;text-align:center;color:var(--accent);font-size:17px;line-height:1.4}
+.artifact-icon{width:20px;flex:none;text-align:center;color:var(--text-3);font-size:15px;line-height:1.5}
 .artifact-text{flex:1;min-width:0}
-.artifact-name{font-weight:650;overflow-wrap:anywhere;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.artifact-meta,.artifact-reason{margin:1px 0 0;font-size:12px;overflow-wrap:anywhere}
-.artifact-badge{font-size:11px;font-weight:700;color:var(--warning);background:var(--warning-bg);border-radius:10px;padding:1px 8px}
+.artifact-name{font-weight:600;font-size:var(--text-md);overflow-wrap:anywhere;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.artifact-meta,.artifact-reason{margin:1px 0 0;font-size:var(--text-xs);color:var(--text-3);overflow-wrap:anywhere}
+.artifact-badge{font-size:var(--text-xs);font-weight:600;color:var(--warning);background:var(--warning-soft);border-radius:var(--radius-pill);padding:0 8px;line-height:18px}
 .artifact-preview{margin-top:8px}
-.artifact-preview img,.artifact-preview video{display:block;max-width:100%;max-height:420px;border:1px solid var(--border);border-radius:4px;background:var(--panel)}
+.artifact-preview img,.artifact-preview video{display:block;max-width:100%;max-height:420px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-2)}
 .artifact-preview audio{width:100%}
-.artifact-text-preview{margin:0;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 ui-monospace,'DejaVu Sans Mono',monospace;background:var(--panel);color:var(--ink);border:1px solid var(--border);border-radius:4px;padding:8px}
-@media (max-width:640px){.artifact-main{flex-wrap:wrap}.artifact-buttons{width:100%}}
+.artifact-text-preview{margin:0;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--text-sm)/1.45 var(--font-mono);background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px}
+/* Narrow panel (side column or phone): buttons wrap under the file name. */
+@container (max-width:460px){.artifact-main{flex-wrap:wrap}.artifact-buttons{width:100%;padding-left:30px}}

@@ -933,7 +933,9 @@
       const program=currentProgram();
       if(!report.path || !program)return `<section class="panel panel-pad"><h2>Reports</h2>${picker}<div class="state">This report has no file path and cannot be opened.</div></section>`;
       const host=`data-family="${esc(program.family)}" data-program="${esc(program.name)}" data-lane="${esc(state.lane)}" data-path="${esc(report.path)}" data-report-id="${esc(report.id)}"`;
-      return `<section class="panel panel-pad report-panel"><h2>Reports</h2>${picker}<div id="live-report-host" ${host}><div class="state">Opening editor…</div></div><div id="report-artifacts-host" ${host}></div></section>`;
+      // Editor and artifacts sit side by side when the panel is wide (container
+      // query in style.css), otherwise the artifacts follow the editor.
+      return `<section class="panel panel-pad report-panel"><h2>Reports</h2>${picker}<div class="report-workspace"><div class="report-main"><div id="live-report-host" ${host}><div class="state">Opening editor…</div></div></div><aside class="report-side" aria-label="Report artifacts"><div id="report-artifacts-host" ${host}></div></aside></div></section>`;
     }
     if(report.content == null && report.path){
       if(!report.loadState) {
