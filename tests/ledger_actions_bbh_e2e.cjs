@@ -54,8 +54,8 @@ async function main() {
     assert.equal(caps.reclassify.gadgets.enabled, true); assert.equal(caps.reclassify.map.enabled, true);
     await page.getByRole('button', {name: 'Programs', exact: true}).click();
     await page.locator('tr[data-finding-id]').first().waitFor();
-    await page.getByLabel('Sort findings').selectOption('severity-desc');
-    assert.deepEqual(await page.locator('tbody tr[data-finding-id]').evaluateAll(r => r.map(x => x.querySelector('strong').textContent)), ['Synthetic fetch', 'Synthetic stored note', 'Synthetic object access']);
+    await page.getByRole('button', {name: /^Sort findings/}).click(); await page.getByRole('menuitemradio', {name: 'Severity, highest first'}).click();
+    assert.deepEqual(await page.locator('tbody tr[data-finding-id]').evaluateAll(r => r.map(x => x.querySelector('.finding-title').textContent)), ['Synthetic fetch', 'Synthetic stored note', 'Synthetic object access']);
     // Class via searchable picker.
     const idFor = title => byTitle(title).fid;
     await page.getByRole('button', {name: 'Actions for Synthetic stored note'}).click();
@@ -79,7 +79,7 @@ async function main() {
     await dialog.getByRole('button', {name: 'Cancel'}).click();
     // Drag to Gadgets.
     const fetchId = idFor('Synthetic fetch');
-    await page.locator(`tr[data-finding-id="${fetchId}"]`).dragTo(page.locator('.workspace-nav [data-section="gadgets"]'), {sourcePosition: {x: 12, y: 12}});
+    await page.locator(`tr[data-finding-id="${fetchId}"]`).dragTo(page.locator('.workspace-nav [data-drop-target="gadgets"]'), {sourcePosition: {x: 12, y: 12}});
     dialog = page.getByRole('dialog', {name: /Move to Gadgets/});
     await dialog.getByLabel('Grants').fill('synthetic server fetch');
     await dialog.getByLabel('Requires', {exact: true}).fill('authenticated user');

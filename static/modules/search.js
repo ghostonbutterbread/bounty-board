@@ -228,7 +228,7 @@
     const wrap = el('div', 'search-inline input-icon');
     field = el('input'); field.type = 'search'; field.id = 'global-search-field'; field.autocomplete = 'off'; field.spellcheck = false;
     field.placeholder = 'Search programs, findings, reports';
-    field.setAttribute('aria-label', 'Search programs, findings and reports');
+    field.setAttribute('aria-label', 'Search the workspace'); // distinct from the page's own program/finding search labels
     field.setAttribute('aria-haspopup', 'dialog'); field.setAttribute('aria-expanded', 'false');
     field.setAttribute('aria-keyshortcuts', 'Control+K Meta+K');
     const kbd = el('kbd', 'kbd search-kbd', /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'); kbd.setAttribute('aria-hidden', 'true');

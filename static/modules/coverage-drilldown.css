@@ -1,4 +1,6 @@
 /* Coverage drill-down. Redesign tokens only (see the header of style.css). */
+/* Wide tables scroll inside .cd-scroll; the panel itself never widens the page. */
+#coverage-drilldown-host,.cd-panel{min-width:0;max-width:100%}
 .cd-panel h3{margin:var(--space-5) 0 6px;font-size:var(--text-xs);font-weight:600;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em}
 .cd-panel .summary-line>div{padding:var(--space-3) var(--space-4) 0 0;min-width:120px}
 .cd-filters{display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:flex-end;padding:var(--space-3) 0 6px}

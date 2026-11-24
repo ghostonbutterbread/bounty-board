@@ -40,4 +40,4 @@
 .search-followup{position:fixed;left:50%;transform:translateX(-50%);bottom:var(--space-5);z-index:75;display:flex;align-items:center;gap:var(--space-2);max-width:min(560px,calc(100vw - 32px));background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);padding:8px 8px 8px 14px}
 .search-followup[hidden]{display:none}
 .search-follow-text{flex:1;font-size:var(--text-md)}
-@media(max-width:760px){.search-inline{width:auto}.search-inline>input{padding-right:10px}.search-inline>.search-kbd{display:none}.search-overlay{padding-top:4vh}}
+@media(max-width:760px){.search-inline{width:100%;min-width:0}.search-inline>input{padding-right:10px}.search-inline>.search-kbd{display:none}.search-overlay{padding-top:4vh}}

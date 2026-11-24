@@ -122,6 +122,7 @@ code,pre,kbd,.mono{font-family:var(--font-mono)}
 .top-actions{display:flex;align-items:center;gap:var(--space-2);flex:none}
 #global-search-host{display:flex;align-items:center;min-width:0}
 #global-search-host:empty{display:none}
+@media (max-width:760px){.top-actions{flex:1 1 auto;min-width:0;justify-content:flex-end}#global-search-host{flex:1 1 auto;min-width:0}}
 .page{padding:var(--space-6);width:100%;max-width:1480px;margin:0 auto;flex:1}
 
 /* Collapsed sidebar (icon rail) */
