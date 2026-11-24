@@ -19,7 +19,7 @@ async function withBoard(run){
     const page=await context.newPage();
     const errors=[];page.on('pageerror',e=>errors.push(String(e)));page.on('dialog',d=>{errors.push('dialog:'+d.message());d.dismiss();});
     await page.goto(`http://127.0.0.1:${port}`);
-    await page.waitForSelector('.search-trigger');
+    await page.waitForSelector('#global-search-field');
     await page.waitForSelector('[data-open-program]');
     await run({page,root,errors,base:`http://127.0.0.1:${port}`});
     assert.deepEqual(errors,[]);
@@ -58,10 +58,40 @@ test('palette keyboard flow: open, move, select a finding, open its report',{tim
     assert.equal(await page.locator('#lane-select').inputValue(),'web');
     const row=page.locator('tr[data-finding-id="AC-1"]');
     await row.waitFor();
-    await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="AC-1"]')?.classList.contains('search-hit'));
+    await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="AC-1"]')?.classList.contains('highlight'));
+    // Integrated navigation: the result updated the URL hash and history.
+    assert.match(page.url(),/#\/programs\/web_bounty%2Facme\/web\/findings$/);
     await page.locator('.search-followup').getByRole('button',{name:'Open report'}).click();
     assert.equal(await page.locator('#report-select').inputValue(),'confirmed/xss-profile.md');
     assert.equal(await page.locator('[data-section="reports"]').getAttribute('aria-current'),'page');
+    assert.match(page.url(),/\/reports\//);
+    await page.goBack();
+    await page.waitForFunction(()=>document.querySelector('[data-section="findings"]')?.getAttribute('aria-current')==='page');
+    await page.goBack();
+    await page.waitForFunction(()=>document.querySelector('#breadcrumb')?.textContent==='Dashboard');
+  });
+});
+
+test('inline topbar field opens the palette on pointer focus and on typing',{timeout:60000},async()=>{
+  await withBoard(async({page})=>{
+    const field=page.locator('#global-search-field');
+    assert.equal(await page.locator('#global-search-host').count(),1);
+    // Pointer focus opens the palette; Esc returns to the field without reopening.
+    await field.click();
+    await palette(page).waitFor();
+    assert.equal(await page.evaluate(()=>document.activeElement.id),'global-search-input');
+    assert.equal(await field.getAttribute('aria-expanded'),'true');
+    await page.keyboard.press('Escape');
+    await palette(page).waitFor({state:'hidden'});
+    assert.equal(await page.evaluate(()=>document.activeElement.id),'global-search-field');
+    assert.equal(await palette(page).isHidden(),true,'keyboard focus alone does not reopen');
+    // Typing in the field opens the palette seeded with the text.
+    await page.keyboard.type('xss');
+    await palette(page).waitFor();
+    assert.equal(await page.locator('#global-search-input').inputValue(),'xss');
+    await page.locator('.search-results[data-results-for="xss"]').waitFor();
+    assert.equal(await field.inputValue(),'');
+    await page.keyboard.press('Escape');
   });
 });
 
@@ -76,7 +106,7 @@ test('selecting a report opens Reports on it and offers the owning finding',{tim
     await page.locator('.search-item').filter({hasText:'confirmed/xss-profile.md'}).click();
     await page.waitForFunction(()=>document.querySelector('#report-select')?.value==='confirmed/xss-profile.md');
     await page.locator('.search-followup').getByRole('button',{name:'Show finding'}).click();
-    await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="AC-1"]')?.classList.contains('search-hit'));
+    await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="AC-1"]')?.classList.contains('highlight'));
   });
 });
 
@@ -106,7 +136,7 @@ test('palette is safe, restores focus on Esc, leaves an editor intact, keeps rec
     // Recent search shown after use; program jump from an empty query.
     await openPalette(page,'redirect');
     await page.keyboard.press('Enter');
-    await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="AC-3"]')?.classList.contains('search-hit'));
+    await page.waitForFunction(()=>document.querySelector('tr[data-finding-id="AC-3"]')?.classList.contains('highlight'));
     await openPalette(page);
     assert.ok((await page.locator('.search-group-title').allTextContents()).includes('Recent searches'));
     assert.ok((await page.locator('.search-item').allTextContents()).some(t=>t.startsWith('redirect')));
@@ -126,7 +156,7 @@ test('screenshot of the palette on synthetic data',{timeout:60000},async()=>{
   await withBoard(async({page})=>{
     await openPalette(page,'xss');
     await page.waitForTimeout(150);
-    const out=path.join(repo,'docs/integrations/search-palette.png');
+    const out=path.join(process.env.SEARCH_SHOTS||os.tmpdir(),'search-palette.png');
     fs.mkdirSync(path.dirname(out),{recursive:true});
     await page.screenshot({path:out});
   });

@@ -1,14 +1,16 @@
-/* Global search: topbar trigger + Ctrl/Cmd+K command palette.
+/* Global search: inline topbar field + Ctrl/Cmd+K command palette.
  * Results come from GET /api/search. Every server string is rendered with
  * textContent (matches are wrapped via <mark> nodes from index ranges); report
- * text is never passed to innerHTML. Navigation goes through ctx.navigate. */
+ * text is never passed to innerHTML. Navigation goes through ctx.navigate,
+ * which is the app's own navigate(): results update the URL hash and history,
+ * and a finding result is highlighted with the app's row highlight. */
 (() => {
   'use strict';
   const RECENT_KEY = 'bounty-board-recent-searches';
   const GROUPS = [['programs', 'Programs', 'fa-folder-o'], ['findings', 'Findings', 'fa-bug'], ['reports', 'Reports', 'fa-file-text-o']];
   let ctx = null, dialog = null, overlay = null, input = null, list = null, status = null, followup = null;
   let items = [], active = -1, opener = null, timer = 0, controller = null, sequence = 0, retries = 0, followTimer = 0;
-  let pending = null; // {program, lane, fid, scrolled, until}: finding row to highlight after navigation
+  let field = null; // inline topbar field; focusing it with a pointer or typing opens the palette
 
   const el = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -62,20 +64,22 @@
     list.addEventListener('mousemove', event => { const row = event.target.closest('[data-index]'); if (row && Number(row.dataset.index) !== active) setActive(Number(row.dataset.index), false); });
     followup = el('div', 'search-followup message'); followup.hidden = true; followup.setAttribute('role', 'status'); document.body.append(followup);
   }
-  function open() {
+  function open(seed = '') {
     build();
     if (!overlay.hidden) { input.focus(); input.select(); return; }
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     hideFollowup();
-    overlay.hidden = false; input.value = ''; items = []; active = -1;
+    overlay.hidden = false; input.value = seed; items = []; active = -1;
+    field?.setAttribute('aria-expanded', 'true');
     input.focus();
-    show();
+    if (seed) { input.setSelectionRange(seed.length, seed.length); run(); } else show();
     fetchSearch('').catch(() => {}); // warm-up: starts the server index
   }
   function close(restore = true) {
     if (!overlay || overlay.hidden) return;
     clearTimeout(timer); controller?.abort(); ++sequence;
     overlay.hidden = true;
+    field?.setAttribute('aria-expanded', 'false');
     if (restore && opener?.isConnected) opener.focus({ preventScroll: true });
     else if (restore) document.querySelector('#main')?.focus({ preventScroll: true });
     opener = null;
@@ -178,15 +182,12 @@
     const target = openReport ? entry.reportTarget : entry.target;
     remember(input.value);
     close(false);
-    pending = null;
     if (!ctx.navigate(target)) { announce('That item is no longer available. Refresh the board and search again.'); return; }
     if (entry.finding && !openReport) {
-      pending = { program: target.program, lane: target.lane, fid: target.finding, scrolled: false, until: Date.now() + 20000 };
-      applyHighlight();
       announce(`Showing finding ${entry.finding.fid}.`, entry.reportTarget ? { label: 'Open report', target: entry.reportTarget } : null, entry.reportTarget ? '' : 'No linked report.');
     } else if (entry.report && !openReport && entry.report.owner_fids?.length) {
       const fid = entry.report.owner_fids[0];
-      announce(`Report for finding ${fid}.`, { label: 'Show finding', target: { program: target.program, lane: target.lane, section: 'findings', finding: fid }, highlight: fid });
+      announce(`Report for finding ${fid}.`, { label: 'Show finding', target: { program: target.program, lane: target.lane, section: 'findings', finding: fid } });
     }
     const keep = opener?.isConnected && opener !== document.body ? opener : document.querySelector('#main');
     keep?.focus?.({ preventScroll: true }); opener = null;
@@ -208,12 +209,7 @@
     followup.replaceChildren(el('span', 'search-follow-text', extra ? `${text} ${extra}` : text));
     if (action) {
       const button = el('button', 'button', action.label); button.type = 'button';
-      button.addEventListener('click', () => {
-        hideFollowup();
-        pending = action.highlight ? { program: action.target.program, lane: action.target.lane, fid: action.highlight, scrolled: false, until: Date.now() + 20000 } : null;
-        ctx.navigate(action.target);
-        applyHighlight();
-      });
+      button.addEventListener('click', () => { hideFollowup(); ctx.navigate(action.target); });
       followup.append(button);
     }
     const dismiss = el('button', 'button subtle', 'Dismiss'); dismiss.type = 'button'; dismiss.addEventListener('click', hideFollowup);
@@ -221,24 +217,32 @@
     followup.hidden = false;
     clearTimeout(followTimer); followTimer = setTimeout(hideFollowup, 20000);
   }
-  function applyHighlight() {
-    if (!pending || !ctx) return;
-    const { state, app } = ctx;
-    if (Date.now() > pending.until || state.program !== pending.program || state.lane !== pending.lane || state.section !== 'findings') { pending = null; return; }
-    const row = [...app.querySelectorAll('tr[data-finding-id]')].find(r => r.dataset.findingId === pending.fid);
-    if (!row) return; // lane may still be loading; a later render retries
-    row.classList.add('search-hit');
-    if (!pending.scrolled) { pending.scrolled = true; row.scrollIntoView({ block: 'center' }); }
-  }
-
   // ---- mount -----------------------------------------------------------
+  // The topbar shows an inline search field (styled like the redesign's
+  // .input-icon fields). It is an entry point only: a pointer focus, typing,
+  // Enter or ArrowDown opens the palette (seeded with what was typed). Keyboard
+  // focus alone does not open it, so Tab can move past the field.
   function mount() {
     const host = document.querySelector('#global-search-host');
-    if (!host || host.querySelector('.search-trigger')) return;
-    const trigger = el('button', 'search-trigger button subtle'); trigger.type = 'button'; trigger.setAttribute('aria-haspopup', 'dialog'); trigger.setAttribute('aria-keyshortcuts', 'Control+K Meta+K');
-    trigger.append(icon('fa-search'), el('span', 'search-trigger-label', 'Search'), el('kbd', 'search-kbd', /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'));
-    trigger.addEventListener('click', open);
-    host.append(trigger);
+    if (!host || host.querySelector('#global-search-field')) return;
+    const wrap = el('div', 'search-inline input-icon');
+    field = el('input'); field.type = 'search'; field.id = 'global-search-field'; field.autocomplete = 'off'; field.spellcheck = false;
+    field.placeholder = 'Search programs, findings, reports';
+    field.setAttribute('aria-label', 'Search programs, findings and reports');
+    field.setAttribute('aria-haspopup', 'dialog'); field.setAttribute('aria-expanded', 'false');
+    field.setAttribute('aria-keyshortcuts', 'Control+K Meta+K');
+    const kbd = el('kbd', 'kbd search-kbd', /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'); kbd.setAttribute('aria-hidden', 'true');
+    wrap.append(icon('fa-search'), field, kbd);
+    let pointer = false;
+    field.addEventListener('pointerdown', () => { pointer = true; });
+    field.addEventListener('focus', () => { if (pointer) { pointer = false; queueMicrotask(() => open()); } });
+    field.addEventListener('keydown', event => {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;
+      if (event.key.length === 1 && /\S/.test(event.key)) { event.preventDefault(); open(event.key); }
+      else if (event.key === 'Enter' || event.key === 'ArrowDown') { event.preventDefault(); open(); }
+    });
+    field.addEventListener('input', () => { const seed = field.value; field.value = ''; if (seed.trim()) open(seed); });
+    host.append(wrap);
   }
   if (!window.__boardSearchKeys) {
     window.__boardSearchKeys = true;
@@ -249,6 +253,6 @@
   }
   window.registerBoardModule({
     name: 'search',
-    afterRender(context) { ctx = context; mount(); applyHighlight(); }, // never moves focus
+    afterRender(context) { ctx = context; mount(); }, // never moves focus
   });
 })();
