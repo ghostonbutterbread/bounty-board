@@ -6,6 +6,10 @@ const {spawn} = require('node:child_process');
 const {once} = require('node:events');
 const {chromium} = require('playwright');
 
+// The theme switcher is a menu button; filters are multi-select popovers.
+async function setTheme(page,name){await page.getByRole('button',{name:'Theme',exact:true}).click();await page.getByRole('menuitemradio',{name:name[0].toUpperCase()+name.slice(1),exact:true}).click();}
+async function pickFilter(page,plural,value){await page.getByRole('button',{name:`Filter ${plural}`,exact:true}).click();await page.getByRole('checkbox',{name:value}).check();await page.keyboard.press('Escape');}
+
 // All backend input and output is inside this newly created disposable root.
 test('real EasyMDE saves a browser draft across reload without writing the source', {timeout:30000}, async () => {
   const tmp=fs.mkdtempSync(path.join(process.env.TMPDIR || '/home/ryushe/.hermes/cache/scratch','board-draft-synthetic-'));
@@ -65,7 +69,7 @@ test('real EasyMDE saves a browser draft across reload without writing the sourc
     assert.equal(await page.locator('#report-preview img').count(),0);assert.equal(await page.evaluate(()=>window.pwned),undefined);
     await page.setViewportSize({width:375,height:800});
     for(const theme of ['light','dark','dusk']) {
-      await page.getByLabel('Theme').selectOption(theme);
+      await setTheme(page,theme);
       assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.CodeMirror')).backgroundColor),await page.evaluate(()=>getComputedStyle(document.querySelector('.panel')).backgroundColor),theme);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,theme);
     }

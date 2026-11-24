@@ -218,18 +218,20 @@ test('refresh cancels an outstanding apply check without overwriting the new sna
   } finally {release();}
 }));
 
-test('navigation invalidates an automatic apply check but allows explicit retry', async()=>fixture(async({root,page,url})=>{
+// Reports now load automatically: a check invalidated by navigation is retried
+// once nothing is being edited, without requiring the explicit Apply button.
+test('navigation invalidates an automatic apply check and it retries automatically when safe', async()=>fixture(async({root,page,url})=>{
   let release, reached;const gate=new Promise(r=>release=r), ready=new Promise(r=>reached=r);
-  let armed=false;
-  await page.route('**/api/data?phase=identity',async route=>{if(!armed)return route.continue();const response=await route.fetch();reached();await gate;await route.fulfill({response});});
+  let armed=false, checks=0;
+  await page.route('**/api/data?phase=identity',async route=>{if(!armed)return route.continue();checks++;const response=await route.fetch();reached();await gate;await route.fulfill({response});});
   try {
     await page.goto(url);await held(root);armed=true;fs.writeFileSync(path.join(root,'release'),'release');await ready;
     await page.getByRole('button',{name:'Open workspace'}).click();
     const response=page.waitForResponse(r=>r.url().includes('phase=identity'));release();await response;
-    await page.getByRole('button',{name:'Apply loaded reports'}).waitFor({timeout:5000});
     await page.getByRole('button',{name:'Dashboard',exact:true}).click();
-    await page.getByRole('button',{name:'Apply loaded reports'}).focus();await page.keyboard.press('Enter');
     await page.waitForFunction(()=>[...document.querySelectorAll('.stat')].some(e=>e.textContent.includes('Report records') && e.querySelector('strong')?.textContent==='1'));
+    assert.ok(checks>=2,'the invalidated check must be repeated before applying');
+    assert.equal(await page.getByRole('button',{name:'Apply loaded reports'}).count(),0);
   } finally {release();}
 }));
 

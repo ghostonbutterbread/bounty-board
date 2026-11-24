@@ -6,6 +6,10 @@ const os = require('node:os');
 const {spawn} = require('node:child_process');
 const {chromium} = require('playwright');
 
+// The theme switcher is a menu button; filters are multi-select popovers.
+async function setTheme(page,name){await page.getByRole('button',{name:'Theme',exact:true}).click();await page.getByRole('menuitemradio',{name:name[0].toUpperCase()+name.slice(1),exact:true}).click();}
+async function pickFilter(page,plural,value){await page.getByRole('button',{name:`Filter ${plural}`,exact:true}).click();await page.getByRole('checkbox',{name:value}).check();await page.keyboard.press('Escape');}
+
 // A real local backend and real SQLite; all files and browser state are disposable.
 async function waitForPortfolio(page) {
   await page.waitForFunction(()=>{
@@ -69,9 +73,9 @@ test('portfolio filtering, ledger and unassessed inventory end to end', async ()
     assert.doesNotMatch(await submissions.innerText(),/draft\s+1/);
     await page.getByRole('button',{name:'Open workspace'}).click();
     assert.equal(await page.locator('#program-select').inputValue(),'web_bounty/alpha');
-    await page.getByLabel('Filter severities').selectOption('HIGH');
-    await page.getByLabel('Filter classes').selectOption('xss');
-    await page.getByLabel('Filter statuses').selectOption('raw');
+    await pickFilter(page,'severities','HIGH');
+    await pickFilter(page,'classes','xss');
+    await pickFilter(page,'statuses','raw');
     assert.equal(await page.getByText('Alpha finding',{exact:true}).count(),1);
     assert.equal(await page.getByText('Second alpha',{exact:true}).count(),0);
     await page.getByRole('button',{name:'Coverage',exact:true}).click();
@@ -81,7 +85,7 @@ test('portfolio filtering, ledger and unassessed inventory end to end', async ()
     await page.locator('#program-select').selectOption('web_bounty/beta');
     await page.getByRole('button',{name:'Findings',exact:true}).click();
     assert.equal(await page.getByText('Beta finding',{exact:true}).count(),1);
-    assert.equal(await page.getByLabel('Filter severities').inputValue(),'');
+    assert.equal(await page.locator('[data-filter-chip]').count(),0,'filters reset when the program changes');
     await page.getByRole('button',{name:'Dashboard',exact:true}).click();
     await page.getByLabel('Dashboard program').selectOption('');
     assert.equal(await stat('Finding records').innerText(),'3');
