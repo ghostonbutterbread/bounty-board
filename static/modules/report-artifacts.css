@@ -26,3 +26,6 @@
 .artifact-text-preview{margin:0;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--text-sm)/1.45 var(--font-mono);background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px}
 /* Narrow panel (side column or phone): buttons wrap under the file name. */
 @container (max-width:460px){.artifact-main{flex-wrap:wrap}.artifact-buttons{width:100%;padding-left:30px}}
+/* Auto-refresh: a file that just appeared is marked for a few seconds. */
+.artifact-row.artifact-new{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent);transition:background var(--dur) var(--ease)}
+.artifact-badge.artifact-new-badge{color:var(--accent-text);background:var(--accent-soft)}

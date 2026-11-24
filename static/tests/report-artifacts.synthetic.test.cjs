@@ -146,3 +146,34 @@ test('live report view mounts the artifacts panel and handles unavailable report
     assert.deepEqual(errors,[]);
   });
 });
+
+test('artifact list refreshes by itself when files are added, changed or removed',{timeout:60000},async()=>{
+  await withBoard('live',async({page,base,lane,errors})=>{
+    await openReport(page,base,'F1/REPORT.md');
+    const host=page.locator('#report-artifacts-host');
+    assert.match(await host.locator('h3').textContent(),/Artifacts \(11\)/);
+    let lists=0;page.on('request',r=>{if(r.url().includes('/api/report-artifacts?'))lists++;});
+    // An agent drops a new PoC file into the report folder: no reload needed.
+    fs.writeFileSync(path.join(lane,'reports/F1/poc/new-exploit.sh'),'echo synthetic\n');
+    const added=host.locator('[data-artifact="reports/F1/poc/new-exploit.sh"]');
+    await added.waitFor({timeout:12000});
+    assert.match(await host.locator('h3').textContent(),/Artifacts \(12\)/);
+    assert.ok(await added.evaluate(r=>r.classList.contains('artifact-new')),'new file is highlighted');
+    assert.equal(await added.locator('.artifact-new-badge').textContent(),'New');
+    // An open text preview follows the file's new content.
+    await host.locator('[data-artifact-preview="reports/F1/poc/exploit.py"]').click();
+    await host.locator('[data-artifact="reports/F1/poc/exploit.py"] pre').waitFor();
+    fs.writeFileSync(path.join(lane,'reports/F1/poc/exploit.py'),'print("improved synthetic proof")\n');
+    await page.waitForFunction(()=>document.querySelector('[data-artifact="reports/F1/poc/exploit.py"] pre')?.textContent.includes('improved'),null,{timeout:12000});
+    // Removal is picked up too.
+    fs.unlinkSync(path.join(lane,'reports/F1/poc/new-exploit.sh'));
+    await added.waitFor({state:'detached',timeout:12000});
+    assert.match(await host.locator('h3').textContent(),/Artifacts \(11\)/);
+    // Quiet refresh: no loading flash and polling stops while the tab is hidden.
+    assert.ok(lists>=3,`polled ${lists} times`);
+    await page.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>'hidden'});document.dispatchEvent(new Event('visibilitychange'));});
+    const hiddenStart=lists;await page.waitForTimeout(9000);
+    assert.equal(lists,hiddenStart,'no refresh while the tab is hidden');
+    assert.deepEqual(errors,[]);
+  });
+});

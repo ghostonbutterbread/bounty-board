@@ -6,6 +6,11 @@
 (() => {
   const TEXT_PREVIEW_BYTES = 64 * 1024;
   const KEEP_PANELS = 12;
+  // Auto-refresh: while a panel is on screen and the tab is visible, re-list
+  // quietly and redraw only when the files changed (added, removed, resized,
+  // touched). New files are highlighted briefly.
+  const REFRESH_MS = 4000;
+  const NEW_HIGHLIGHT_MS = 6000;
   const GROUPS = [
     ['video', 'Videos', 'fa-file-video-o'], ['image', 'Images', 'fa-file-image-o'], ['audio', 'Audio', 'fa-file-audio-o'],
     ['code', 'Code', 'fa-file-code-o'], ['data', 'Text and data', 'fa-file-text-o'], ['document', 'Documents', 'fa-file-pdf-o'],
@@ -55,32 +60,64 @@
     const key = JSON.stringify(selector);
     let panel = panels.get(key);
     if (!panel) {
-      panel = {key, selector, node: el('section', {class: 'artifacts', 'aria-label': 'Report artifacts', 'data-artifacts-key': key}), open: new Set()};
+      panel = {key, selector, node: el('section', {class: 'artifacts', 'aria-label': 'Report artifacts', 'data-artifacts-key': key}), open: new Set(), fresh: new Map()};
       panels.set(key, panel);
       while (panels.size > KEEP_PANELS) panels.delete(panels.keys().next().value);
       load(panel);
     } else { panels.delete(key); panels.set(key, panel); }
     if (host.firstChild !== panel.node) host.replaceChildren(panel.node);
+    schedule();
   }
 
-  async function load(panel) {
+  // A listing's identity: which files, and their size and modified time.
+  const signature = body => JSON.stringify([body.folder || '', (body.notes || []).slice().sort(),
+    body.artifacts.map(a => [a.relative, a.size, a.modified, !!a.sensitive]).sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))]);
+
+  async function load(panel, {quiet = false} = {}) {
     const generation = (panel.generation || 0) + 1;
     panel.generation = generation;
-    panel.status = 'loading';
-    draw(panel);
+    if (!quiet) { panel.status = 'loading'; draw(panel); }
     try {
-      const response = await fetch(`/api/report-artifacts?${query(panel.selector)}`, {headers: {Accept: 'application/json'}});
+      const response = await fetch(`/api/report-artifacts?${query(panel.selector)}`, {headers: {Accept: 'application/json'}, cache: 'no-store'});
       const body = await response.json().catch(() => null);
       if (!response.ok || !body || !Array.isArray(body.artifacts)) throw new Error(String(response.status));
       if (panel.generation !== generation) return;
+      const next = signature(body);
+      if (quiet && panel.status === 'ready' && next === panel.signature) return;  // nothing changed
+      if (panel.status === 'ready' && panel.data) {
+        const before = new Set(panel.data.artifacts.map(a => a.relative));
+        const now = Date.now();
+        for (const a of body.artifacts) if (!before.has(a.relative)) panel.fresh.set(a.relative, now);
+        // Redrawing also reloads open previews, so a changed file shows its new content.
+      }
       panel.data = body;
+      panel.signature = next;
       panel.status = 'ready';
     } catch {
       if (panel.generation !== generation) return;
+      if (quiet && panel.status === 'ready') return;  // keep the last good list through a blip
       panel.status = 'error';
     }
     draw(panel);
   }
+
+  function visiblePanels() {
+    return [...panels.values()].filter(panel => panel.node.isConnected);
+  }
+  function refreshVisible() {
+    if (document.visibilityState !== 'visible') return;
+    for (const panel of visiblePanels()) if (panel.status !== 'loading') load(panel, {quiet: true});
+  }
+  let timer = null;
+  function schedule() {
+    if (timer) return;
+    timer = setInterval(() => {
+      if (!visiblePanels().length) { clearInterval(timer); timer = null; return; }
+      refreshVisible();
+    }, REFRESH_MS);
+  }
+  document.addEventListener('visibilitychange', refreshVisible);
+  window.addEventListener('focus', refreshVisible);
 
   function draw(panel) {
     const {node, data, selector} = panel;
@@ -129,6 +166,9 @@
     const reasons = (item.reasons || [{reason: item.source_reason, detail: ''}])
       .map(r => `${REASONS[r.reason] || r.reason}${r.detail ? `: ${r.detail}` : ''}`).join('; ');
     const preview = el('div', {class: 'artifact-preview', id: previewId, hidden: !open});
+    const freshAt = panel.fresh.get(item.relative);
+    const fresh = freshAt && Date.now() - freshAt < NEW_HIGHLIGHT_MS;
+    if (freshAt && !fresh) panel.fresh.delete(item.relative);
     const toggle = item.preview ? el('button', {type: 'button', class: 'button subtle', 'aria-expanded': String(open), 'aria-controls': previewId,
       'data-artifact-preview': item.relative,
       onclick: () => {
@@ -141,11 +181,13 @@
         if (!next) preview.querySelectorAll('video,audio').forEach(media => media.pause());
       }}, icon('fa-eye'), document.createTextNode(open ? ' Hide preview' : ' Preview')) : null;
     if (open) fillPreview(preview, item, params);
-    return el('li', {class: 'artifact-row', 'data-artifact': item.relative},
+    if (fresh) setTimeout(() => { panel.fresh.delete(item.relative); panel.node.querySelector(`[data-artifact="${CSS.escape(item.relative)}"]`)?.classList.remove('artifact-new'); }, NEW_HIGHLIGHT_MS - (Date.now() - freshAt));
+    return el('li', {class: `artifact-row${fresh ? ' artifact-new' : ''}`, 'data-artifact': item.relative},
       el('div', {class: 'artifact-main'},
         el('span', {class: 'artifact-icon'}, icon(glyph)),
         el('div', {class: 'artifact-text'},
           el('div', {class: 'artifact-name'}, el('span', {text: item.display_path || item.name, title: item.relative}),
+            fresh ? el('span', {class: 'artifact-badge artifact-new-badge', text: 'New'}) : null,
             item.sensitive ? el('span', {class: 'artifact-badge', title: 'May contain credentials or raw traffic. Not previewed.'}, icon('fa-exclamation-triangle'), ' Sensitive') : null),
           el('div', {class: 'artifact-meta hint', text: `${size(item.size)} | Modified ${when(item.modified)}${outside ? ' | Outside the report folder' : ''}`}),
           el('div', {class: 'artifact-reason hint', text: reasons})),
