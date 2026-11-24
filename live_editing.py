@@ -11,7 +11,9 @@ Guarantees and limits:
 * Board saves for one report are serialized inside this process. Run one Board
   process per data root.
 * Every version the server observes or writes is kept in private history
-  (outside the data root) before it is replaced.
+  (outside the data root) before it is replaced. One client's typing session
+  is one history entry holding its latest text; intermediate autosaves are
+  kept only while a client may still send them back as a merge base.
 * Replacement uses ``renameat2(RENAME_EXCHANGE)``. A write that lands between
   the final check and the exchange is recovered from the displaced file and
   merged. A process that keeps the old file open and writes after the exchange
