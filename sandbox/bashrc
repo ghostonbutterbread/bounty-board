@@ -1,0 +1,7 @@
+# Bounty Board sandbox shell. The prompt shows the report folder mounted at /report.
+PS1='\[\e[36m\]sandbox\[\e[0m\]:\[\e[33m\]\w\[\e[0m\]\$ '
+alias ll='ls -la'
+if [ -z "$BBTERM_BANNER_SHOWN" ]; then
+  export BBTERM_BANNER_SHOWN=1
+  echo "Report folder: /report (live, read-write). Internet only through the sandbox proxy; host, LAN and tailnet are blocked."
+fi

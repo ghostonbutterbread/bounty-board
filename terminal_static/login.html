@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Sign in to the terminal - Bounty Board</title>
+  <link rel="stylesheet" href="/vendor/font-awesome/css/font-awesome.min.css">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/terminal/login.css">
+  <script defer src="/terminal/login.js"></script>
+</head>
+<body class="term-login-page">
+  <main class="term-login">
+    <form class="panel panel-pad" id="login-form" novalidate>
+      <div class="brand"><span class="mark" aria-hidden="true">BB</span><span>Bounty Board<small>Sandbox terminal</small></span></div>
+      <h1>Sign in to the terminal</h1>
+      <p class="hint">Your tailnet account is not on the allowlist, so a password is needed. The Board itself does not need this.</p>
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <div id="login-message" class="message warning" role="alert" hidden></div>
+      <button type="submit" class="button primary">Sign in</button>
+      <p class="hint" id="signed-in" hidden>Signed in. <a href="/">Back to the Board</a> <button type="button" class="button sm subtle" id="logout">Sign out</button></p>
+    </form>
+  </main>
+</body>
+</html>

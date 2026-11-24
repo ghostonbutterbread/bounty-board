@@ -975,7 +975,7 @@
     const inline=s=>esc(s).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/\*([^*]+)\*/g,'<em>$1</em>');
     let code=false, result=[], inList=false;
     for (const line of String(source).split('\n')) {
-      if (line.startsWith('```')) {if(inList){result.push('</ul>');inList=false;} result.push(code?'</code></pre>':'<pre><code>');code=!code;continue;}
+      if (line.startsWith('```')) {if(inList){result.push('</ul>');inList=false;} const lang=code?'':line.slice(3).trim().split(/\s+/)[0].toLowerCase(); result.push(code?'</code></pre>':(lang?`<pre data-lang="${esc(lang)}"><code>`:'<pre><code>'));code=!code;continue;}
       if(code){result.push(esc(line)+'\n');continue;}
       const bullet=line.match(/^\s*[-*] (.*)$/); if(bullet){if(!inList){result.push('<ul>');inList=true;} result.push(`<li>${inline(bullet[1])}</li>`);continue;}
       if(inList){result.push('</ul>');inList=false;}

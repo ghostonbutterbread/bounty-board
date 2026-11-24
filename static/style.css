@@ -470,6 +470,8 @@ dialog::backdrop{background:var(--overlay)}
 .EasyMDEContainer .editor-toolbar button:hover,.EasyMDEContainer .editor-toolbar button.active{background:var(--surface-3);border-color:transparent}
 .EasyMDEContainer .editor-toolbar i.separator{border-left-color:var(--border);border-right-color:transparent}
 .EasyMDEContainer .editor-preview,.EasyMDEContainer .editor-preview-side{background:var(--surface);color:var(--text);border-color:var(--border-strong)}
+/* EasyMDE paints preview code blocks with a fixed light grey; follow the theme so code stays readable in dark/dusk. */
+.EasyMDEContainer .editor-preview pre,.EasyMDEContainer .editor-preview-side pre{background:var(--surface-3);color:var(--text)}
 
 /* Recovery remains available independently of the selected workspace. */
 .draft-recovery{margin-bottom:var(--space-4);border-color:color-mix(in srgb,var(--warning) 45%,var(--border));box-shadow:inset 3px 0 0 var(--warning),var(--shadow-sm)}

@@ -1,0 +1,456 @@
+"""Sandbox terminal: auth, check-state storage, mount safety, evidence, sessions.
+
+Uses the test-only LocalBackend (plain bash in the folder); the real Docker
+sandbox is exercised in test_terminal_docker.py.
+"""
+import email.message
+import os
+import shutil
+import stat
+import sys
+import threading
+import time
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import terminal_auth as ta  # noqa: E402
+import terminal_checks as tc  # noqa: E402
+import terminal_sandbox as sb  # noqa: E402
+from tests import terminal_fixture as fx  # noqa: E402
+
+
+def headers(**values):
+    msg = email.message.Message()
+    for key, value in values.items():
+        for item in value if isinstance(value, list) else [value]:
+            msg[key.replace('_', '-')] = item
+    return msg
+
+
+FAST = {'n': 2 ** 14, 'r': 8, 'p': 1}
+
+
+class AuthTests(unittest.TestCase):
+    def setUp(self):
+        self.now = [1000.0]
+        self.record = ta.hash_password('correct horse battery', **FAST)
+        self.auth = ta.Auth(allowed_users=['Ryu@Example.test'], trusted_hosts={'node.ts.net:9001'},
+                            hash_record=self.record, clock=lambda: self.now[0])
+
+    def test_hash_roundtrip_and_format(self):
+        self.assertTrue(self.record.startswith('scrypt$16384$8$1$'))
+        self.assertTrue(ta.verify_password(self.record, 'correct horse battery'))
+        self.assertFalse(ta.verify_password(self.record, 'wrong'))
+        with self.assertRaises(ta.HashFileError):
+            ta.parse_hash('scrypt$1024$8$1$AAAA$BBBB')  # too weak
+
+    def test_allowlisted_header_needs_trusted_host(self):
+        ok = headers(Host='node.ts.net:9001', Tailscale_User_Login='ryu@example.test')
+        self.assertEqual(self.auth.identify(ok), ('ryu@example.test', 'tailnet'))
+        direct = headers(Host='127.0.0.1:9011', Tailscale_User_Login='ryu@example.test')
+        self.assertEqual(self.auth.identify(direct), (None, None))
+        other = headers(Host='node.ts.net:9001', Tailscale_User_Login='someone@example.test')
+        self.assertEqual(self.auth.identify(other), (None, None))
+        missing = headers(Host='node.ts.net:9001')
+        self.assertEqual(self.auth.identify(missing), (None, None))
+        doubled = headers(Host='node.ts.net:9001', Tailscale_User_Login=['ryu@example.test', 'x@y'])
+        self.assertEqual(self.auth.identify(doubled), (None, None))
+
+    def test_login_cookie_logout_and_expiry(self):
+        sid, error = self.auth.login('ryushe', 'correct horse battery')
+        self.assertIsNone(error)
+        cookie = self.auth.session_cookie(sid)
+        for flag in ('HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/terminal', 'Max-Age=43200'):
+            self.assertIn(flag, cookie)
+        h = headers(Host='node.ts.net:9001', Cookie=f'{ta.COOKIE}={sid}')
+        self.assertEqual(self.auth.identify(h), ('ryushe', 'password'))
+        self.now[0] += ta.SESSION_SECONDS + 1
+        self.assertEqual(self.auth.identify(h), (None, None))
+        sid, _ = self.auth.login('ryushe', 'correct horse battery')
+        h = headers(Cookie=f'{ta.COOKIE}={sid}')
+        self.auth.logout(h)
+        self.assertEqual(self.auth.identify(h), (None, None))
+        self.assertIn('Max-Age=0', ta.Auth.clear_cookie())
+
+    def test_failures_lock_out_then_recover(self):
+        self.assertEqual(self.auth.login('ryushe', 'nope')[1], 'invalid')
+        self.assertEqual(self.auth.login('someoneelse', 'correct horse battery')[1], 'invalid')
+        for _ in range(ta.MAX_FAILURES - 2):
+            self.auth.login('ryushe', 'nope')
+        self.assertEqual(self.auth.login('ryushe', 'correct horse battery')[1], 'locked')
+        self.now[0] += ta.LOCKOUT_SECONDS + 1
+        self.assertIsNone(self.auth.login('ryushe', 'correct horse battery')[1])
+
+    def test_password_disabled_without_hash(self):
+        auth = ta.Auth(allowed_users=[], trusted_hosts=set())
+        self.assertEqual(auth.login('ryushe', 'x')[1], 'disabled')
+
+    def test_cookie_parsing_refuses_duplicates_and_junk(self):
+        self.assertIsNone(ta.cookie_value(headers(Cookie=f'{ta.COOKIE}=aaaaaaaaaa; {ta.COOKIE}=bbbbbbbbbb'), ta.COOKIE))
+        self.assertIsNone(ta.cookie_value(headers(Cookie=f'{ta.COOKIE}=<script>'), ta.COOKIE))
+
+    def test_hash_file_permissions(self):
+        base = fx.tmp_base('hash')
+        path = base / 'terminal.hash'
+        ta.write_hash_file(path, self.record)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(ta.read_hash_file(path), self.record)
+        with self.assertRaises(FileExistsError):
+            ta.write_hash_file(path, self.record)
+        os.chmod(path, 0o644)
+        with self.assertRaises(ta.HashFileError):
+            ta.read_hash_file(path)
+        link = base / 'link.hash'
+        link.symlink_to(path)
+        with self.assertRaises(OSError):
+            ta.read_hash_file(link)
+        shutil.rmtree(base)
+
+
+class CheckTests(unittest.TestCase):
+    def test_keys_edit_reorder_duplicates(self):
+        a, b, c = 'echo one\n', 'curl -s http://x\n', 'echo three'
+        keys = tc.block_keys([a, b, c])
+        self.assertTrue(all(tc.KEY_RE.match(k) for k in keys))
+        # Edit one block: only its key changes.
+        edited = tc.block_keys([a, 'curl -sv http://x', c])
+        self.assertEqual([keys[0], keys[2]], [edited[0], edited[2]])
+        self.assertNotEqual(keys[1], edited[1])
+        # Reorder: keys move with their blocks.
+        self.assertEqual(set(tc.block_keys([c, a, b])), set(keys))
+        # Duplicates are told apart by order; whitespace noise does not matter.
+        dup = tc.block_keys([a, '  \necho one   \n\n', a])
+        self.assertEqual([k.split(':')[1] for k in dup], ['0', '1', '2'])
+        self.assertEqual(len({k.split(':')[0] for k in dup}), 1)
+
+    def test_store_persists_and_validates(self):
+        base = fx.tmp_base('checks')
+        store = tc.CheckStore(base / 'c.sqlite3')
+        sel, other = fx.selector(), fx.selector('flat.md')
+        key = tc.block_keys(['echo hi'])[0]
+        self.assertTrue(store.set(sel, key, True))
+        with self.assertRaises(ValueError):
+            store.set(sel, 'not-a-key', True)
+        store.close()
+        store = tc.CheckStore(base / 'c.sqlite3')  # survives a restart
+        self.assertEqual(list(store.get(sel)), [key])
+        self.assertEqual(store.get(other), {})
+        store.set(sel, key, False)
+        self.assertEqual(store.get(sel), {})
+        store.close()
+        shutil.rmtree(base)
+
+    def test_store_cap(self):
+        base = fx.tmp_base('checkcap')
+        store = tc.CheckStore(base / 'c.sqlite3')
+        keys = tc.block_keys([f'echo {i}' for i in range(tc.MAX_KEYS_PER_REPORT + 1)])
+        for key in keys[:-1]:
+            store.set(fx.selector(), key, True)
+        self.assertFalse(store.set(fx.selector(), keys[-1], True))
+        self.assertTrue(store.set(fx.selector(), keys[0], True))  # re-marking an existing key is fine
+        store.close()
+        shutil.rmtree(base)
+
+
+class MountTests(unittest.TestCase):
+    def setUp(self):
+        self.base = fx.tmp_base('mount')
+        self.root = fx.make_root(self.base)
+        self.lane = self.root / fx.FAMILY / fx.PROGRAM / fx.LANE
+
+    def tearDown(self):
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_dedicated_folder(self):
+        mount = sb.resolve_mount(self.root, fx.selector())
+        self.assertEqual(mount.folder, 'reports/finding-a')
+        self.assertEqual(mount.path, str(self.lane / 'reports/finding-a'))
+        self.assertTrue(mount.still_valid())
+
+    def test_single_report_folder_uses_its_folder(self):
+        self.assertEqual(sb.resolve_mount(self.root, fx.selector('solo/notes.md')).folder, 'reports/solo')
+
+    def test_reports_root_and_bucket_get_per_report_folder(self):
+        mount = sb.resolve_mount(self.root, fx.selector('flat.md'))
+        self.assertEqual(mount.folder, 'reports/flat')
+        self.assertTrue((self.lane / 'reports/flat').is_dir())
+        self.assertEqual(sb.resolve_mount(self.root, fx.selector('bucket/one.md')).folder, 'reports/bucket/one')
+        with self.assertRaises(sb.SandboxError):  # create=False never makes the folder
+            sb.resolve_mount(self.root, fx.selector('other.md'), create=False)
+        self.assertFalse((self.lane / 'reports/other').exists())
+
+    def test_refuses_symlinked_components(self):
+        target = self.base / 'elsewhere'
+        target.mkdir()
+        (target / 'REPORT.md').write_text('# x\n')
+        (self.lane / 'reports' / 'linked').symlink_to(target)
+        with self.assertRaises(sb.SandboxError):
+            sb.resolve_mount(self.root, fx.selector('linked/REPORT.md'))
+        # A symlinked lane is refused too.
+        (self.root / fx.FAMILY / fx.PROGRAM / 'lane2').symlink_to(self.lane)
+        with self.assertRaises(sb.SandboxError):
+            sb.resolve_mount(self.root, {**fx.selector(), 'lane': 'lane2'})
+        # A per-report folder that is a symlink is refused.
+        (self.lane / 'reports' / 'other').symlink_to(target)
+        with self.assertRaises(sb.SandboxError):
+            sb.resolve_mount(self.root, fx.selector('other.md'))
+
+    def test_refuses_bad_selectors(self):
+        for path in ('../x.md', '/etc/passwd.md', 'a/../../b.md', 'x.txt', '', 'a//b.md'):
+            with self.assertRaises(sb.SandboxError):
+                sb.clean_selector(fx.selector(path))
+        for bad in ({**fx.selector(), 'lane': '..'}, {**fx.selector(), 'program': 'a/b'}, {'family': 'x'}):
+            with self.assertRaises(sb.SandboxError):
+                sb.clean_selector(bad)
+        with self.assertRaises(sb.SandboxError):
+            sb.resolve_mount(self.root, fx.selector('missing/REPORT.md'))
+
+    def test_refuses_mount_option_injection(self):
+        folder = self.lane / 'reports' / 'x,target=etc'
+        folder.mkdir()
+        (folder / 'REPORT.md').write_text('# x\n')
+        with self.assertRaises(sb.SandboxError) as caught:
+            sb.resolve_mount(self.root, fx.selector('x,target=etc/REPORT.md'))
+        self.assertEqual(caught.exception.code, 'unsafe_folder')
+
+    def test_moved_folder_invalidates_mount(self):
+        mount = sb.resolve_mount(self.root, fx.selector())
+        (self.lane / 'reports/finding-a').rename(self.lane / 'reports/finding-b')
+        self.assertFalse(mount.still_valid())
+        with self.assertRaises(sb.SandboxError):
+            sb.resolve_mount(self.root, fx.selector())
+
+
+class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.base = fx.tmp_base('evidence')
+        self.root = fx.make_root(self.base)
+        self.lane = self.root / fx.FAMILY / fx.PROGRAM / fx.LANE
+
+    def tearDown(self):
+        for path in self.base.rglob('*'):
+            if path.is_dir() and not path.is_symlink():
+                os.chmod(path, 0o755)
+        os.chmod(self.root, 0o755)
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_transcript_strips_ansi_and_stamps_lines(self):
+        chunks = [(1700000000.0, b'\x1b[32mgreen\x1b[0m text\r\n'), (1700000001.0, b'\x1b]0;title\x07prog\r 50%\r100%\r\n'),
+                  (1700000002.0, b'ab\bc\n\xe2\x9c'), (1700000003.0, b'\x93 done\n')]
+        text = sb.render_transcript(chunks, title='t', started=1700000000.0, truncated=False)
+        self.assertNotIn('\x1b', text)
+        self.assertIn('] green text', text)
+        self.assertIn('] 100%', text)
+        self.assertIn('] ac', text)
+        self.assertIn('] ✓ done', text)
+        self.assertTrue(text.startswith('# Sandbox terminal transcript: t'))
+
+    def test_transcript_size_cap(self):
+        chunks = [(1700000000.0, b'x' * 1000 + b'\n')] * 3000
+        text = sb.render_transcript(chunks, title='t', started=1700000000.0, truncated=False, limit=10000)
+        self.assertLess(len(text), 12000)
+        self.assertIn('Earlier output was dropped', text)
+
+    def test_writes_new_file_in_validation(self):
+        first = sb.save_evidence(self.root, fx.selector(), 'one\n', now=1700000000)
+        second = sb.save_evidence(self.root, fx.selector(), 'two\n', now=1700000000)
+        self.assertTrue(first.startswith('reports/finding-a/validation/terminal-'))
+        self.assertNotEqual(first, second)
+        self.assertEqual((self.lane / first).read_text(), 'one\n')
+        self.assertEqual((self.lane / second).read_text(), 'two\n')
+
+    def test_refuses_symlinked_validation_and_existing_symlink_target(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (self.lane / 'reports/finding-a/validation').symlink_to(outside)
+        with self.assertRaises(sb.SandboxError):
+            sb.save_evidence(self.root, fx.selector(), 'x\n', now=1700000000)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_never_overwrites_planted_symlink(self):
+        validation = self.lane / 'reports/finding-a/validation'
+        validation.mkdir()
+        victim = self.base / 'victim.txt'
+        victim.write_text('keep')
+        name = 'terminal-' + time.strftime('%Y%m%d-%H%M%S', time.localtime(1700000000)) + '.txt'
+        (validation / name).symlink_to(victim)
+        rel = sb.save_evidence(self.root, fx.selector(), 'new\n', now=1700000000)
+        self.assertNotEqual(rel.rsplit('/', 1)[-1], name)
+        self.assertEqual(victim.read_text(), 'keep')
+
+    def test_refuses_read_only_root(self):
+        os.chmod(self.root, 0o555)
+        try:
+            with self.assertRaises(sb.SandboxError) as caught:
+                sb.save_evidence(self.root, fx.selector(), 'x\n')
+            self.assertEqual(caught.exception.code, 'root_not_writable')
+        finally:
+            os.chmod(self.root, 0o755)
+
+    def test_refuses_read_only_folder(self):
+        folder = self.lane / 'reports/finding-a'
+        os.chmod(folder, 0o555)
+        try:
+            with self.assertRaises(sb.SandboxError) as caught:
+                sb.save_evidence(self.root, fx.selector(), 'x\n')
+            self.assertEqual(caught.exception.code, 'root_not_writable')
+        finally:
+            os.chmod(folder, 0o755)
+
+
+class FakeViewer:
+    def __init__(self):
+        self.output = bytearray()
+        self.controls = []
+        self.closed = False
+        self.lock = threading.Lock()
+
+    def send_output(self, data):
+        with self.lock:
+            self.output += data
+
+    def send_control(self, message):
+        self.controls.append(message)
+
+    def close(self):
+        self.closed = True
+
+    def wait_for(self, needle, timeout=10):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                if needle.encode() in self.output:
+                    return True
+            time.sleep(0.05)
+        raise AssertionError(f'{needle!r} not seen; got {bytes(self.output[-400:])!r}')
+
+
+class SessionTests(unittest.TestCase):
+    def setUp(self):
+        self.base = fx.tmp_base('sessions')
+        self.root = fx.make_root(self.base)
+        self.now = [0.0]
+        self.manager = sb.SessionManager(self.root, sb.LocalBackend(self.base / 'local'), max_sessions=2, idle_timeout=60,
+                                         clock=lambda: self.now[0], reap_interval=0)
+
+    def tearDown(self):
+        self.manager.close()
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def test_shell_starts_in_report_folder_and_sees_live_edits(self):
+        viewer = FakeViewer()
+        session = self.manager.attach(fx.selector(), viewer)
+        self.assertEqual(viewer.controls[0]['type'], 'hello')
+        self.assertEqual(viewer.controls[0]['session']['folder'], 'reports/finding-a')
+        session.write(b'pwd; python3 poc.py\n')
+        viewer.wait_for('reports/finding-a')
+        viewer.wait_for('poc-ran-ok')
+        # An agent edits the PoC on the host: the next run uses it, no recopy.
+        (self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / 'reports/finding-a/poc.py').write_text('print("edited-on-host")\n')
+        session.write(b'python3 poc.py\n')
+        viewer.wait_for('edited-on-host')
+
+    def test_two_viewers_share_one_shell_and_new_viewer_gets_scrollback(self):
+        a, b = FakeViewer(), FakeViewer()
+        session = self.manager.attach(fx.selector(), a)
+        session.write(b'echo marker-$((40+2))\n')
+        a.wait_for('marker-42')
+        same = self.manager.attach(fx.selector(), b)
+        self.assertIs(same, session)
+        self.assertIn(b'marker-42', bytes(b.output))  # scrollback replayed
+        same.write(b'echo from-b-$((1+1))\n')
+        a.wait_for('from-b-2')
+        b.wait_for('from-b-2')
+        self.assertEqual(b.controls[-1], {'type': 'viewers', 'count': 2})
+
+    def test_detach_keeps_shell_until_idle_timeout(self):
+        viewer = FakeViewer()
+        session = self.manager.attach(fx.selector(), viewer)
+        session.write(b'export KEEP=still-here\n')
+        self.manager.detach(session, viewer)
+        self.now[0] += 30
+        self.assertEqual(self.manager.reap_idle(), [])
+        again = FakeViewer()
+        self.assertIs(self.manager.attach(fx.selector(), again), session)
+        session.write(b'echo $KEEP\n')
+        again.wait_for('still-here')
+        self.manager.detach(session, again)
+        self.now[0] += 61
+        self.assertEqual(self.manager.reap_idle(), [session])
+        self.assertTrue(session.closed)
+        self.assertIsNone(session.proc)
+        self.assertIsNone(self.manager.get(fx.selector()))
+
+    def test_max_sessions_evicts_idle_then_refuses(self):
+        a, b, c = FakeViewer(), FakeViewer(), FakeViewer()
+        first = self.manager.attach(fx.selector(), a)
+        self.manager.attach(fx.selector('solo/notes.md'), b)
+        with self.assertRaises(sb.SandboxError) as caught:
+            self.manager.attach(fx.selector('flat.md'), c)
+        self.assertEqual(caught.exception.code, 'too_many_sessions')
+        self.manager.detach(first, a)
+        third = self.manager.attach(fx.selector('flat.md'), c)  # evicts the viewerless one
+        self.assertTrue(first.closed)
+        self.assertEqual(third.folder, 'reports/flat')
+
+    def test_reset_restarts_shell_and_keeps_viewers(self):
+        viewer = FakeViewer()
+        session = self.manager.attach(fx.selector(), viewer)
+        session.write(b'export GONE=1; echo before-reset\n')
+        viewer.wait_for('before-reset')
+        old_id = session.id
+        self.manager.reset(fx.selector())
+        self.assertNotEqual(session.id, old_id)
+        self.assertIn({'type': 'reset'}, viewer.controls)
+        self.assertEqual(viewer.controls[-1]['type'], 'hello')
+        self.assertEqual(bytes(session.scrollback).count(b'before-reset'), 0)
+        session.write(b'echo "gone=[${GONE:-unset}]"\n')
+        viewer.wait_for('gone=[unset]')
+
+    def test_shell_exit_respawns_on_enter(self):
+        viewer = FakeViewer()
+        session = self.manager.attach(fx.selector(), viewer)
+        session.write(b'exit\n')
+        viewer.wait_for('Shell exited')
+        deadline = time.time() + 5
+        while session.proc is not None and time.time() < deadline:
+            time.sleep(0.05)
+        session.write(b'\r')
+        session.write(b'echo back-$((2*3))\n')
+        viewer.wait_for('back-6')
+
+    def test_close_stops_everything(self):
+        viewer = FakeViewer()
+        session = self.manager.attach(fx.selector(), viewer)
+        proc = session.proc
+        self.manager.close()
+        self.assertTrue(viewer.closed)
+        self.assertIsNotNone(proc.poll())
+        with self.assertRaises(sb.SandboxError):
+            self.manager.attach(fx.selector(), FakeViewer())
+
+    def test_folder_move_is_reported_to_new_viewers(self):
+        session = self.manager.attach(fx.selector(), FakeViewer())
+        lane = self.root / fx.FAMILY / fx.PROGRAM / fx.LANE
+        (lane / 'reports/finding-a').rename(lane / 'reports/finding-z')
+        (lane / 'reports/finding-a').mkdir()
+        (lane / 'reports/finding-a/REPORT.md').write_text('# new\n')
+        late = FakeViewer()
+        self.manager.attach(fx.selector(), late)
+        self.assertIn('folder_moved', late.controls[0]['session']['notes'])
+        self.assertIs(self.manager.get(fx.selector()), session)
+
+    def test_evidence_from_session_transcript(self):
+        viewer = FakeViewer()
+        session = self.manager.attach(fx.selector(), viewer)
+        session.write(b'printf "\\033[31mred-evidence\\033[0m\\n"\n')
+        viewer.wait_for('red-evidence')
+        rel = sb.save_evidence(self.root, fx.selector(), session.transcript_text())
+        text = (self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / rel).read_text()
+        self.assertIn('red-evidence', text)
+        self.assertNotIn('\x1b', text)
+
+
+if __name__ == '__main__':
+    unittest.main()
