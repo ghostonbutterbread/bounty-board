@@ -925,6 +925,130 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 self.server.live_streams.release()
                 self.close_connection = True
 
+        # --- Report artifacts (feat/board-report-artifacts) -------------------
+        # Lists and serves files associated with one report; see
+        # report_artifacts.py for the association rule and docs/integrations/
+        # report-artifacts.md for the contract. Read-only; every download
+        # re-runs the association and opens the file without following symlinks.
+        def report_artifacts(self, view):
+            import report_artifacts as ra
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
+            bound = 'root_instance' in params
+            needed = {'family', 'program', 'lane', 'path'} | ({'artifact'} if view in ('file', 'media') else set())
+            before = root_snapshot() if bound else None
+            lane_fd = None
+            self.artifact_started = False
+            try:
+                if set(params) != needed | ({'root_instance'} if bound else set()) or any(len(v) != 1 for v in params.values()):
+                    raise ra.ArtifactError('invalid selector')
+                if bound and (not before or params['root_instance'] != [before[2]]):
+                    return self.reply(409, {'error': 'root_changed'})
+                family, program, lane, path = (params[k][0] for k in ('family', 'program', 'lane', 'path'))
+                if (family not in FAMILIES or lane not in FAMILIES[family] or not program or program.startswith('_') or
+                        program in ('.', '..') or '/' in program or '\0' in program):
+                    raise ra.ArtifactError('invalid selector')
+                lane_fd = ra.open_lane(before[0] if bound else root, family, program, lane)
+                found = ra.associate(lane_fd, family, program, lane, path)
+                if view == 'list':
+                    return self.reply(200, {**found, 'max_zip_bytes': ra.MAX_ZIP_BYTES})
+                if view == 'zip':
+                    return self.artifact_zip(ra, lane_fd, found, path)
+                item = next((a for a in found['artifacts'] if a['relative'] == params['artifact'][0]), None)
+                if item is None:
+                    raise ra.ArtifactError('not associated')
+                ext = Path(item['name']).suffix.lower()
+                if view == 'media' and (item['sensitive'] or ext not in ra.INLINE_TYPES):
+                    return self.reply(415, {'error': 'preview_not_allowed'})
+                fd, info = ra.open_file(lane_fd, item['relative'])
+                with os.fdopen(fd, 'rb') as stream:
+                    self.artifact_stream(ra, stream, info.st_size, item['name'],
+                                         ra.INLINE_TYPES[ext] if view == 'media' else 'application/octet-stream',
+                                         'inline' if view == 'media' else 'attachment')
+            except (OSError, ValueError, UnicodeError, ra.ArtifactError):
+                if self.artifact_started:
+                    self.close_connection = True  # body already streaming; client sees a short response
+                elif bound and before and root_snapshot() != before:
+                    self.reply(409, {'error': 'root_changed'})
+                else:
+                    self.reply(404, {'error': 'artifact_not_found_or_unavailable'})
+            finally:
+                if lane_fd is not None:
+                    os.close(lane_fd)
+
+        def artifact_headers(self, content_type, disposition):
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Disposition', disposition)
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Content-Security-Policy', "sandbox; default-src 'none'")
+            self.send_header('Cross-Origin-Resource-Policy', 'same-origin')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Cache-Control', 'no-store')
+
+        def artifact_stream(self, ra, stream, size, name, content_type, kind):
+            span = ra.parse_range(self.headers.get('Range'), size)
+            if span == 'invalid':
+                self.send_response(416)
+                self.artifact_headers('application/octet-stream', ra.content_disposition('attachment', name))
+                self.send_header('Content-Range', f'bytes */{size}')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            start, end = span or (0, size - 1)
+            self.send_response(206 if span else 200)
+            self.artifact_headers(content_type, ra.content_disposition(kind, name))
+            self.send_header('Accept-Ranges', 'bytes')
+            if span:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            self.send_header('Content-Length', str(max(end - start + 1, 0)))
+            self.end_headers()
+            self.artifact_started = True
+            stream.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = stream.read(min(ra.CHUNK, remaining))
+                if not chunk:
+                    break  # file shrank; the client sees a short body
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+        def artifact_zip(self, ra, lane_fd, found, path):
+            import time
+            import zipfile
+            items = [a for a in found['artifacts'] if not a['sensitive']]
+            if not items:
+                return self.reply(404, {'error': 'no_artifacts'})
+            if sum(a['size'] for a in items) > ra.MAX_ZIP_BYTES:
+                return self.reply(413, {'error': 'archive_too_large', 'max_zip_bytes': ra.MAX_ZIP_BYTES})
+            stem = Path(path).parent.name if '/' in path else Path(path).stem
+            self.send_response(200)
+            self.artifact_headers('application/zip', ra.content_disposition('attachment', f'{stem or "report"}-artifacts.zip'))
+            self.end_headers()
+            self.artifact_started = self.close_connection = True
+            budget = ra.MAX_ZIP_BYTES
+            with zipfile.ZipFile(self.wfile, 'w', allowZip64=True) as archive:
+                for item in items:
+                    try:
+                        fd, info = ra.open_file(lane_fd, item['relative'])
+                    except ra.ArtifactError:
+                        continue
+                    with os.fdopen(fd, 'rb') as stream:
+                        size = min(info.st_size, budget)
+                        entry = zipfile.ZipInfo(item['relative'], date_time=max(time.localtime(info.st_mtime)[:6], (1980, 1, 1, 0, 0, 0)))
+                        entry.compress_type = zipfile.ZIP_DEFLATED if item['category'] in ('code', 'data') else zipfile.ZIP_STORED
+                        entry.file_size = size
+                        with archive.open(entry, 'w', force_zip64=size > 0x7fffffff) as target:
+                            remaining = size
+                            while remaining > 0:
+                                chunk = stream.read(min(ra.CHUNK, remaining))
+                                if not chunk:
+                                    break
+                                target.write(chunk)
+                                remaining -= len(chunk)
+                        budget -= size - remaining
+                    if budget <= 0:
+                        break
+            return None
+
         def do_GET(self):
             import hashlib
             import os
@@ -932,6 +1056,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
             url = urlsplit(self.path)
+            if url.path in ('/api/report-artifacts', '/api/report-artifact', '/api/report-artifact-media', '/api/report-artifacts.zip'):
+                return self.report_artifacts({'/api/report-artifacts': 'list', '/api/report-artifact': 'file',
+                                              '/api/report-artifact-media': 'media', '/api/report-artifacts.zip': 'zip'}[url.path])
             if url.path.startswith('/api/live/'):
                 if live is None:
                     return self.reply(404, {'error': 'live_edit_disabled'})

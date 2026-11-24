@@ -86,6 +86,10 @@ Other than the opt-in collaboration endpoint below, report-edit requests are dis
 
 If a collaboration merge needs Git but `git` cannot be started, the API returns `503 {"error":"git_unavailable", "message":"..."}`. Retain the local draft, restore an executable Git to the server's PATH, and retry the same request ID; inspect the result. A failure during post-publication observation instead retains the existing `outcome_uncertain` contract because a source exchange may already have happened.
 
+## `GET /api/report-artifacts?family=web_bounty&program=example&lane=web&path=D04%2FREPORT.md`
+
+Read-only. Lists files associated with one report (its dedicated folder, paths in the owning finding's artifact fields, relative Markdown links; all inside the lane) with `relative`, `size`, `modified`, `category`, `sensitive`, `preview` and the reasons each is linked. `GET /api/report-artifact?…&artifact=<relative>` streams one listed file as an `application/octet-stream` attachment with `nosniff` and a sandbox CSP (Range supported); `/api/report-artifact-media` serves raster images and audio/video inline; `/api/report-artifacts.zip` streams non-sensitive files as a zip (512 MiB cap). Files are reopened per request with `O_NOFOLLOW` walks and must still be associated. Contract and rule: `docs/integrations/report-artifacts.md`.
+
 ## Experimental collaboration source autosave (default off)
 
 This branch is a **synthetic-tested prototype, not approved for real deployment**. `--collaboration-dir PRIVATE --report-autosave` enables synchronous publication on accepted collaboration POSTs; the switches are not configuration-file options. `--experimental-fixture-publish` is separate and mutually exclusive. The private store and source must be on the same filesystem. `GET /api/data` advertises `capabilities.report_autosave`.
