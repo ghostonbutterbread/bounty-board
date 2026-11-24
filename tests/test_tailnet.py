@@ -141,6 +141,94 @@ class TailnetBoundaryTests(unittest.TestCase):
                 process.terminate()
                 process.wait(timeout=5)
 
+    def _serve(self, root, **kwargs):
+        lane = Path(root) / 'web_bounty/example/web/ledgers'
+        lane.mkdir(parents=True)
+        (lane / 'ledger.json').write_text('{"findings":[{"fid":"F01","title":"synthetic"}]}')
+        server = app.make_server(Path(root), port=0, **kwargs)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def stop():
+            server.shutdown(); thread.join(); server.server_close()
+        self.addCleanup(stop)
+        def request(method, headers, path='/api/data', body=None):
+            conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+            conn.putrequest(method, path, skip_host=True)
+            for key, value in headers:
+                conn.putheader(key, value)
+            if body is not None:
+                conn.putheader('Content-Length', str(len(body)))
+            conn.endheaders(body)
+            response = conn.getresponse()
+            result = (response.status, response.read())
+            conn.close()
+            return result
+        return request
+
+    def test_following_a_link_from_another_site_opens_only_the_app_shell(self):
+        host = 'board.example.ts.net'
+        with tempfile.TemporaryDirectory() as root:
+            request = self._serve(root, tailnet_host=host)
+            navigate = [('Host', host), ('Sec-Fetch-Mode', 'navigate'), ('Sec-Fetch-Dest', 'document')]
+            for site in ('cross-site', 'same-site', 'none', 'same-origin'):
+                with self.subTest(site=site):
+                    status, body = request('GET', navigate + [('Sec-Fetch-Site', site)], '/')
+                    self.assertEqual(status, 200)
+                    self.assertIn(b'<html', body.lower())
+            self.assertEqual(request('GET', navigate + [('Sec-Fetch-Site', 'cross-site')], '/index.html')[0], 200)
+            for headers, path in (
+                (navigate + [('Sec-Fetch-Site', 'cross-site')], '/api/data'),
+                (navigate + [('Sec-Fetch-Site', 'cross-site')], '/app.js'),
+                ([('Host', host), ('Sec-Fetch-Site', 'cross-site'), ('Sec-Fetch-Mode', 'navigate'), ('Sec-Fetch-Dest', 'iframe')], '/'),
+                ([('Host', host), ('Sec-Fetch-Site', 'cross-site'), ('Sec-Fetch-Mode', 'no-cors'), ('Sec-Fetch-Dest', 'script')], '/'),
+                ([('Host', host), ('Sec-Fetch-Site', 'cross-site'), ('Sec-Fetch-Mode', 'cors'), ('Sec-Fetch-Dest', 'empty')], '/'),
+                ([('Host', host), ('Sec-Fetch-Site', 'cross-site')], '/'),
+                (navigate + [('Sec-Fetch-Site', 'cross-site'), ('Sec-Fetch-Mode', 'navigate')], '/'),
+                (navigate + [('Sec-Fetch-Site', 'cross-site'), ('Origin', 'https://evil.test')], '/'),
+                ([('Host', 'evil.test'), ('Sec-Fetch-Site', 'cross-site'), ('Sec-Fetch-Mode', 'navigate'), ('Sec-Fetch-Dest', 'document')], '/'),
+            ):
+                with self.subTest(headers=headers, path=path):
+                    self.assertEqual(request('GET', headers, path)[0], 403)
+            # Writes are unchanged: a navigation-shaped write from another site is refused.
+            write = [('Host', host), ('Origin', 'https://' + host), ('Content-Type', 'application/json'),
+                     ('X-Requested-With', 'Bounty-Board'), ('Sec-Fetch-Site', 'cross-site'),
+                     ('Sec-Fetch-Mode', 'navigate'), ('Sec-Fetch-Dest', 'document')]
+            self.assertEqual(request('PATCH', write, '/api/finding', b'{}')[0], 403)
+
+    def test_tailnet_https_port_is_part_of_the_trusted_origin(self):
+        host = 'board.example.ts.net'
+        with tempfile.TemporaryDirectory() as root:
+            request = self._serve(root, tailnet_host=host, tailnet_port=9001)
+            authority = host + ':9001'
+            self.assertEqual(request('GET', [('Host', authority)])[0], 200)
+            self.assertEqual(request('GET', [('Host', authority), ('Origin', 'https://' + authority)])[0], 200)
+            for headers in ([('Host', host)], [('Host', host + ':443')], [('Host', host + ':9002')],
+                            [('Host', authority), ('Origin', 'https://' + host)],
+                            [('Host', authority), ('Origin', 'http://' + authority)]):
+                with self.subTest(headers=headers):
+                    self.assertEqual(request('GET', headers)[0], 403)
+            write = [('Host', authority), ('Content-Type', 'application/json'), ('X-Requested-With', 'Bounty-Board')]
+            self.assertEqual(request('PATCH', write + [('Origin', 'https://' + authority)], '/api/finding', b'{}')[0], 503)
+            self.assertEqual(request('PATCH', write + [('Origin', 'https://' + host)], '/api/finding', b'{}')[0], 403)
+        with self.assertRaises(ValueError):
+            app.make_server(Path(root), port=0, tailnet_host=host, tailnet_port=0)
+
+    def test_tailnet_port_is_configured_from_cli_or_config(self):
+        self.assertEqual(app.parse_config(['--tailnet-host', 'board.example.ts.net']).tailnet_port, 443)
+        self.assertEqual(app.parse_config(['--tailnet-host', 'board.example.ts.net', '--tailnet-port', '9001']).tailnet_port, 9001)
+        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stderr(io.StringIO()):
+            config = Path(root) / 'config.json'
+            config.write_text(json.dumps({'tailnet_host': 'board.example.ts.net', 'tailnet_port': 9001}))
+            self.assertEqual(app.parse_config(['--config', str(config)]).tailnet_port, 9001)
+            for invalid in (0, 70000, '9001', True, None):
+                with self.subTest(invalid=invalid):
+                    config.write_text(json.dumps({'tailnet_host': 'board.example.ts.net', 'tailnet_port': invalid}))
+                    with self.assertRaises(SystemExit):
+                        app.parse_config(['--config', str(config)])
+            for argv in (['--tailnet-port', '9001'], ['--tailnet-host', 'board.example.ts.net', '--tailnet-port', '0']):
+                with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                    app.parse_config(argv)
+
     def test_explicit_tailnet_hostname_is_configured(self):
         try:
             args = app.parse_config(['--tailnet-host', 'board.example.ts.net'])

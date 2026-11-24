@@ -385,7 +385,7 @@ def valid_tailnet_host(host):
 
 
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
-                collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
+                tailnet_port=443, collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
                 report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
                 live_edit_dir=None):
     import os
@@ -402,6 +402,15 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         raise ValueError('report autosave requires a collaboration store and excludes fixture publication')
     if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
         raise ValueError('invalid canonical tailnet hostname')
+    if type(tailnet_port) is not int or not 1 <= tailnet_port <= 65535:
+        raise ValueError('invalid tailnet HTTPS port')
+    if tailnet_host is None:
+        tailnet_authorities, tailnet_origin = frozenset(), None
+    elif tailnet_port == 443:
+        tailnet_authorities, tailnet_origin = frozenset({tailnet_host, f'{tailnet_host}:443'}), f'https://{tailnet_host}'
+    else:
+        tailnet_authorities = frozenset({f'{tailnet_host}:{tailnet_port}'})
+        tailnet_origin = f'https://{tailnet_host}:{tailnet_port}'
     root = Path(root).absolute()
 
     def root_snapshot():
@@ -488,7 +497,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         return {'state': state, 'scanned': min(len(rows), retained_scan_limit)}
 
     class Handler(BaseHTTPRequestHandler):
-        def trusted_request(self, require_origin=False):
+        def trusted_request(self, require_origin=False, navigation=False):
             port = self.server.server_port
             hosts = self.headers.get_all('Host', [])
             origins = self.headers.get_all('Origin', [])
@@ -498,12 +507,20 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             host = hosts[0]
             if host in {f'127.0.0.1:{port}', f'localhost:{port}'}:
                 expected = f'http://{host}'
-            elif tailnet_host and host in {tailnet_host, f'{tailnet_host}:443'}:
-                expected = f'https://{tailnet_host}'
+            elif host in tailnet_authorities:
+                expected = tailnet_origin
             else:
                 return False
             if (require_origin and not origins) or (origins and origins[0] != expected):
                 return False
+            if navigation and not require_origin and sites:
+                # Following a link from another site (chat, notes) opens the app
+                # shell. Only a top-level page load qualifies: frames and
+                # scripted requests from other sites stay refused.
+                modes = self.headers.get_all('Sec-Fetch-Mode', [])
+                dests = self.headers.get_all('Sec-Fetch-Dest', [])
+                if modes == ['navigate'] and dests == ['document']:
+                    return sites[0] in ('same-origin', 'none', 'same-site', 'cross-site')
             return not sites or sites[0] in (('same-origin',) if require_origin else ('same-origin', 'none'))
 
         def reply(self, status, payload, extra=None):
@@ -1171,10 +1188,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         def do_GET(self):
             import hashlib
             import os
-            if not self.trusted_request():
+            url = urlsplit(self.path)
+            if not self.trusted_request(navigation=url.path in ('/', '/index.html')):
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
-            url = urlsplit(self.path)
             if url.path in ('/api/report-artifacts', '/api/report-artifact', '/api/report-artifact-media', '/api/report-artifacts.zip'):
                 return self.report_artifacts({'/api/report-artifacts': 'list', '/api/report-artifact': 'file',
                                               '/api/report-artifact-media': 'media', '/api/report-artifacts.zip': 'zip'}[url.path])
@@ -1881,6 +1898,8 @@ def parse_config(argv=None):
     parser.add_argument('--root', type=Path, help='data root (overrides config)')
     parser.add_argument('--port', type=int, help='listen port (overrides config)')
     parser.add_argument('--tailnet-host', help='exact canonical Tailscale Serve DNS hostname (overrides config)')
+    parser.add_argument('--tailnet-port', type=int,
+                        help='HTTPS port Tailscale Serve listens on for --tailnet-host (default 443; overrides config)')
     parser.add_argument('--bbh', type=Path, help='opt in to metadata writes with this BBH executable')
     parser.add_argument('--accept-uncoordinated-writes', action='store_true',
                         help='accept metadata write risk: concurrent edits can be overwritten; no shared compare-and-swap')
@@ -1908,14 +1927,16 @@ def parse_config(argv=None):
                 settings = tomllib.loads(raw.decode('utf-8'))
             else:
                 raise ValueError('expected .json or .toml')
-            if not isinstance(settings, dict) or set(settings) - {'root', 'port', 'tailnet_host'}:
-                raise ValueError('expected only root, port and tailnet_host keys')
+            if not isinstance(settings, dict) or set(settings) - {'root', 'port', 'tailnet_host', 'tailnet_port'}:
+                raise ValueError('expected only root, port, tailnet_host and tailnet_port keys')
             if 'root' in settings and (not isinstance(settings['root'], str) or not settings['root']):
                 raise ValueError('root must be a non-empty string')
             if 'port' in settings and (type(settings['port']) is not int or not 1 <= settings['port'] <= 65535):
                 raise ValueError('port must be an integer from 1 to 65535')
             if 'tailnet_host' in settings and not valid_tailnet_host(settings['tailnet_host']):
                 raise ValueError('tailnet_host must be a canonical lowercase node.tailnet.ts.net hostname')
+            if 'tailnet_port' in settings and (type(settings['tailnet_port']) is not int or not 1 <= settings['tailnet_port'] <= 65535):
+                raise ValueError('tailnet_port must be an integer from 1 to 65535')
         except (OSError, ValueError, UnicodeError) as exc:
             parser.error(f'invalid config: {exc}')
     if args.root is None:
@@ -1926,6 +1947,11 @@ def parse_config(argv=None):
     args.tailnet_host = args.tailnet_host if args.tailnet_host is not None else settings.get('tailnet_host')
     if args.tailnet_host is not None and not valid_tailnet_host(args.tailnet_host):
         parser.error('tailnet host must be a canonical lowercase node.tailnet.ts.net hostname')
+    args.tailnet_port = args.tailnet_port if args.tailnet_port is not None else settings.get('tailnet_port', 443)
+    if not 1 <= args.tailnet_port <= 65535:
+        parser.error('tailnet port must be from 1 to 65535')
+    if args.tailnet_port != 443 and args.tailnet_host is None:
+        parser.error('--tailnet-port needs a tailnet host')
     if not 1 <= args.port <= 65535:
         parser.error('port must be from 1 to 65535')
     if args.collaboration_max_bytes is not None and args.collaboration_max_bytes < 65536:
@@ -1942,7 +1968,7 @@ def main():
     args = parse_config()
     make_server(args.root, args.port, writer=args.bbh,
                 accept_uncoordinated_writes=args.accept_uncoordinated_writes,
-                tailnet_host=args.tailnet_host, collaboration_dir=args.collaboration_dir,
+                tailnet_host=args.tailnet_host, tailnet_port=args.tailnet_port, collaboration_dir=args.collaboration_dir,
                 experimental_fixture_publish=args.experimental_fixture_publish,
                 **({} if args.retention_max_operations == DEFAULT_MAX_OPERATIONS else {'retention_max_operations': args.retention_max_operations}),
                 **({} if args.retention_min_free_bytes == DEFAULT_MIN_FREE_BYTES else {'retention_min_free_bytes': args.retention_min_free_bytes}),
