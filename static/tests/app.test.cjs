@@ -5,6 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
 
+// The theme switcher is a menu button; filters are multi-select popovers.
+async function setTheme(page,name){await page.getByRole('button',{name:'Theme',exact:true}).click();await page.getByRole('menuitemradio',{name:name[0].toUpperCase()+name.slice(1),exact:true}).click();}
+async function pickFilter(page,plural,value){await page.getByRole('button',{name:`Filter ${plural}`,exact:true}).click();await page.getByRole('checkbox',{name:value}).check();await page.keyboard.press('Escape');}
+
 // Fictional in-memory records only. No bounty directories or backend are read.
 const fixture = {root_identity:'a'.repeat(64),programs:[{id:'synthetic',name:'Example program',family:'Test',lanes:[{name:'Web',findings:[{id:'f1',title:'Example finding',severity:'High',class:'Access control',status:'Draft'}],coverage:[{surface:'Example surface',class:'XSS',state:'Mapped',notes:'One boundary observed'}],gadgets:[],map:[],reports:[{id:'r1',title:'Example report',content:'# Report\n\nInitial text',revision:'1'}],warnings:[]}]}],warnings:[]};
 const root = path.resolve(__dirname, '..');
@@ -49,8 +53,8 @@ test('program, lane and ledger filters change the records in view', async () => 
   await page.getByLabel('Lane').selectOption('API');
   assert.ok(await page.getByText('API synthetic finding').count());
   assert.equal(await page.getByText('Example finding').count(),0);
-  await page.getByLabel('Filter severities').selectOption('Low');
-  await page.getByLabel('Filter statuses').selectOption('Submitted');
+  await pickFilter(page,'severities','Low');
+  await pickFilter(page,'statuses','Submitted');
   assert.ok(await page.getByText('API synthetic finding').count());
   await page.getByRole('button',{name:'MapStore',exact:true}).click();assert.ok(await page.getByText('Synthetic map').count());
   await page.getByRole('button',{name:'Gadgets',exact:true}).click();assert.ok(await page.getByText('Synthetic gadget').count());
@@ -110,7 +114,7 @@ test('unchanged refresh retains edited browser draft with no source write', asyn
 
 test('themes persist and mobile workspace fits without page overflow', async () => {
   const page=await browser.newPage({viewport:{width:375,height:800}});await page.goto(base);
-  await page.getByLabel('Theme').selectOption('dusk');await page.reload();
+  await setTheme(page,'dusk');await page.reload();
   assert.equal(await page.locator('html').getAttribute('data-theme'),'dusk');
   await page.getByRole('button',{name:'Programs',exact:true}).click();
   await page.getByRole('button',{name:'Coverage',exact:true}).click();
@@ -547,7 +551,7 @@ test('coverage and report ownership remain readable across themes on mobile', as
   await page.route('**/api/data',route=>route.fulfill({json:data}));
   await page.goto(base);await page.getByRole('button',{name:'Programs',exact:true}).click();
   for(const themeName of ['light','dark','dusk']) {
-    await page.getByLabel('Theme').selectOption(themeName);
+    await setTheme(page,themeName);
     assert.equal(await page.locator('html').getAttribute('data-theme'),themeName);
     await page.getByRole('button',{name:'Coverage',exact:true}).click();assert.ok(await page.getByText('Mapped inventory').isVisible());
     await page.getByRole('button',{name:'Reports',exact:true}).click();assert.ok(await page.getByText(/Registered report/).isVisible());
@@ -721,7 +725,7 @@ test('rationale editor and overwrite warning stay accessible on mobile themes', 
   await page.route('**/api/data',route=>route.fulfill({json:data}));await page.goto(base);
   await page.getByRole('button',{name:'Programs',exact:true}).click();
   for(const themeName of ['light','dark','dusk']) {
-    await page.getByLabel('Theme').selectOption(themeName);
+    await setTheme(page,themeName);
     assert.ok(await page.locator('.metadata-warning').isVisible());
     await page.getByRole('button',{name:'Edit severity rationale for Example finding'}).click();
     assert.equal(await page.getByRole('textbox',{name:'Severity rationale for Example finding'}).getAttribute('aria-describedby'),'metadata-warning');

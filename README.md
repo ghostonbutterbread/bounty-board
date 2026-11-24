@@ -105,6 +105,10 @@ The server binds only to IPv4 loopback and has no user authentication or TLS. Ot
 - View a portfolio dashboard, select a program and lane, and filter findings.
 - Explore live surface/class coverage questions, MapStore observations, gadgets, and Markdown report files when the source is available.
 - Switch among Light, Dark, and Dusk themes; the preference is stored in the browser.
+- Filter findings with multi-select severity, class, status and submission menus; sort columns (sort is remembered); open row actions from each finding's menu.
+- Dashboard severity and class breakdowns expand to list matching findings by program, linking to each finding and its report. A "Not submitted" view shows current work; "All records" keeps every record available.
+- The address bar tracks the view (`#/dashboard`, `#/programs/<program>/<lane>/<section>[/<report>]`), so back, forward and reload return to the same place. "Switch program" searches programs; "Open workspace" shows which program it opens.
+- Report data that finishes loading in the background is applied automatically unless you are typing or editing; it then waits and applies when you leave the field.
 - Edit Markdown in the locally bundled EasyMDE editor with a safe preview. Without collaboration, drafts remain browser-local and do not modify the source. With the optional collaboration store, drafts and history are shared; opt-in source autosave can also publish eligible reports. Generated navigation is read-only when collaboration is enabled. Browser drafts can be lost when browser data is cleared; root moves create a new namespace. Storage errors and detected cross-tab changes are shown, but cross-tab storage checks are not atomic.
 
 Coverage is bounded by recorded questions and assessments, not a claim that an application is fully mapped. A gadget or residual is not automatically a vulnerability. Submission state and platform outcome are represented separately when present in the source.

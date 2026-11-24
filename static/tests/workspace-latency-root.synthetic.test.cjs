@@ -80,17 +80,17 @@ test('lane-first warnings retain their owners until complete snapshot replaces t
     await page.waitForFunction(()=>document.querySelector('.summary-line strong')?.textContent==='1');
     const summary=page.getByRole('region',{name:'Data availability'});
     await summary.locator('summary').click();
-    assert.match(await summary.innerText(),/Ledger inaccessible or invalid\s*— 1 lane/);
-    assert.match(await summary.innerText(),/Map inaccessible or invalid\s*— 1 lane/);
+    assert.match(await summary.innerText(),/Ledger inaccessible or invalid:\s*1 lane/);
+    assert.match(await summary.innerText(),/Map inaccessible or invalid:\s*1 lane/);
     // The index rereads a now-fixed ledger, but does not replace displayed findings.
     fs.writeFileSync(path.join(lane,'ledgers/ledger.json'),JSON.stringify({findings:[]}));
     await page.getByRole('button',{name:'Reports',exact:true}).click();
     await page.getByText('No reports loaded.').waitFor();
     await summary.locator('summary').click();
     const text=await summary.innerText();
-    assert.match(text,/Ledger inaccessible or invalid\s*— 1 lane/);
-    assert.match(text,/Map inaccessible or invalid\s*— 1 lane/);
-    assert.match(text,/Reports inaccessible or invalid\s*— 1 lane/);
+    assert.match(text,/Ledger inaccessible or invalid:\s*1 lane/);
+    assert.match(text,/Map inaccessible or invalid:\s*1 lane/);
+    assert.match(text,/Reports inaccessible or invalid:\s*1 lane/);
     assert.match(text,/1 lane has/);
     assert.equal(await page.locator('.summary-line > div').filter({hasText:'Reports'}).locator('strong').innerText(),'Unknown');
     fs.chmodSync(hidden,0o700);fs.writeFileSync(path.join(root,'release'),'released');releaseFull();
@@ -99,7 +99,7 @@ test('lane-first warnings retain their owners until complete snapshot replaces t
     await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Load entire portfolio' && b.parentElement.hidden));
     await summary.locator('summary').click();
     const full=await summary.innerText();
-    assert.match(full,/Map inaccessible or invalid\s*— 1 lane/);
+    assert.match(full,/Map inaccessible or invalid:\s*1 lane/);
     assert.doesNotMatch(full,/Ledger inaccessible or invalid|Reports inaccessible or invalid/);
     assert.equal(await page.locator('.summary-line > div').filter({hasText:'Reports'}).locator('strong').innerText(),'1');
   } finally {

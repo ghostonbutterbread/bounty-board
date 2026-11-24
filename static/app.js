@@ -1,8 +1,11 @@
 (() => {
   'use strict';
   const app = document.querySelector('#app');
-  const theme = document.querySelector('#theme');
-  const state = {data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:'',class:'',status:'',query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], metadataDrafts:new Map(), rationaleDrafts:new Map()};
+  const themeButton = document.querySelector('#theme-button');
+  const state = {data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:[],class:[],status:[],submission:[],query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], metadataDrafts:new Map(), rationaleDrafts:new Map(),
+    // Presentation state (UI redesign): persisted sort, dashboard work filter,
+    // expanded breakdown row, program search, how the program was chosen.
+    sort:{key:'',dir:'asc'}, dashWork:'all', dashExpanded:'', programQuery:'', programOrigin:'default', highlight:''};
   const sections = [['findings','Findings'],['coverage','Coverage'],['reports','Reports'],['map','MapStore'],['gadgets','Gadgets']];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const metadataFailure = error => error.code==='finding_changed' ? 'Conflict: finding changed.' : error.code==='root_changed' ? 'Conflict: source root changed.' : error.code==='finding_not_found' ? 'Finding is no longer available.' : 'Update failed or was not verified.';
@@ -24,9 +27,194 @@
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
   // window.BoardModules and mount into host elements after every render.
-  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, api:window.BoardAPI});
+  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, api:window.BoardAPI, ui:window.BoardUI});
   window.BoardModules = window.BoardModules || [];
   window.registerBoardModule = module => {window.BoardModules.push(module);try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}};
+  // ---- Presentation helpers (severity scale, badges, submission state) ----
+  const SEVERITY_LEVELS=['exceptional','critical','high','medium','low','info','na','unknown'];
+  const SEVERITY_LABELS={exceptional:'Exceptional',critical:'Critical',high:'High',medium:'Medium',low:'Low',info:'Info',na:'N/A',unknown:'Unknown'};
+  const sevKey = value => {
+    const raw=String(value ?? '').trim().toLowerCase();
+    if(!raw) return 'unknown';
+    if(['n/a','na','n.a.','not_applicable','not applicable','none'].includes(raw)) return 'na';
+    if(raw==='informational') return 'info';
+    return SEVERITY_LEVELS.includes(raw) ? raw : 'unknown';
+  };
+  const sevRank = value => SEVERITY_LEVELS.indexOf(sevKey(value));
+  const sevBadge = value => `<span class="sev" data-sev="${sevKey(value)}">${esc(value == null || value === '' ? 'Not recorded' : String(value))}</span>`;
+  const STATUS_TONES={confirmed:'success',complete:'success',novel:'accent',raw:'',dormant:'outline',archive:'outline'};
+  const statusBadge = value => value == null || value === '' ? '' : `<span class="badge ${STATUS_TONES[String(value).toLowerCase()] ?? ''}">${esc(value)}</span>`;
+  // BBH submission records default to not_submitted; legacy ledgers may carry
+  // submission_status. Unrecognized states are treated as submitted work.
+  const NOT_SUBMITTED=new Set(['','not_submitted','not submitted','unsubmitted','draft','none']);
+  const submissionState = finding => {
+    const nested=finding?.submission?.state;
+    const value=nested != null && nested !== '' ? nested : finding?.submission_status;
+    return String(value ?? '').trim().toLowerCase();
+  };
+  const isNotSubmitted = finding => NOT_SUBMITTED.has(submissionState(finding));
+  const submissionLabel = finding => {const s=submissionState(finding);return NOT_SUBMITTED.has(s) ? 'Not submitted' : s.replace(/_/g,' ');};
+  const submissionBadge = finding => {
+    const s=submissionState(finding), result=finding?.submission?.result || finding?.platform_outcome;
+    const tone=NOT_SUBMITTED.has(s) ? 'outline' : s==='dropped' ? 'outline' : 'accent';
+    return `<span class="badge ${tone}">${esc(submissionLabel(finding))}</span>${result ? ` <span class="badge ${String(result).toLowerCase()==='valid'?'success':String(result).toLowerCase()==='duplicate'?'warning':''}">${esc(result)}</span>` : ''}`;
+  };
+  const icon = name => `<i class="fa fa-${name}" aria-hidden="true"></i>`;
+  const programLabel = p => p ? String(p.name || p.id || 'Unknown program') : 'Unknown program';
+  const readStore = (key,fallback) => {try {const raw=localStorage.getItem(key);return raw==null ? fallback : JSON.parse(raw);} catch {return fallback;}};
+  const writeStore = (key,value) => {try {localStorage.setItem(key,JSON.stringify(value));} catch {}};
+
+  // ---- BoardUI: shared UI primitives for the app and feature modules ----
+  const uiLayer=document.querySelector('#ui-layer') || document.body.appendChild(Object.assign(document.createElement('div'),{id:'ui-layer'}));
+  const toastBox=document.querySelector('#toasts') || document.body.appendChild(Object.assign(document.createElement('div'),{id:'toasts',className:'toasts'}));
+  function toast(message, kind='info', options={}) {
+    const el=document.createElement('div');el.className=`toast ${['success','warning','danger','info'].includes(kind)?kind:'info'}`;
+    const icons={success:'check-circle',warning:'exclamation-triangle',danger:'exclamation-circle',info:'info-circle'};
+    el.innerHTML=`${icon(icons[kind]||icons.info)}<span class="toast-text"></span><button type="button" aria-label="Dismiss notification">${icon('times')}</button>`;
+    el.querySelector('.toast-text').textContent=String(message);
+    const remove=()=>el.remove();el.querySelector('button').addEventListener('click',remove);
+    toastBox.append(el);while(toastBox.children.length>4)toastBox.firstElementChild.remove();
+    const timeout=options.timeout ?? (kind==='danger' ? 8000 : 4500);
+    if(timeout>0)setTimeout(remove,timeout);
+    return el;
+  }
+  let popover=null;
+  function placePopover(el, anchor, align='start') {
+    const r=anchor.getBoundingClientRect(), w=el.offsetWidth, h=el.offsetHeight, vw=document.documentElement.clientWidth, vh=window.innerHeight;
+    let left=align==='end' ? r.right-w : r.left, top=r.bottom+4;
+    if(left+w>vw-8)left=vw-8-w; if(left<8)left=8;
+    if(top+h>vh-8 && r.top-h-4>8)top=r.top-h-4;
+    el.style.left=`${Math.round(left)}px`;el.style.top=`${Math.round(top)}px`;
+  }
+  function closePopover(restoreFocus=true) {
+    if(!popover)return;
+    const {el,trigger,onClose}=popover;popover=null;el.remove();
+    if(trigger?.isConnected){trigger.setAttribute('aria-expanded','false');if(restoreFocus)trigger.focus();}
+    onClose?.();
+  }
+  // Opens content anchored to trigger. reanchor() re-finds the trigger after a
+  // full render so a popover (for example a multi-select filter) can stay open.
+  function openPopover(trigger, content, options={}) {
+    closePopover(false);
+    const el=document.createElement('div');el.className=`popover ${options.className||''}`;
+    if(options.label)el.setAttribute('aria-label',options.label);
+    el.append(content);uiLayer.append(el);
+    popover={el,trigger,reanchor:options.reanchor,onClose:options.onClose,align:options.align};
+    trigger.setAttribute('aria-expanded','true');
+    placePopover(el,trigger,options.align);
+    el.addEventListener('keydown',event=>{
+      if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closePopover(true);}
+      else if(event.key==='Tab' && !options.trapTab){event.preventDefault();closePopover(true);}
+    });
+    return el;
+  }
+  function reanchorPopover() {
+    if(!popover)return;
+    const next=popover.reanchor?.();
+    if(!next){closePopover(false);return;}
+    popover.trigger=next;next.setAttribute('aria-expanded','true');placePopover(popover.el,next,popover.align);
+  }
+  function menuKeys(container, selector) {
+    container.addEventListener('keydown',event=>{
+      const items=[...container.querySelectorAll(selector)].filter(el=>!el.disabled);
+      const index=items.indexOf(document.activeElement);
+      let next=null;
+      if(event.key==='ArrowDown')next=items[(index+1)%items.length];
+      else if(event.key==='ArrowUp')next=items[(index-1+items.length)%items.length];
+      else if(event.key==='Home')next=items[0];
+      else if(event.key==='End')next=items[items.length-1];
+      else if(event.key.length===1 && /\S/.test(event.key)){
+        const ordered=[...items.slice(index+1),...items.slice(0,index+1)];
+        next=ordered.find(el=>el.textContent.trim().toLowerCase().startsWith(event.key.toLowerCase()));
+      }
+      if(next){event.preventDefault();next.focus();}
+    });
+  }
+  // items: [{label, icon, onSelect, checked, disabled, danger, separator, heading}]
+  function openMenu(trigger, items, options={}) {
+    const menu=document.createElement('div');menu.className='menu';menu.setAttribute('role','menu');
+    if(options.label)menu.setAttribute('aria-label',options.label);
+    for(const item of items){
+      if(item.separator){const sep=document.createElement('div');sep.className='menu-sep';sep.setAttribute('role','separator');menu.append(sep);continue;}
+      if(item.heading){const h=document.createElement('div');h.className='menu-label';h.textContent=item.heading;h.setAttribute('role','presentation');menu.append(h);continue;}
+      const button=document.createElement('button');button.type='button';
+      button.setAttribute('role',typeof item.checked==='boolean' ? 'menuitemradio' : 'menuitem');
+      if(typeof item.checked==='boolean')button.setAttribute('aria-checked',String(item.checked));
+      button.disabled=!!item.disabled;if(item.danger)button.classList.add('danger');
+      button.innerHTML=`${item.icon?icon(item.icon):''}<span></span>${typeof item.checked==='boolean'?icon('check')+'':''}`;
+      button.querySelector('span').textContent=item.label;
+      button.querySelector('.fa-check')?.classList.add('check');
+      button.addEventListener('click',()=>{closePopover(true);item.onSelect?.();});
+      menu.append(button);
+    }
+    menuKeys(menu,'[role^="menuitem"]');
+    openPopover(trigger,menu,{...options,className:'menu-popover'});
+    (menu.querySelector('[aria-checked="true"]:not(:disabled)') || menu.querySelector('[role^="menuitem"]:not(:disabled)'))?.focus();
+    return menu;
+  }
+  document.addEventListener('mousedown',event=>{
+    if(popover && !popover.el.contains(event.target) && !popover.trigger?.contains(event.target))closePopover(false);
+  });
+  window.addEventListener('resize',()=>{if(popover)placePopover(popover.el,popover.trigger,popover.align);});
+  document.addEventListener('scroll',event=>{if(popover && !popover.el.contains(event.target))placePopover(popover.el,popover.trigger,popover.align);},true);
+
+  // Visual tooltips for [data-tip] and truncated .truncate text. The full text
+  // is already in the accessible tree; the tooltip only reveals it visually.
+  let tipTimer=0, tipEl=null;
+  function hideTip(){clearTimeout(tipTimer);tipEl?.remove();tipEl=null;}
+  function showTip(target){
+    const text=target.dataset.tip || (target.classList.contains('truncate') && target.scrollWidth>target.clientWidth ? target.textContent : '');
+    if(!text?.trim())return;
+    hideTip();tipTimer=setTimeout(()=>{
+      if(!target.isConnected)return;
+      tipEl=document.createElement('div');tipEl.className='tooltip';tipEl.setAttribute('role','tooltip');tipEl.textContent=text.trim();uiLayer.append(tipEl);
+      const r=target.getBoundingClientRect(), w=tipEl.offsetWidth, h=tipEl.offsetHeight, vw=document.documentElement.clientWidth;
+      let top=r.top-h-6;if(top<6)top=r.bottom+6;
+      tipEl.style.left=`${Math.round(Math.max(8,Math.min(vw-w-8,r.left+r.width/2-w/2)))}px`;tipEl.style.top=`${Math.round(top)}px`;
+    },350);
+  }
+  document.addEventListener('mouseover',event=>{const t=event.target.closest?.('[data-tip],.truncate');if(t)showTip(t);});
+  document.addEventListener('mouseout',event=>{if(event.target.closest?.('[data-tip],.truncate'))hideTip();});
+  document.addEventListener('focusin',event=>{const t=event.target.closest?.('[data-tip]');if(t)showTip(t);else hideTip();});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape')hideTip();});
+  document.addEventListener('scroll',hideTip,true);
+
+  // Searchable program picker (combobox + listbox). onPick receives a program id.
+  function openProgramPicker(trigger, onPick, options={}) {
+    const box=document.createElement('div');
+    const listId=`program-picker-list-${Date.now()}`;
+    box.innerHTML=`<div class="input-icon">${icon('search')}<input type="text" role="combobox" aria-expanded="true" aria-controls="${listId}" aria-autocomplete="list" aria-label="Search programs" placeholder="Search programs and lanes" autocomplete="off" spellcheck="false"></div><div class="listbox" role="listbox" id="${listId}" aria-label="Programs"></div><div class="picker-foot"><span><span class="kbd">↑</span> <span class="kbd">↓</span> to move</span><span><span class="kbd">Enter</span> to open</span><span><span class="kbd">Esc</span> to close</span></div>`;
+    const input=box.querySelector('input'), listbox=box.querySelector('.listbox');
+    let active=0, matches=[];
+    const draw=()=>{
+      const q=input.value.trim().toLowerCase();
+      matches=programs().filter(p=>!q || [p.id,p.name,p.family,...(list(p.lanes)||[]).map(l=>l.name)].some(v=>String(v??'').toLowerCase().includes(q)));
+      active=Math.min(active,Math.max(0,matches.length-1));
+      const families=[...new Set(matches.map(p=>p.family || 'Other'))];
+      let n=0;
+      listbox.innerHTML=matches.length ? families.map(f=>`<div class="group" role="presentation">${esc(f)}</div>`+matches.filter(p=>(p.family||'Other')===f).map(p=>{
+        const lanes=list(p.lanes), findings=lanes ? lanes.reduce((sum,l)=>sum+(list(l.findings)?.length||0),0) : null, i=matches.indexOf(p);n++;
+        return `<div role="option" id="${listId}-${i}" data-index="${i}" aria-selected="${String(p.id)===options.current}" class="${i===active?'active':''}"><span class="opt-main"><span>${esc(programLabel(p))}</span><span class="opt-sub">${esc(lanes ? lanes.map(l=>l.name).join(', ') || 'No lanes' : 'Lanes unavailable')}</span></span><span class="count">${findings==null?'–':findings}</span></div>`;
+      }).join('')).join('') : '<div class="empty" role="presentation">No programs match.</div>';
+      input.setAttribute('aria-activedescendant',matches.length ? `${listId}-${active}` : '');
+      listbox.querySelector('.active')?.scrollIntoView({block:'nearest'});
+    };
+    const pick=index=>{const p=matches[index];if(!p)return;closePopover(false);onPick(String(p.id));};
+    input.addEventListener('input',()=>{active=0;draw();});
+    input.addEventListener('keydown',event=>{
+      if(event.key==='ArrowDown'){event.preventDefault();active=Math.min(matches.length-1,active+1);draw();}
+      else if(event.key==='ArrowUp'){event.preventDefault();active=Math.max(0,active-1);draw();}
+      else if(event.key==='Home' && event.ctrlKey){active=0;draw();}
+      else if(event.key==='Enter'){event.preventDefault();pick(active);}
+    });
+    listbox.addEventListener('mousemove',event=>{const o=event.target.closest('[role=option]');if(o && Number(o.dataset.index)!==active){active=Number(o.dataset.index);draw();}});
+    listbox.addEventListener('click',event=>{const o=event.target.closest('[role=option]');if(o)pick(Number(o.dataset.index));});
+    draw();
+    const selected=matches.findIndex(p=>String(p.id)===options.current);if(selected>=0){active=selected;draw();}
+    openPopover(trigger,box,{className:'picker',label:'Switch program',align:options.align});
+    input.focus();
+    return box;
+  }
   const reportReadOnly = draft => !!state.data?.capabilities?.collaboration && (typeof draft.source?.collaboration_editable==='boolean' ? !draft.source.collaboration_editable : draft.source?.editable===false);
   let unidentifiedSequence=0;
   let metadataDraftSequence=0;
@@ -123,26 +311,67 @@
   };
   const hasUnsaved = () => state.metadataPending || state.metadataDrafts.size>0 || recoveryPaths.size>0 || [...state.drafts.values()].some(d => d.hasDraft || d.storageError || d.storageBlocked) || state.rationaleDrafts.size>0;
   window.addEventListener('beforeunload', event => { if (hasUnsaved()) { event.preventDefault(); event.returnValue = ''; } });
-  function applyTheme(value) { if (!['light','dark','dusk'].includes(value)) value = 'light'; document.documentElement.dataset.theme=value; theme.value=value; try { localStorage.setItem('bounty-board-theme',value); } catch {} }
+  const THEMES=[['light','Light','sun-o'],['dark','Dark','moon-o'],['dusk','Dusk','adjust']];
+  function applyTheme(value) {
+    if (!THEMES.some(([key])=>key===value)) value = 'light';
+    document.documentElement.dataset.theme=value;
+    const [,label,glyph]=THEMES.find(([key])=>key===value);
+    themeButton.innerHTML=icon(glyph);themeButton.title=`Theme: ${label}`;
+    try { localStorage.setItem('bounty-board-theme',value); } catch {}
+  }
   try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
-  theme.addEventListener('change', () => applyTheme(theme.value));
-  document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {state.view=button.dataset.view;render();}));
+  themeButton.addEventListener('click', () => openMenu(themeButton,[{heading:'Theme'},...THEMES.map(([key,label,glyph])=>({label,icon:glyph,checked:document.documentElement.dataset.theme===key,onSelect:()=>applyTheme(key)}))],{label:'Theme',align:'end'}));
+  document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {state.view=button.dataset.view;routePush=true;render();}));
+  // Collapsible sidebar (icon rail); the preference persists per browser origin.
+  const shell=document.querySelector('#shell'), sidebarToggle=document.querySelector('#sidebar-toggle');
+  function setSidebar(collapsed) {
+    shell.classList.toggle('sidebar-collapsed',collapsed);sidebarToggle.setAttribute('aria-expanded',String(!collapsed));
+    sidebarToggle.title=collapsed?'Expand sidebar':'Collapse sidebar';sidebarToggle.querySelector('span').textContent=collapsed?'Expand sidebar':'Collapse sidebar';
+    writeStore('bounty-board-sidebar-collapsed',collapsed);
+  }
+  setSidebar(readStore('bounty-board-sidebar-collapsed',false)===true);
+  sidebarToggle.addEventListener('click',()=>setSidebar(!shell.classList.contains('sidebar-collapsed')));
+  state.sort=(s=>s && typeof s.key==='string' && ['title','severity','class','status','id'].includes(s.key) && ['asc','desc'].includes(s.dir) ? s : {key:'',dir:'asc'})(readStore('bounty-board-finding-sort',null));
+  state.dashWork=readStore('bounty-board-dashboard-work','all')==='open' ? 'open' : 'all';
+  // Last-used program: recorded on explicit selection, offered on load.
+  const recentPrograms = () => (readStore('bounty-board-recent-programs',[])||[]).filter(r=>r && typeof r.program==='string').slice(0,5);
+  function markProgramUsed() {
+    if(!state.program)return;
+    state.programOrigin='explicit';
+    writeStore('bounty-board-last-program',{program:state.program,lane:state.lane});
+    writeStore('bounty-board-recent-programs',[{program:state.program,lane:state.lane},...recentPrograms().filter(r=>r.program!==state.program)].slice(0,5));
+  }
+  function renderRecent() {
+    const box=document.querySelector('#recent-programs'), label=document.querySelector('#recent-label');if(!box)return;
+    const items=recentPrograms().map(r=>programs().find(p=>String(p.id)===r.program)).filter(Boolean);
+    label.hidden=!items.length;
+    box.innerHTML=items.map(p=>`<button type="button" class="side-link${state.view==='program' && String(p.id)===state.program?' current':''}" data-recent-program="${esc(p.id)}" title="${esc(p.family||'')} / ${esc(programLabel(p))}">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(programLabel(p))}</span></button>`).join('');
+  }
+  document.querySelector('#recent-programs')?.addEventListener('click',event=>{
+    const button=event.target.closest('[data-recent-program]');if(!button)return;
+    navigate({view:'program',program:button.dataset.recentProgram,section:state.section});
+  });
   document.querySelector('#refresh').addEventListener('click', load);
+  let routePush=false;
   function normalizeSelection() {
     const ps=programs();
     if (state.dashboardProgram && !ps.some(p=>String(p.id)===state.dashboardProgram)) state.dashboardProgram='';
-    if (!ps.some(p=>String(p.id)===state.program)) state.program=ps.length ? String(ps[0].id) : '';
+    if (!ps.some(p=>String(p.id)===state.program)) {
+      const last=readStore('bounty-board-last-program',null);
+      if(last && typeof last.program==='string' && ps.some(p=>String(p.id)===last.program)){state.program=last.program;state.programOrigin='last-used';if(typeof last.lane==='string' && !state.lane)state.lane=last.lane;}
+      else {state.program=ps.length ? String(ps[0].id) : '';state.programOrigin='default';}
+    }
     const lanes=list(currentProgram()?.lanes)||[];
     if (!lanes.some(l=>String(l.name)===state.lane)) state.lane=lanes.length ? String(lanes[0].name) : '';
   }
   let pendingReportRefresh=null;
   let loadGeneration=0, applyGeneration=0, renderGeneration=0;
   const phaseStatus=document.createElement('div');
-  phaseStatus.className='message';phaseStatus.setAttribute('role','status');phaseStatus.hidden=true;app.before(phaseStatus);
+  phaseStatus.className='message phase-status';phaseStatus.setAttribute('role','status');phaseStatus.hidden=true;app.before(phaseStatus);
   const portfolioAction=document.createElement('div');
-  portfolioAction.className='message';portfolioAction.hidden=true;app.before(portfolioAction);
+  portfolioAction.className='message phase-status';portfolioAction.hidden=true;app.before(portfolioAction);
   portfolioAction.append('Portfolio totals and report index are not loaded. ');
-  const portfolioButton=document.createElement('button');portfolioButton.className='button';portfolioButton.textContent='Load entire portfolio';portfolioAction.append(portfolioButton);
+  const portfolioButton=document.createElement('button');portfolioButton.className='button sm';portfolioButton.textContent='Load entire portfolio';portfolioAction.append(portfolioButton);
   async function loadPortfolio() {
     const snapshot=state.data, generation=loadGeneration;
     if(!snapshot?.portfolio_unloaded || snapshot._portfolioLoading)return;
@@ -169,7 +398,7 @@
           const identity=await BoardAPI.rootInstance();
           if(!current() || check!==applyGeneration)return;
           if(identity.root_instance!==snapshot.root_instance)throw new Error('Root changed');
-          if(view!==renderGeneration || app.contains(document.activeElement)){lane._deferred=selection;phaseMessage('Selected lane loaded. Apply it when ready.',apply,'Apply selected lane');return;}
+          if(view!==renderGeneration || !safeToApply()){lane._deferred=selection;phaseMessage(DEFER_LANE,apply,'Apply selected lane');if(view!==renderGeneration)retryDeferredApply();return;}
           const indexed=lane._reportsLoaded ? {reports:lane.reports,reports_unscanned:false,
             warnings:mergeWarnings((list(result.lane.warnings)||[]).filter(w=>!reportWarning(w)),lane._reportWarnings||[])} : null;
           Object.assign(lane,result.lane,indexed || {});delete lane.unscanned;delete lane._deferred;
@@ -179,10 +408,10 @@
           if(current() && check===applyGeneration){lane._failed=true;phaseMessage('Selected lane could not be loaded or the source changed. Use Refresh to retry.');}
         }
       };
-      if(app.contains(document.activeElement)){lane._deferred=selection;phaseMessage('Selected lane loaded. Apply it when ready.',apply,'Apply selected lane');}
+      if(!safeToApply()){lane._deferred=selection;phaseMessage(DEFER_LANE,apply,'Apply selected lane');}
       else await apply();
     } catch {
-      if(current()){lane._failed=true;phaseMessage('Selected lane could not be loaded. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+      if(current()){lane._failed=true;phaseMessage('Selected lane could not be loaded. Use Refresh to retry.');if(!editingInApp())render();}
     } finally {delete lane._pending;if(currentLane()===lane && lane.unscanned && !lane._failed)loadSelectedLane();}
   }
   async function loadSelectedReports() {
@@ -210,11 +439,29 @@
       if(current()){lane._reportsFailed=true;phaseMessage('Selected reports could not be loaded or the source changed. Use Refresh to retry.');}
     } finally {delete lane._reportsPending;if(currentLane()===lane && !lane._reportsLoaded && !lane._reportsFailed)loadSelectedReports();}
   }
+  // A deferred apply keeps its button for an immediate explicit apply, and is
+  // retried automatically once it can no longer disturb focus or edits.
+  let pendingApply=null, autoApplyQueued=false;
   function phaseMessage(text, apply, label='Apply loaded reports') {
     phaseStatus.replaceChildren();phaseStatus.hidden=!text;
+    pendingApply=apply ? {apply,label} : null;
     if(text)phaseStatus.append(document.createTextNode(text));
-    if(apply){const button=document.createElement('button');button.className='button';button.textContent=label;button.addEventListener('click',apply);phaseStatus.append(' ',button);}
+    if(apply){const button=document.createElement('button');button.className='button sm';button.textContent=label;button.addEventListener('click',()=>apply());phaseStatus.append(' ',button);}
   }
+  const editingInApp = () => {
+    const el=document.activeElement;
+    if(!el || el===document.body || !app.contains(el))return false;
+    return el.matches('input, select, textarea, [contenteditable=""], [contenteditable="true"]') || !!el.closest('.CodeMirror, #live-report-host');
+  };
+  const reportEditorOpen = () => !!app.querySelector('.CodeMirror, #report-source, #live-report-host');
+  const safeToApply = () => !editingInApp() && !state.metadataPending && !hasUnrecoverableDraft() && !(hasUnsaved() && reportEditorOpen());
+  function retryDeferredApply() {
+    if(!pendingApply || autoApplyQueued)return;
+    autoApplyQueued=true;
+    setTimeout(()=>{autoApplyQueued=false;if(pendingApply && safeToApply())pendingApply.apply();},0);
+  }
+  const DEFER_REPORTS='New reports are ready. They load automatically when you finish editing; your current view is unchanged.';
+  const DEFER_LANE='Selected lane is ready. It opens automatically when you finish editing.';
   async function completeInitialLoad(summary, generation) {
     try {
       const full=await BoardAPI.load('complete',summary.root_instance);
@@ -225,7 +472,7 @@
         const check=++applyGeneration, view=renderGeneration;
         const stale=()=>{
           if(check!==applyGeneration || generation!==loadGeneration || state.data!==summary)return true;
-          if(view!==renderGeneration){phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);return true;}
+          if(view!==renderGeneration){phaseMessage(DEFER_REPORTS,apply);retryDeferredApply();return true;}
           return false;
         };
         if(hasUnrecoverableDraft()){phaseMessage('Reports loaded, but a draft needs recovery before applying them.');return;}
@@ -234,17 +481,18 @@
           if(stale())return;
           if(current.root_instance!==summary.root_instance)throw new Error('Root changed');
         } catch {
-          if(!stale()){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement))render();}
+          if(!stale()){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage('Reports could not be loaded or the source changed. Use Refresh to retry.');if(!editingInApp())render();}
           return;
         }
         if(hasUnrecoverableDraft()){phaseMessage('Reports loaded, but a draft needs recovery before applying them.');return;}
-        if(app.contains(document.activeElement)){phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);return;}
+        if(!safeToApply()){phaseMessage(DEFER_REPORTS,apply);return;}
         state.data=full;normalizeSelection();phaseMessage('');render();
+        toast('Reports loaded. The workspace is up to date.','success',{timeout:3500});
       };
-      if(app.contains(document.activeElement) || hasUnsaved())phaseMessage('Reports loaded. Apply them when ready; your current view is unchanged.',apply);
+      if(!safeToApply())phaseMessage(DEFER_REPORTS,apply);
       else await apply();
     } catch (error) {
-      if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage(error?.code==='portfolio_scan_busy' ? 'Portfolio scan is busy. Your browser drafts remain available; wait for the current scan to finish, then use Load entire portfolio to retry.' : 'Reports could not be loaded or the source changed. Use Refresh to retry.');if(!app.contains(document.activeElement) && !hasUnsaved())render();}
+      if(generation===loadGeneration && state.data===summary){summary.reports_loading=false;summary.reports_unavailable=true;phaseMessage(error?.code==='portfolio_scan_busy' ? 'Portfolio scan is busy. Your browser drafts remain available; wait for the current scan to finish, then use Load entire portfolio to retry.' : 'Reports could not be loaded or the source changed. Use Refresh to retry.');if(!editingInApp() && !hasUnsaved())render();}
     }
   }
   const hasUnrecoverableDraft = () => [...state.drafts.values()].some(d=>d.hasDraft && (d.storageError || d.storageUnreadable || d.storageBlocked));
@@ -332,11 +580,11 @@
     const globals=[...new Set((list(state.data?.warnings)||[]).map(warningText).filter(w=>w!=='root_unavailable'))];
     if(state.data?.discovery_incomplete === true && !globals.includes('discovery_incomplete'))globals.push('discovery_incomplete');
     const globalText=w=>w==='discovery_incomplete'?'Program discovery incomplete; totals may be unknown.':`Global warning: ${w}`;
-    const items=[...groups.values()].map(group=>`<li><strong>${esc(group.label)}</strong> — ${group.lanes.size} ${group.lanes.size===1?'lane':'lanes'}<ul>${[...group.lanes.values()].map(name=>`<li>${esc(name)}</li>`).join('')}</ul></li>`).join('');
+    const items=[...groups.values()].map(group=>`<li><strong>${esc(group.label)}</strong>: ${group.lanes.size} ${group.lanes.size===1?'lane':'lanes'}<ul>${[...group.lanes.values()].map(name=>`<li>${esc(name)}</li>`).join('')}</ul></li>`).join('');
     const globalItems=globals.filter(w=>w!=='discovery_incomplete').map(w=>`<li>${esc(globalText(w))}</li>`).join('');
     const counts=[['Missing',categories.missing],['Inaccessible or invalid',categories.invalid],['Other warnings',categories.other]].filter(([,set])=>set.size).map(([label,set])=>`${label}: ${set.size} ${set.size===1?'lane':'lanes'}`).join(' · ');
     const unscanned=ps.some(p=>(list(p.lanes)||[]).some(l=>l.unscanned || l.reports_unscanned));
-    return `<section class="panel panel-pad availability" aria-label="Data availability"><h2>Data availability</h2><p>${affected.size ? `${affected.size} ${affected.size===1?'lane has':'lanes have'} reported availability warnings. ${counts}.` : unscanned ? 'Some sources have not been scanned; warnings are unknown.' : 'No lane warnings reported for this selection.'}${unscanned && affected.size?' Some sources have not been scanned.':''}${discoveryIncomplete()?' Discovery is incomplete; counts may be partial.':''}${globalItems?' Other global warnings are available in details.':''}</p>${items || globalItems?`<details><summary>View availability details</summary><div class="availability-details" tabindex="0" aria-label="Availability warning details"><ul>${globalItems}${items}</ul></div></details>`:''}</section>`;
+    return `<section class="panel panel-pad availability ${affected.size || unscanned || discoveryIncomplete() ? 'warn' : 'ok'}" aria-label="Data availability"><h2>${icon(affected.size || discoveryIncomplete() ? 'exclamation-triangle' : unscanned ? 'clock-o' : 'check-circle')}Data availability</h2><p>${affected.size ? `${affected.size} ${affected.size===1?'lane has':'lanes have'} reported availability warnings. ${counts}.` : unscanned ? 'Some sources have not been scanned; warnings are unknown.' : 'No lane warnings reported for this selection.'}${unscanned && affected.size?' Some sources have not been scanned.':''}${discoveryIncomplete()?' Discovery is incomplete; counts may be partial.':''}${globalItems?' Other global warnings are available in details.':''}</p>${items || globalItems?`<details><summary>View availability details</summary><div class="availability-details" tabindex="0" aria-label="Availability warning details"><ul>${globalItems}${items}</ul></div></details>`:''}</section>`;
   }
   function selectors() {
     const ps=programs(), lanes=list(currentProgram()?.lanes)||[];
@@ -344,43 +592,144 @@
   }
   function title(title, subtitle, controls='') {return `<div class="titlebar"><div><h1>${esc(title)}</h1><p class="subtitle">${esc(subtitle)}</p></div>${controls}</div>`;}
   const discoveryIncomplete = () => state.data?.root_unavailable === true || state.data?.discovery_incomplete === true || (list(state.data?.warnings)||[]).some(w=>w==='root_unavailable'||w==='discovery_incomplete');
+  // Every finding with its owning program and lane, for cross-program views.
+  const findingEntries = ps => ps.flatMap(p=>(list(p.lanes)||[]).flatMap(l=>(list(l.findings)||[]).map(f=>({p,l,f}))));
+  const reportFor = (lane, finding) => {
+    const reports=list(lane?.reports);if(!reports || finding?.id==null)return null;
+    const id=String(finding.id), path=typeof finding.report_path==='string' ? finding.report_path.replace(/^reports\//,'') : null;
+    return reports.find(r=>r.id!=null && ((Array.isArray(r.owner_fids) && r.owner_fids.map(String).includes(id) && r.kind==='registered_report') || (path && r.path===path))) || null;
+  };
+  function workspaceTarget() {
+    if(state.dashboardProgram){const p=programs().find(p=>String(p.id)===state.dashboardProgram);if(p)return {program:p,lane:String(p.id)===state.program?state.lane:(list(p.lanes)||[])[0]?.name,why:'Dashboard filter'};}
+    const p=currentProgram();if(!p)return null;
+    return {program:p,lane:state.lane,why:state.programOrigin==='default'?'First program; none chosen yet':state.programOrigin==='last-used'?'Last used':'Current selection'};
+  }
+  function severityGroups(entries) {
+    const groups=new Map();
+    for(const entry of entries){
+      const value=entry.f.severity, blank=value==null || value==='';
+      const known=!blank && (sevKey(value)!=='unknown' || String(value).trim().toLowerCase()==='unknown');
+      const key=blank ? 'none' : known ? sevKey(value) : 'raw:'+String(value);
+      if(!groups.has(key))groups.set(key,{key,label:blank?'Not recorded':String(value),sev:blank?'unknown':sevKey(value),rank:blank?99:known?SEVERITY_LEVELS.indexOf(sevKey(value)):6.5,items:[]});
+      groups.get(key).items.push(entry);
+    }
+    return [...groups.values()].sort((a,b)=>a.rank-b.rank || a.label.localeCompare(b.label));
+  }
+  function classGroups(entries) {
+    const groups=new Map();
+    for(const entry of entries){
+      const value=entry.f.class, key=value==null || value==='' ? 'none' : String(value);
+      if(!groups.has(key))groups.set(key,{key,label:key==='none'?'Unclassified':key,items:[]});
+      groups.get(key).items.push(entry);
+    }
+    return [...groups.values()].sort((a,b)=>(a.key==='none')-(b.key==='none') || b.items.length-a.items.length || a.label.localeCompare(b.label));
+  }
+  function drill(kind, group) {
+    const byProgram=new Map();
+    for(const entry of group.items){const k=JSON.stringify([entry.p.id,entry.l.name]);if(!byProgram.has(k))byProgram.set(k,{p:entry.p,l:entry.l,items:[]});byProgram.get(k).items.push(entry);}
+    const sorted=[...byProgram.values()].sort((a,b)=>programLabel(a.p).localeCompare(programLabel(b.p)) || String(a.l.name).localeCompare(String(b.l.name)));
+    return `<div class="drill" id="drill-${esc(kind)}-${esc(group.key.replace(/[^a-z0-9_-]/gi,'_'))}">${sorted.map(({p,l,items})=>`<div class="drill-group"><h4>${icon('folder-o')}<span>${esc(programLabel(p))} / ${esc(l.name)}</span><span class="count">${items.length}</span></h4><ul>${items.sort((a,b)=>sevRank(a.f.severity)-sevRank(b.f.severity)).map(({f})=>{
+      const report=reportFor(l,f);
+      const target=`data-program="${esc(p.id)}" data-lane="${esc(l.name)}"`;
+      return `<li>${kind==='class'?sevBadge(f.severity):statusBadge(f.status)||''}<button type="button" class="link-button truncate" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</button><span class="meta"><span class="id">${esc(f.id??'')}</span>${isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<button type="button" class="link-button" data-goto-report="${esc(report.id)}" ${target}>${icon('file-text-o')} Report</button>`:''}</span></li>`;
+    }).join('')}</ul></div>`).join('')}</div>`;
+  }
+  function breakdown(kind, groups, total) {
+    const max=Math.max(1,...groups.map(g=>g.items.length));
+    return `<div class="breakdown">${groups.map(group=>{
+      const id=`${kind}:${group.key}`, open=state.dashExpanded===id;
+      const label=kind==='sev' ? `<span class="sev" data-sev="${group.sev}">${esc(group.label)}</span>` : esc(group.label);
+      return `<button type="button" class="breakdown-row" data-breakdown="${esc(id)}" aria-expanded="${open}" title="Show matching findings by program"><i class="fa fa-angle-right" aria-hidden="true"></i><span class="label">${label}</span><span class="bar${kind==='sev'?' sev-bar':''}" ${kind==='sev'?`data-sev="${group.sev}"`:''} aria-hidden="true"><i style="width:${group.items.length/max*100}%"></i></span><strong>${group.items.length}</strong></button>${open?drill(kind==='sev'?'sev':'class',group):''}`;
+    }).join('')}</div>`;
+  }
   function dashboard() {
     const options=programs(), ps=state.dashboardProgram ? options.filter(p=>String(p.id)===state.dashboardProgram) : options;
-    const lanes=ps.flatMap(p=>list(p.lanes)||[]), all=lanes.flatMap(l=>list(l.findings)||[]);
+    const lanes=ps.flatMap(p=>list(p.lanes)||[]), every=lanes.flatMap(l=>list(l.findings)||[]);
+    const openOnly=state.dashWork==='open', all=openOnly ? every.filter(isNotSubmitted) : every;
+    const entries=findingEntries(ps).filter(e=>!openOnly || isNotSubmitted(e.f));
     const discovered=!discoveryIncomplete();
     const complete=discovered && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.findings));
-    const stat=(v,label)=>`<div class="stat"><strong>${esc(v)}</strong><span>${esc(label)}</span></div>`;
+    const stat=(v,label,extra='')=>`<div class="stat"><strong>${esc(v)}</strong><span>${esc(label)}${extra}</span></div>`;
     const reportsComplete=discovered && !state.data?.reports_unavailable && ps.every(p=>Array.isArray(p.lanes)) && lanes.every(l=>Array.isArray(l.reports) && !(reportsIncomplete(l)));
     const submissionValues=field=>{
-      const counts=new Map();for(const finding of all){const nested=finding.submission?.[field];const value=nested != null && nested !== '' ? nested : finding[field==='state'?'submission_status':'platform_outcome'];if(value!=null && value!=='')counts.set(String(value),(counts.get(String(value))||0)+1);}
-      return [...counts].map(([value,count])=>`<div class="record"><span>${esc(value)}</span> <strong>${count}</strong></div>`).join('') || '<p class="hint">No recorded values available.</p>';
+      const counts=new Map();for(const finding of every){const nested=finding.submission?.[field];const value=nested != null && nested !== '' ? nested : finding[field==='state'?'submission_status':'platform_outcome'];if(value!=null && value!=='')counts.set(String(value),(counts.get(String(value))||0)+1);}
+      return counts.size ? `<div class="kv">${[...counts].sort((a,b)=>b[1]-a[1]).map(([value,count])=>`<span>${esc(value)}</span> <strong>${count}</strong>`).join('')}</div>` : '<p class="hint">No recorded values available.</p>';
     };
-    const classes=new Map(); all.forEach(f=>{if(f.class) classes.set(String(f.class),(classes.get(String(f.class))||0)+1);});
-    const severity=new Map(); let noSeverity=0;
-    for(const finding of all){const value=finding.severity;if(value==null || value==='')noSeverity++;else severity.set(String(value),(severity.get(String(value))||0)+1);}
-    const severityRows=[...severity].sort((a,b)=>a[0].localeCompare(b[0])).map(([name,n])=>`<div class="record"><span>${esc(name)}</span> <strong>${n}</strong></div>`).join('')+(noSeverity?`<div class="record"><span>Not recorded</span> <strong>${noSeverity}</strong></div>`:'');
-    const max=Math.max(1,...classes.values());
-    const bars=[...classes].sort((a,b)=>b[1]-a[1]).map(([name,n])=>`<div class="chart-row"><span>${esc(name)}</span><span class="bar"><i style="width:${n/max*100}%"></i></span><strong>${n}</strong></div>`).join('');
-    return `${title('Dashboard','A portfolio view of the records currently loaded.',`<div class="toolbar"><label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.id||p.name,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`)}
-      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}</p></div><button class="button" data-go-program>Open workspace</button></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records')}${stat(state.data?.portfolio_unloaded ? 'Unknown' : state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
-      ${availability(ps)}<div class="dashboard-grid"><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded finding records; not coverage.</p>${bars||'<div class="state">No classified findings available.</div>'}</section><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?'Counts from all loaded finding records.':'Incomplete data: counts include loaded finding records only, not portfolio totals.'}</p>${severityRows||'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad"><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p>${ps.length?ps.map(p=>`<div class="record"><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><p class="hint">${esc(p.family||'Family not provided')} · ${Array.isArray(p.lanes)?`${p.lanes.length} lanes`:'Lanes unavailable'}</p></div>`).join(''):discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for loaded findings only.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
+    const target=workspaceTarget();
+    const workFilter=`<div class="work-filter"><span id="work-filter-label">Show</span><div class="segmented" role="group" aria-labelledby="work-filter-label"><button type="button" data-dash-work="all" aria-pressed="${!openOnly}">All records</button><button type="button" data-dash-work="open" aria-pressed="${openOnly}">Not submitted</button></div></div>`;
+    const controls=`<div class="toolbar">${workFilter}<label>Dashboard program<select id="dashboard-program">${opt('','All programs',!state.dashboardProgram)}${options.map(p=>opt(p.id,p.id||p.name,String(p.id)===state.dashboardProgram)).join('')}</select></label></div>`;
+    const sevGroups=severityGroups(entries), clsGroups=classGroups(entries);
+    const scope=openOnly ? 'not-submitted finding records' : 'finding records';
+    const programRows=ps.map(p=>{
+      const pl=list(p.lanes), fs=pl ? pl.flatMap(l=>list(l.findings)||[]) : [], known=pl && pl.every(l=>Array.isArray(l.findings));
+      const top=fs.length ? fs.reduce((best,f)=>sevRank(f.severity)<sevRank(best.severity)?f:best,fs[0]).severity : null;
+      const search=[p.id,p.name,p.family,...(pl||[]).map(l=>l.name)].join(' ').toLowerCase();
+      return `<tr data-program-row data-search="${esc(search)}"><td><button class="link-button" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</button><span class="id" style="display:block">${esc(p.family||'Family not provided')}</span></td><td class="num">${pl?pl.length:'Unavailable'}</td><td class="num">${known?fs.length:'Unknown'}</td><td class="num">${known?fs.filter(isNotSubmitted).length:'Unknown'}</td><td>${top!=null && top!==''?sevBadge(top):'<span class="hint">None</span>'}</td></tr>`;
+    }).join('');
+    return `${title('Dashboard','A portfolio view of the records currently loaded.',controls)}
+      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}${openOnly?' Finding counts include not-submitted work only.':''}</p></div><div class="open-workspace"><button class="button primary" data-go-program ${target?'':'disabled'}>${icon('arrow-right')}<span>Open workspace</span></button><button type="button" class="button" data-program-picker ${options.length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>${target?`<p class="target-note">Opens <strong>${esc(programLabel(target.program))}</strong>${target.lane?` / ${esc(target.lane)}`:''}<span class="badge outline">${esc(target.why)}</span></p>`:''}</div></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records',openOnly?' (not submitted)':'')}${stat(state.data?.portfolio_unloaded ? 'Unknown' : state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
+      ${availability(ps)}<div class="dashboard-grid"><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?`Counts from all loaded ${scope}.`:`Incomplete data: counts include loaded ${scope} only, not portfolio totals.`} Select a row to list matching findings by program.</p>${sevGroups.length?breakdown('sev',sevGroups):'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad"><h2>Finding classes</h2><p class="hint">Classification on loaded ${scope}; not coverage. Select a row to list matches.</p>${clsGroups.length?breakdown('class',clsGroups):'<div class="state">No classified findings available.</div>'}</section><section class="panel wide"><div class="panel-head"><div><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p></div></div>${ps.length?`<div class="program-search"><div class="input-icon">${icon('search')}<input id="program-search" type="search" aria-label="Search programs" placeholder="Search programs" value="${esc(state.programQuery||'')}" autocomplete="off"></div><span class="hint num" id="program-search-count"></span></div><div class="table-wrap"><table class="program-table"><thead><tr><th>Program</th><th>Lanes</th><th>Findings</th><th>Not submitted</th><th>Highest severity</th></tr></thead><tbody>${programRows}</tbody></table><div class="state" id="program-search-empty" hidden>No programs match this search.</div></div>`:discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for all loaded findings.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
+  function applyProgramSearch() {
+    const input=app.querySelector('#program-search');if(!input)return;
+    const q=input.value.trim().toLowerCase();let shown=0;
+    const rowsEl=[...app.querySelectorAll('[data-program-row]')];
+    for(const row of rowsEl){const match=!q || row.dataset.search.includes(q);row.hidden=!match;if(match)shown++;}
+    const empty=app.querySelector('#program-search-empty');if(empty)empty.hidden=shown>0;
+    const count=app.querySelector('#program-search-count');if(count)count.textContent=q?`${shown} of ${rowsEl.length}`:'';
+  }
+  const SECTION_ICONS={findings:'bug',coverage:'sitemap',reports:'file-text-o',map:'map-o',gadgets:'puzzle-piece'};
   function workspace() {
     const p=currentProgram(), lane=currentLane();
-    if (!p || !lane) return `${title(p?.name || 'Programs',p?'No lanes are available for this program.':'No programs are available.',selectors())}<div class="stack">${rootWarning()}${availability([])}<div class="panel state">${p?'This program has no lane data.':'Configure the program root in the backend and refresh.'}</div></div>`;
-    const nav=sections.map(([key,label])=>`<button data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}" ${state.section===key?'aria-current="page"':''}><span>${esc(label)}</span><span class="count">${key==='reports' && reportsIncomplete(lane) ? '—' : rows(key)?.length ?? '—'}</span></button>`).join('');
-    return `${title(p.name||p.id,`${p.family||'Program workspace'} / ${lane.name}`,selectors())}<div class="stack">${rootWarning()}<div class="layout"><div class="stack"><section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div></div></section>${availability([{...p,lanes:[lane]}])}${sectionContent()}</div><aside class="panel workspace-nav"><h2>Workspace</h2><p class="hint">Explore this lane</p><div class="choices">${nav}</div></aside></div></div>`;
+    const picker=`<button type="button" class="button" data-program-picker ${programs().length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>`;
+    if (!p || !lane) return `${title(p?.name || 'Programs',p?'No lanes are available for this program.':'No programs are available.',`<div class="switcher">${selectors()}${picker}</div>`)}<div class="stack">${rootWarning()}${availability([])}<div class="panel state">${p?'This program has no lane data.':'Configure the program root in the backend and refresh.'}</div></div>`;
+    // Gadgets and MapStore tabs are drop targets for modules that move findings.
+    const nav=sections.map(([key,label])=>`<button data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}${key==='map'||key==='gadgets'?' drop-target':''}" ${key==='map'||key==='gadgets'?`data-drop-target="${key}"`:''} ${state.section===key?'aria-current="page"':''}>${icon(SECTION_ICONS[key])}<span>${esc(label)}</span><span class="count">${key==='reports' && reportsIncomplete(lane) ? '–' : rows(key)?.length ?? '–'}</span></button>`).join('');
+    const origin=state.programOrigin==='default' && programs().length>1 ? `<p class="context-note">${icon('info-circle')}<span>Showing the first program because none was chosen yet. Use Switch program or the Program menu to choose another.</span></p>` : '';
+    const header=`<div class="titlebar"><div><p class="eyebrow">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(p.family||'Program workspace')} / ${esc(lane.name)}</span></p><h1>${esc(p.name||p.id)}</h1>${origin}</div><div class="switcher">${selectors()}${picker}</div></div>`;
+    return `${header}<div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div><div><strong>${rows('findings') ? rows('findings').filter(isNotSubmitted).length : 'Unknown'}</strong><span>Not submitted</span></div></div></section>${availability([{...p,lanes:[lane]}])}<div class="layout"><div class="stack"><nav class="tabs workspace-nav" aria-label="Workspace sections">${nav}</nav>${sectionContent()}</div></div></div>`;
   }
-  function filterControl(key,label,findings) {
-    const values=[...new Set(findings.map(r=>r[key]).filter(v=>v!=null&&v!=='' ).map(String))].sort();
-    return `<select data-filter="${key}" aria-label="Filter ${label}">${opt('',`All ${label}`,!state.filters[key])}${values.map(v=>opt(v,v,state.filters[key]===v)).join('')}</select>`;
+  const FILTERS=[['severity','Severity','severities'],['class','Class','classes'],['status','Status','statuses'],['submission','Submission','submission states']];
+  const emptyFilters = () => ({severity:[],class:[],status:[],submission:[],query:''});
+  const filterValue = (row,key) => key==='submission' ? submissionLabel(row) : String(row[key] ?? '');
+  const filterValues = (key, findings) => {
+    const counts=new Map();for(const r of findings){const v=filterValue(r,key);if(v)counts.set(v,(counts.get(v)||0)+1);}
+    return [...counts].sort((a,b)=>key==='severity' ? sevRank(a[0])-sevRank(b[0]) || a[0].localeCompare(b[0]) : a[0].localeCompare(b[0]));
+  };
+  function filterControl(key,label,plural,findings) {
+    const active=state.filters[key]||[];
+    if(!filterValues(key,findings).length && !active.length)return '';
+    return `<button type="button" class="button sm filter-trigger" data-filter="${key}" aria-haspopup="true" aria-expanded="false" aria-label="Filter ${esc(plural)}">${esc(label)}${active.length?` <span class="badge-count">${active.length}</span>`:''}${icon('angle-down')}</button>`;
+  }
+  function openFilter(trigger) {
+    const key=trigger.dataset.filter, def=FILTERS.find(([k])=>k===key);if(!def)return;
+    const box=document.createElement('div');
+    const draw=()=>{
+      const values=filterValues(key,rows('findings')||[]), active=state.filters[key]||[];
+      for(const v of active)if(!values.some(([x])=>x===v))values.push([v,0]);
+      box.innerHTML=`<div class="menu-label">${esc(def[1])}</div><div class="menu" role="group" aria-label="${esc(def[1])} values">${values.map(([v,n])=>`<label class="option"><input type="checkbox" value="${esc(v)}" ${active.includes(v)?'checked':''}><span>${key==='severity'?sevBadge(v):esc(v)}</span><span class="count">${n}</span></label>`).join('')}</div><div class="menu-foot"><button type="button" class="button sm ghost" data-filter-clear ${active.length?'':'disabled'}>Clear</button><button type="button" class="button sm" data-filter-done>Done</button></div>`;
+    };
+    draw();
+    box.addEventListener('change',event=>{
+      const input=event.target.closest('input[type=checkbox]');if(!input)return;
+      const set=new Set(state.filters[key]||[]);if(input.checked)set.add(input.value);else set.delete(input.value);
+      state.filters[key]=[...set];render();
+    });
+    box.addEventListener('click',event=>{
+      if(event.target.closest('[data-filter-clear]')){state.filters[key]=[];render();draw();box.querySelector('input')?.focus();}
+      else if(event.target.closest('[data-filter-done]'))closePopover(true);
+    });
+    menuKeys(box,'input[type=checkbox], .menu-foot button');
+    openPopover(trigger,box,{className:'filter-popover',reanchor:()=>app.querySelector(`.filter-trigger[data-filter="${CSS.escape(key)}"]`)});
+    box.querySelector('input')?.focus();
   }
   function metadataCell(row,key) {
     const value=String(row[key]??''); const cap=BoardAPI.capability(state.data,'findingMetadata');
     if(cap?.textFields?.includes(key)) return `<input data-metadata="${esc(key)}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" aria-describedby="metadata-warning" title="Lowercase class identifier; change applies on leaving the field" value="${esc(value)}" ${row.id != null && !state.metadataPending?'':'disabled'}>`;
     const options=cap?.options?.[key]; const writable=cap && row.id != null && Array.isArray(options) && options.length && !state.metadataPending;
     const values=[...new Set([value,...(Array.isArray(options)?options.map(String):[])].filter(Boolean))];
-    return `<select data-metadata="${key}" data-id="${esc(row.id??'')}" aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${cap?'aria-describedby="metadata-warning"':''} ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,v,v===value)).join('')}</select>`;
+    const sev=key==='severity' ? ` class="sev-select" data-sev="${value?sevKey(value):'unknown'}"` : '';
+    return `<select data-metadata="${key}" data-id="${esc(row.id??'')}"${sev} aria-label="${esc(key)} for ${esc(row.title||row.id||'finding')}" ${cap?'aria-describedby="metadata-warning"':''} ${writable?'':'disabled'}>${value ? '' : opt('','Unknown',true)}${values.map(v=>opt(v,v,v===value)).join('')}</select>`;
   }
   function rationale(row) {
     const label=String(row.title||row.id||'finding'), edit=state.rationaleDrafts.get(rationaleKey(state.program,state.lane,row.id));
@@ -388,13 +737,36 @@
     if(edit) return `<div class="rationale"><p>Saved rationale: <span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span></p><label>Unsaved draft — Severity rationale for ${esc(label)}<textarea data-rationale-input="${esc(row.id)}" aria-label="Severity rationale for ${esc(label)}" aria-describedby="metadata-warning" rows="3" ${state.metadataPending?'disabled':''}>${esc(edit.text)}</textarea></label>${writable?`<button class="button" data-rationale-save="${esc(row.id)}" aria-label="Save severity rationale for ${esc(label)}" aria-describedby="metadata-warning" ${state.metadataPending?'disabled':''}>Save rationale</button>`:'<p class="hint">Saving unavailable; copy this draft before leaving.</p>'} <button class="button subtle" data-rationale-cancel="${esc(row.id)}" ${state.metadataPending?'disabled':''}>Cancel</button></div>`;
     return `<div class="rationale"><span>Severity rationale: </span><span class="record-value">${esc(row.severity_rationale || 'Not recorded')}</span>${writable?` <button class="link-button" data-rationale-edit="${esc(row.id)}" aria-label="Edit severity rationale for ${esc(label)}" ${state.metadataPending?'disabled':''}>Edit rationale</button>`:''}</div>`;
   }
+  const SORTS={title:r=>String(r.title||'').toLowerCase(),severity:r=>sevRank(r.severity),class:r=>String(r.class||'').toLowerCase(),status:r=>String(r.status||'').toLowerCase(),id:r=>String(r.id??'')};
+  function sortFindings(items) {
+    const {key,dir}=state.sort||{};const get=SORTS[key];if(!get)return items;
+    const sign=dir==='desc'?-1:1;
+    return items.map((r,i)=>[r,i]).sort((a,b)=>{const x=get(a[0]),y=get(b[0]);return (x<y?-1:x>y?1:0)*sign || a[1]-b[1];}).map(([r])=>r);
+  }
+  function sortHeader(key,label,extra='') {
+    const active=state.sort?.key===key, dir=active?state.sort.dir:'';
+    return `<th ${active?`aria-sort="${dir==='desc'?'descending':'ascending'}"`:''} ${extra}><button type="button" class="sort-button" data-sort="${key}" title="Sort by ${esc(label.toLowerCase())}">${esc(label)}${icon(active?(dir==='desc'?'sort-desc':'sort-asc'):'sort')}</button></th>`;
+  }
   function findings() {
     const all=rows('findings'); if (!all) return unavailable('Findings ledger');
     const f=state.filters, query=f.query.trim().toLowerCase();
-    const filtered=all.filter(r=>['severity','class','status'].every(k=>!f[k]||String(r[k]??'')===f[k]) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query))));
-    const body=filtered.map(r=>`<tr><td><strong>${esc(r.title||'Untitled finding')}</strong><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission?.state ? `<span class="id">Submission state: ${esc(r.submission.state)}</span>` : ''}${r.submission?.result ? `<span class="id">Submission result: ${esc(r.submission.result)}</span>` : ''}${r.submission_status ? `<span class="id">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="id">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}</td><td>${metadataCell(r,'severity')}${rationale(r)}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td></tr>`).join('');
+    const filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
+    const program=currentProgram(), laneName=state.lane;
+    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : submissionBadge(r)}</div></td><td>${metadataCell(r,'severity')}${rationale(r)}</td><td>${metadataCell(r,'class')}</td><td>${metadataCell(r,'status')}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
-    return `<section class="panel"><div class="panel-pad"><h2>Findings ledger</h2><p class="hint">Filter the findings in this lane.</p>${cap?'<div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div>':''}</div><div class="filters">${filterControl('severity','severities',all)}${filterControl('class','classes',all)}${filterControl('status','statuses',all)}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}"><span class="muted">${filtered.length} of ${all.length}</span></div>${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr><th>Finding</th><th>Severity</th><th>Class</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></div>`:'<div class="state">No findings match these filters.</div>'}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
+    const chips=FILTERS.flatMap(([k,label])=>(f[k]||[]).map(v=>`<span class="chip" data-filter-chip><span class="chip-key">${esc(label)}</span><span>${esc(v)}</span><button type="button" data-remove-filter="${k}" data-value="${esc(v)}" aria-label="Remove filter ${esc(label)} ${esc(v)}">${icon('times')}</button></span>`));
+    const anyFilter=chips.length || query;
+    return `<section class="panel"><div class="panel-head"><div><h2>Findings ledger</h2><p class="hint">Filter, sort and open the findings in this lane.</p></div></div>${cap?'<div class="panel-pad" style="padding-top:0"><div id="metadata-warning" class="message warning metadata-warning">Warning: concurrent local edits or sync changes can be overwritten by metadata updates. Coordinate all writers before editing; conflict protection is not guaranteed.</div></div>':''}<div class="filters">${FILTERS.map(([k,label,plural])=>filterControl(k,label,plural,all)).join('')}<div class="input-icon">${icon('search')}<input id="finding-search" aria-label="Search findings" placeholder="Search findings" value="${esc(f.query)}" autocomplete="off"></div><span class="result-count">${filtered.length} of ${all.length}</span></div>${anyFilter?`<div class="chips">${chips.join('')}<button type="button" class="link-button" data-clear-filters>Clear all</button></div>`:''}${filtered.length?`<div class="table-wrap"><table class="ledger-table"><thead><tr>${sortHeader('title','Finding')}${sortHeader('severity','Severity')}${sortHeader('class','Class')}${sortHeader('status','Status')}<th class="actions"><span class="sr-only">Actions</span></th></tr></thead><tbody>${body}</tbody></table></div>`:`<div class="empty">${icon(all.length?'filter':'inbox')}<strong>${all.length?'No findings match these filters.':'No findings in this lane.'}</strong>${all.length?'<button type="button" class="link-button" data-clear-filters>Clear filters</button>':''}</div>`}<p class="footnote">${cap?'Only supported fields with stable IDs can be edited. Class changes apply when you leave the field.':'Metadata editing is unavailable: the backend has not advertised a write capability.'}</p><div id="metadata-message" role="status">${state.metadataPending?'Updating metadata; waiting for confirmation.':''}</div></section>`;
+  }
+  function openRowMenu(trigger) {
+    const id=trigger.dataset.rowMenu, row=(rows('findings')||[]).find(r=>String(r.id??'')===id);if(!row)return;
+    const report=reportFor(currentLane(),row), items=[];
+    if(row.id!=null)items.push({label:'Copy finding ID',icon:'clipboard',onSelect:async()=>{try{await navigator.clipboard.writeText(String(row.id));toast('Finding ID copied.','success');}catch{toast('Copy is unavailable in this browser.','warning');}}});
+    if(report)items.push({label:'Open report',icon:'file-text-o',onSelect:()=>navigate({section:'reports',report:String(report.id)})});
+    const only=(key,label,value)=>{if(value!=null && value!=='')items.push({label:`Show only ${label} ${value}`,icon:'filter',onSelect:()=>{state.filters={...emptyFilters(),query:'',[key]:[String(value)]};render();}});};
+    if(items.length)items.push({separator:true});
+    only('severity','severity',row.severity);only('class','class',row.class);only('status','status',row.status);
+    openMenu(trigger,items,{label:'Finding actions',align:'end',reanchor:()=>null});
   }
   function unavailable(name){return `<section class="panel panel-pad"><h2>${esc(name)}</h2><div class="state">This collection was not provided by the backend.</div></section>`;}
   function records(key,label,description) {return recordList(rows(key),label,description);}
@@ -970,16 +1342,24 @@
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
   function render() {
     const oldPath=app.querySelector('#saved-shared-path'), focus=oldPath && document.activeElement===oldPath ? {key:oldPath.dataset.recoveryKey,start:oldPath.selectionStart,end:oldPath.selectionEnd,direction:oldPath.selectionDirection} : null;
+    const active=document.activeElement, focusKey=active && app.contains(active) ? ['data-sort','data-breakdown','data-dash-work','data-section'].map(attr=>active.hasAttribute(attr)?[attr,active.getAttribute(attr),!!active.closest('.tabs')]:null).find(Boolean) : null;
     ++renderGeneration;
     if(editor){editor.toTextArea();editor=null;}
+    hideTip();
+    // Module hosts survive re-renders when they still describe the same report,
+    // so a live editor session is not torn down by unrelated updates.
+    const keptHosts=['live-report-host','report-artifacts-host'].map(id=>app.querySelector(`#${id}`)).filter(Boolean);
     document.querySelector('#refresh').disabled=state.metadataPending || state.loading;
     portfolioAction.hidden=!state.data?.portfolio_unloaded;
     portfolioButton.disabled=!!state.data?._portfolioLoading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':'Programs';
-    if(state.loading) app.innerHTML='<div class="panel state">Loading workspace…</div>';
-    else if(state.error) app.innerHTML=`<div class="panel panel-pad"><h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
+    const trail=document.querySelector('#breadcrumb-trail'), crumbProgram=state.view==='program' && !state.loading ? currentProgram() : null;
+    if(trail)trail.innerHTML=crumbProgram ? [programLabel(crumbProgram),state.lane,(sections.find(([k])=>k===state.section)||[])[1]].filter(Boolean).map(part=>`<span class="sep" aria-hidden="true">/</span> <span class="crumb-current">${esc(part)}</span>`).join(' ') : '';
+    if(state.loading) app.innerHTML=skeleton();
+    else if(state.error) app.innerHTML=`<div class="panel empty error-state" role="alert">${icon('exclamation-circle')}<h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
     else app.innerHTML=state.view==='dashboard'?dashboard():workspace();
+    for(const old of keptHosts){const fresh=app.querySelector(`#${old.id}`);if(fresh && ['family','program','lane','path','reportId'].every(k=>fresh.dataset[k]===old.dataset[k]))fresh.replaceWith(old);}
     if(state.metadataPending && !app.querySelector('#metadata-message')) app.insertAdjacentHTML('afterbegin','<div class="message warning" role="status">Updating metadata; waiting for confirmation. Displayed values are the last loaded or confirmed values.</div>');
     if(state.metadataErrors.length) app.insertAdjacentHTML('afterbegin',state.metadataErrors.map(error=>`<div class="message warning" role="alert">${esc(error)}</div>`).join(''));
     if(state.metadataDrafts.size) app.insertAdjacentHTML('afterbegin',[...state.metadataDrafts.values()].map(d=>`<div class="message warning" role="alert">${esc(d.message)}<label>Pending ${esc(d.field)} value — copy before leaving<textarea readonly rows="2">${esc(d.value)}</textarea></label><button type="button" data-discard-metadata="${d.sequence}">Discard pending value</button></div>`).join(''));
@@ -1001,9 +1381,58 @@
       editor.codemirror.on('change',()=>updateDraft(draft,editor.value()));
     }
     renderRecovery();
+    applyProgramSearch();
+    renderRecent();
+    if(focusKey){const el=app.querySelector(`${focusKey[2]?'.tabs ':''}[${focusKey[0]}="${CSS.escape(focusKey[1])}"]`);el?.focus({preventScroll:true});}
+    if(state.scrollToHighlight){const row=app.querySelector(`tr.highlight`);if(row){state.scrollToHighlight=false;row.scrollIntoView({block:'center',behavior:'smooth'});}}
+    reanchorPopover();
+    syncRoute();
     for(const module of window.BoardModules || []){try{module.afterRender?.(moduleContext());}catch(error){console.error('Board module failed:',module?.name,error);}}
-    if(!state.loading){loadSelectedLane();loadSelectedReports();}
+    if(!state.loading){loadSelectedLane();loadSelectedReports();retryDeferredApply();}
   }
+  function skeleton() {
+    const line=w=>`<span class="skeleton sk-line" style="width:${w}%"></span>`;
+    return `<div class="skeleton-page" aria-busy="true"><p class="skeleton-caption">${icon('circle-o-notch fa-spin')}Loading workspace…</p><div class="panel panel-pad"><span class="skeleton sk-title"></span>${line(42)}<div class="stats">${('<div class="stat">'+line(30)+line(60)+'</div>').repeat(4)}</div></div><div class="dashboard-grid"><div class="panel panel-pad">${line(35)}${line(90)}${line(80)}${line(70)}</div><div class="panel panel-pad">${line(35)}${line(85)}${line(75)}${line(60)}</div></div></div>`;
+  }
+  // ---- Hash routing: #/dashboard or #/programs/<program>/<lane>/<section>[/<report>] ----
+  function routeFor() {
+    if(state.view!=='program')return '#/dashboard';
+    if(!state.program)return '#/programs';
+    return `#/programs/${encodeURIComponent(state.program)}/${encodeURIComponent(state.lane)}/${state.section}${state.section==='reports' && state.report ? '/'+encodeURIComponent(state.report) : ''}`;
+  }
+  function parseRoute(hash) {
+    const parts=String(hash||'').replace(/^#\/?/,'').split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
+    if(parts[0]==='dashboard')return {view:'dashboard'};
+    if(parts[0]==='programs')return {view:'program',program:parts[1]||'',lane:parts[2]||'',section:sections.some(([k])=>k===parts[3])?parts[3]:'findings',report:parts.slice(4).join('/')};
+    return null;
+  }
+  function syncRoute() {
+    if(state.loading || !state.data){routePush=false;return;}
+    const next=routeFor();
+    if(location.hash!==next){try {history[routePush?'pushState':'replaceState'](null,'',next);} catch {}}
+    routePush=false;
+  }
+  function navigate(next={}, options={}) {
+    if(next.view)state.view=next.view;
+    if(next.program!==undefined && next.program!==state.program){
+      ++laneGeneration;state.program=next.program;state.lane=next.lane||'';state.report='';state.filters=emptyFilters();normalizeSelection();
+    } else if(next.lane && next.lane!==state.lane && (list(currentProgram()?.lanes)||[]).some(l=>String(l.name)===next.lane)){
+      ++laneGeneration;state.lane=next.lane;state.report='';state.filters=emptyFilters();
+    }
+    if(next.section && sections.some(([k])=>k===next.section))state.section=next.section;
+    if(next.report!==undefined)state.report=next.report;
+    state.highlight=next.highlight ?? '';state.scrollToHighlight=!!next.highlight;
+    if(state.view==='program' && next.program!==undefined && !options.fromHistory)markProgramUsed();
+    routePush=!options.fromHistory;
+    closePopover(false);
+    render();
+  }
+  window.addEventListener('popstate',()=>{
+    const route=parseRoute(location.hash);
+    if(!route || !state.data || location.hash===routeFor())return;
+    navigate(route,{fromHistory:true});
+  });
+  app.addEventListener('focusout',event=>{if(!phaseStatus.contains(event.relatedTarget) && !portfolioAction.contains(event.relatedTarget))retryDeferredApply();});
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;
     if(target.hasAttribute('data-observation')){
@@ -1052,9 +1481,27 @@
     else if(target.hasAttribute('data-discard-metadata')){for(const [key,draft] of state.metadataDrafts)if(String(draft.sequence)===target.dataset.discardMetadata){state.metadataDrafts.delete(key);break;}render();}
     else if(target.hasAttribute('data-discard-current-path')){recoveryPaths.delete(recoveryPathKey());render();}
     else if(target.hasAttribute('data-discard-path')){for(const [key,path] of recoveryPaths)if(String(path.sequence)===target.dataset.discardPath){recoveryPaths.delete(key);break;}render();}
-    else if(target.hasAttribute('data-go-program')){if(state.dashboardProgram && state.program!==state.dashboardProgram){++laneGeneration;state.program=state.dashboardProgram;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();}state.view='program';render();}
-    else if(target.hasAttribute('data-open-program')){++laneGeneration;if(state.program!==target.dataset.openProgram)state.filters={severity:'',class:'',status:'',query:''};state.program=target.dataset.openProgram;state.lane='';state.report='';normalizeSelection();state.view='program';state.section='findings';render();}
-    else if(target.dataset.section){state.section=target.dataset.section;render();}
+    else if(target.hasAttribute('data-go-program')){if(state.dashboardProgram && state.program!==state.dashboardProgram){++laneGeneration;state.program=state.dashboardProgram;state.lane='';state.report='';state.filters=emptyFilters();normalizeSelection();}state.view='program';markProgramUsed();routePush=true;render();}
+    else if(target.hasAttribute('data-open-program')){++laneGeneration;if(state.program!==target.dataset.openProgram)state.filters=emptyFilters();state.program=target.dataset.openProgram;state.lane='';state.report='';normalizeSelection();state.view='program';state.section='findings';markProgramUsed();routePush=true;render();}
+    else if(target.dataset.section){state.section=target.dataset.section;state.highlight='';routePush=true;render();}
+    else if(target.hasAttribute('data-program-picker')){
+      const fromDashboard=state.view==='dashboard';
+      openProgramPicker(target,id=>navigate(fromDashboard ? {view:'program',program:id,section:'findings'} : {program:id}),{current:fromDashboard ? (state.dashboardProgram || state.program) : state.program,align:fromDashboard?'start':'end'});
+      if(popover)popover.reanchor=()=>null;
+    }
+    else if(target.hasAttribute('data-dash-work')){state.dashWork=target.dataset.dashWork==='open'?'open':'all';writeStore('bounty-board-dashboard-work',state.dashWork);render();}
+    else if(target.hasAttribute('data-breakdown')){state.dashExpanded=state.dashExpanded===target.dataset.breakdown?'':target.dataset.breakdown;render();}
+    else if(target.hasAttribute('data-goto-finding')){state.filters=emptyFilters();navigate({view:'program',program:target.dataset.program,lane:target.dataset.lane,section:'findings',highlight:target.dataset.gotoFinding});}
+    else if(target.hasAttribute('data-goto-report')){navigate({view:'program',program:target.dataset.program,lane:target.dataset.lane,section:'reports',report:target.dataset.gotoReport});}
+    else if(target.hasAttribute('data-sort')){
+      const key=target.dataset.sort, current=state.sort||{};
+      state.sort=current.key!==key ? {key,dir:'asc'} : current.dir==='asc' ? {key,dir:'desc'} : {key:'',dir:'asc'};
+      writeStore('bounty-board-finding-sort',state.sort);render();
+    }
+    else if(target.classList.contains('filter-trigger')){if(popover?.trigger===target)closePopover(true);else openFilter(target);}
+    else if(target.hasAttribute('data-remove-filter')){const key=target.dataset.removeFilter;state.filters[key]=(state.filters[key]||[]).filter(v=>v!==target.dataset.value);render();(app.querySelector('[data-remove-filter]') || app.querySelector('#finding-search'))?.focus();}
+    else if(target.hasAttribute('data-clear-filters')){state.filters=emptyFilters();render();app.querySelector('#finding-search')?.focus();}
+    else if(target.hasAttribute('data-row-menu')){if(popover?.trigger===target)closePopover(true);else openRowMenu(target);}
     else if(target.hasAttribute('data-rationale-edit')){
       const row=(rows('findings')||[]).find(r=>String(r.id)===target.dataset.rationaleEdit);
       if(row && !state.metadataPending){const key=rationaleKey(state.program,state.lane,row.id), text=String(row.severity_rationale??'');if(!state.rationaleDrafts.has(key))state.rationaleDrafts.set(key,{program:state.program,lane:state.lane,id:String(row.id),text,revision:row.metadata_revision,rootInstance:state.data?.root_instance});render();app.querySelector(`[data-rationale-input="${CSS.escape(String(row.id))}"]`)?.focus();}
@@ -1074,10 +1521,9 @@
   app.addEventListener('change',async event=>{
     const el=event.target;
     if(el.id==='dashboard-program'){const focused=document.activeElement===el;state.dashboardProgram=el.value;render();if(focused)app.querySelector('#dashboard-program')?.focus();}
-    else if(el.id==='program-select'){++laneGeneration;state.program=el.value;state.lane='';state.report='';state.filters={severity:'',class:'',status:'',query:''};normalizeSelection();render();}
-    else if(el.id==='lane-select'){++laneGeneration;state.lane=el.value;state.report='';state.filters={severity:'',class:'',status:'',query:''};render();}
-    else if(el.id==='report-select'){state.report=el.value;render();}
-    else if(el.dataset.filter){state.filters[el.dataset.filter]=el.value;render();}
+    else if(el.id==='program-select'){++laneGeneration;state.program=el.value;state.lane='';state.report='';state.filters=emptyFilters();normalizeSelection();markProgramUsed();routePush=true;render();}
+    else if(el.id==='lane-select'){++laneGeneration;state.lane=el.value;state.report='';state.filters=emptyFilters();markProgramUsed();routePush=true;render();}
+    else if(el.id==='report-select'){state.report=el.value;routePush=true;render();}
     else if(el.dataset.metadata){
       const key=el.dataset.metadata, id=el.dataset.id, value=el.value, row=(rows('findings')||[]).find(r=>String(r.id)===id); if(!row || state.metadataPending)return;
       const program=state.program,lane=state.lane, family=currentProgram()?.family, name=currentProgram()?.name,rootInstance=state.data?.root_instance;
@@ -1093,6 +1539,7 @@
       else {const existing=recoveryPaths.get(key);recoveryPaths.set(key,{sequence:existing?.sequence || ++recoveryPathSequence,value:el.value,program:state.program,lane:state.lane,source:/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? state.data.root_instance : 'unknown'});}
     }
     if(el.hasAttribute('data-rationale-input')){const edit=state.rationaleDrafts.get(rationaleKey(state.program,state.lane,el.dataset.rationaleInput));if(edit)edit.text=el.value;}
+    if(el.id==='program-search'){state.programQuery=el.value;applyProgramSearch();}
     if(el.id==='finding-search'){const pos=el.selectionStart;state.filters.query=el.value;render();const input=document.querySelector('#finding-search');input?.focus();input?.setSelectionRange(pos,pos);}
     if(el.id==='report-source' && !editor){const report=reportById(state.report);if(report)updateDraft(draftFor(report),el.value);}
   });
@@ -1115,5 +1562,14 @@
     }
     renderRecovery();
   });
+  const initialRoute=parseRoute(location.hash);
+  if(initialRoute){
+    state.view=initialRoute.view;
+    if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.programOrigin='route';}
+  }
+  // Public UI helpers for feature modules (see style.css header for tokens).
+  window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker,
+    navigate:(route)=>navigate(route||{}), severityKey:sevKey, severityRank:sevRank, severityBadge:sevBadge,
+    statusBadge, submissionState, isNotSubmitted, icon, escape:esc});
   claimTab().then(load);
 })();

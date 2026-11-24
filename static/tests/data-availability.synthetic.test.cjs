@@ -45,7 +45,7 @@ test('many lane warnings leave the portfolio visible and provide bounded availab
     const disclosure=summary.locator('summary');
     await disclosure.focus();await page.keyboard.press('Enter');
     assert.equal(await summary.locator('details').evaluate(el=>el.open),true);
-    assert.match(await summary.innerText(),/Map missing\s*— 8 lanes/);
+    assert.match(await summary.innerText(),/Map missing:\s*8 lanes/);
     assert.match(await summary.innerText(),/web_bounty \/ alpha \/ web0/);
     assert.match(await summary.innerText(),/binaries \/ alpha/);
     assert.match(await summary.innerText(),/Other warning: odd_<script>/);
@@ -137,10 +137,10 @@ test('disposable real loader distinguishes empty, missing, corrupt and unreadabl
     await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Load entire portfolio' && b.parentElement.hidden));
     await summary.locator('summary').click();
     let text=await summary.innerText();
-    assert.match(text,/Ledger inaccessible or invalid\s*— 1 lane/);
-    assert.match(text,/Coverage inaccessible or invalid\s*— 1 lane/);
-    assert.match(text,/Report content inaccessible or invalid\s*— 1 lane/);
-    assert.match(text,/Map missing\s*— 1 lane/);
+    assert.match(text,/Ledger inaccessible or invalid:\s*1 lane/);
+    assert.match(text,/Coverage inaccessible or invalid:\s*1 lane/);
+    assert.match(text,/Report content inaccessible or invalid:\s*1 lane/);
+    assert.match(text,/Map missing:\s*1 lane/);
     await page.getByLabel('Dashboard program').selectOption('web_bounty/alpha');
     await summary.locator('summary').click();text=await summary.innerText();
     assert.doesNotMatch(text,/Map missing/);
