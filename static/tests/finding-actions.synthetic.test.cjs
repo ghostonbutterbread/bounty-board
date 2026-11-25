@@ -279,6 +279,10 @@ test('drag selected rows onto a class row and one row onto a severity row',{time
   await page.getByRole('checkbox',{name:'Select finding A03'}).click();
   const source=page.locator('li[data-finding-id="A02"] a.link-button');
   const target=page.locator('.breakdown-row[data-class-name="idor"]');
+  // A manual pointer drag cannot reach a row outside the viewport: put the target
+  // row mid-screen first, clear of the sticky header (the dashboard's recon card
+  // moves the classes panel down).
+  await target.evaluate(n=>n.scrollIntoView({block:'center'}));
   await source.hover();await page.mouse.down();
   const t=await target.boundingBox();
   for(let i=0;i<5;i++)await page.mouse.move(t.x+20+i*10,t.y+t.height/2,{steps:3});
