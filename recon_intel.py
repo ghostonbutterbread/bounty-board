@@ -911,7 +911,10 @@ class ReconIntel:
         entry = self.cache.get(key)
         if entry is not None:
             self.cache.move_to_end(key)
-        fresh = entry is not None and entry['sig'] == sig and entry['level'] >= level
+        # Transient failures (a writer's lock, a budget overrun) are retried once the
+        # refresh interval has passed, even when the file signature is unchanged.
+        transient = entry is not None and (entry['error'] or {}).get('code') in ('locked', 'timeout')
+        fresh = entry is not None and entry['sig'] == sig and entry['level'] >= level and not transient
         recent = entry is not None and time.time() - entry['computed_at'] < self.refresh_interval and entry['level'] >= level
         if not fresh and not recent:
             self._schedule(kind, path, level, front=level > 0)

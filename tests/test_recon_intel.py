@@ -236,6 +236,30 @@ class ServiceTests(Base):
         self.assertGreater(fresh['computed_at'], computed)
         self.assertEqual(fresh['result']['urls']['value'], 99)
 
+    def test_locked_source_is_retried_without_a_file_change(self):
+        lane = make_lane(self.root)
+        path = lane / 'recon/url_index/url_index.sqlite'
+        svc = service(self.root, refresh_interval=0, query_budget=0.5)
+        self.addCleanup(svc.close)
+        writer = sqlite3.connect(path, timeout=0)
+        writer.execute('BEGIN EXCLUSIVE')
+        try:
+            svc.program('web_bounty', 'acme-demo', 'web')
+            self.assertTrue(svc.wait_idle(30))
+            locked = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']
+            self.assertEqual(locked['error'], {'code': 'locked'})
+        finally:
+            writer.rollback()
+            writer.close()
+        deadline = time.monotonic() + 30
+        while True:  # each request reschedules the transient failure until it succeeds
+            out = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']
+            if out['state'] == 'ready' or time.monotonic() > deadline:
+                break
+            svc.wait_idle(5)
+        self.assertEqual(out['state'], 'ready')
+        self.assertEqual(out['result']['urls']['value'], 98)
+
     def test_refresh_interval_limits_recompute(self):
         lane = make_lane(self.root)
         svc = service(self.root, refresh_interval=3600)
