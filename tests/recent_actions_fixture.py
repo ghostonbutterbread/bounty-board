@@ -43,6 +43,7 @@ programs = {
         finding('L011', 'Missing rate limit on OTP verification', 'rate-limit', 'LOW', submission={'state': 'submitted', 'result': 'duplicate'},
                 packet='l011-otp-rate-limit', target='auth.lantern.example'),
         finding('L012', 'Template injection in export filename', 'ssti', 'MEDIUM'),
+        finding('L013', 'Stored XSS in shared board titles', 'xss', 'EXCEPTIONAL', submission={'state': 'submitted', 'result': 'duplicate'}),
     ],
 }
 now = time.time()

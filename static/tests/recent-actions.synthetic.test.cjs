@@ -51,6 +51,13 @@ test('Recent pills save severity and submission through BBH, update every row of
   await page.goto(page.url().replace(/#.*$/,'')+'#/recent?within=all&order=newest');
   await page.locator('.recent-table tr[data-path="scratch/unmapped-notes.md"]').first().waitFor();
   assert.equal(await page.locator('.recent-table tr[data-path="scratch/unmapped-notes.md"] [data-recent-pick]').count(),0,'no pickers without a finding');
+  // Packet _meta/ files are hidden like generated navigation, shown with the same toggle.
+  assert.equal(await page.locator('.recent-table tr[data-path$="/_meta/notes.md"]').count(),0);
+  assert.equal(await panel(page).count(),0);
+  await page.getByLabel('Include generated and _meta files').check();
+  await page.locator('.recent-table tr[data-path="F001-stored-xss/_meta/notes.md"]').waitFor();
+  await page.getByLabel('Include generated and _meta files').uncheck();
+  await until(async()=>await page.locator('.recent-table tr[data-path$="/_meta/notes.md"]').count()===0,'_meta hidden again');
   await page.getByRole('link',{name:'Dashboard',exact:true}).click();
   await panelRow(page,REPORT).waitFor();
   await page.locator('[data-breakdown="class:xss"]').click();
@@ -135,6 +142,11 @@ test('N/A toggle: strikethrough and opacity, Hide N/A filter in the URL, hidden 
   assert.equal(await row.evaluate(n=>getComputedStyle(n).opacity),'0.45');
   assert.match(await row.locator('.na-title').evaluate(n=>getComputedStyle(n).textDecorationLine),/line-through/);
   assert.equal(await row.getByRole('button',{name:/^Unmark N\/A/}).getAttribute('aria-pressed'),'true');
+  // The panel remembers "show" per browser.
+  await page.reload();
+  await panelRow(page,EVIDENCE).waitFor();
+  await panel(page).getByRole('button',{name:'Hide N/A'}).waitFor();
+  assert.equal(await page.evaluate(()=>localStorage.getItem('bounty-board-recent-panel-show-na')),'1');
   // Recent view: hidden by default, count and Show; the filter is in the hash.
   await page.goto(`${url}#/recent?within=all&order=newest`);
   await page.locator('.recent-table tr[data-recent-row]').first().waitFor();
@@ -183,10 +195,12 @@ test('finding rows: metadata on one aligned line, title ellipsis, severity break
   const boxes=await rows.evaluateAll(list=>list.map(li=>{
     const r=s=>{const n=li.querySelector(s);if(!n)return null;const b=n.getBoundingClientRect();return {top:b.top,bottom:b.bottom,left:b.left,mid:(b.top+b.bottom)/2,h:b.height};};
     const title=li.querySelector('.frow-title');
+    const right=s=>li.querySelector(s).getBoundingClientRect().right;
     return {sev:r('.frow-sev .pick-trigger'),sub:r('.frow-subm .pick-trigger'),links:r('.row-links'),title:r('.frow-title'),subline:r('.frow-sub'),
+      sevRight:right('.frow-sev .pick-trigger'),subRight:right('.frow-subm .pick-trigger'),sevWidth:li.querySelector('.frow-sev .sev').getBoundingClientRect().width,
       ellipsis:getComputedStyle(title).textOverflow,overflow:title.scrollWidth>title.clientWidth};
   }));
-  assert.ok(boxes.length>=2);
+  assert.ok(boxes.length>=3,'xss has a long title, a MEDIUM and an EXCEPTIONAL row');
   for(const b of boxes){
     // Severity, submission and links share one line (vertical centres within 2 px).
     assert.ok(Math.abs(b.sev.mid-b.sub.mid)<2 && Math.abs(b.sev.mid-b.links.mid)<2,`one line ${JSON.stringify(b)}`);
@@ -194,8 +208,11 @@ test('finding rows: metadata on one aligned line, title ellipsis, severity break
     assert.equal(b.ellipsis,'ellipsis');
     assert.ok(b.title.h<24,'title stays on one line');
   }
-  // Columns line up across rows.
-  assert.ok(boxes.every(b=>Math.abs(b.sev.left-boxes[0].sev.left)<1 && Math.abs(b.sub.left-boxes[0].sub.left)<1),'aligned columns');
+  // Pills sit together (6 px gap) and the cluster's right edge lines up across rows.
+  for(const b of boxes)assert.ok(Math.abs(b.sub.left-b.sevRight-6)<=1.5,`pills together: gap ${b.sub.left-b.sevRight}`);
+  assert.ok(boxes.every(b=>Math.abs(b.subRight-boxes[0].subRight)<1),'cluster right edges aligned');
+  assert.ok(boxes.every(b=>Math.abs(b.links.left-boxes[0].links.left)<1),'link column aligned');
+  assert.ok(boxes.every(b=>b.sevWidth<=133),'a long severity is capped');
   assert.ok(boxes.some(b=>b.overflow),'the long title is truncated, not wrapped');
   // Severity breakdown: pills open and save.
   await page.locator('[data-breakdown^="sev:"]', {hasText:'LOW'}).first().click();
