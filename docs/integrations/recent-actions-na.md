@@ -34,11 +34,14 @@ Full details in `BACKEND_API.md` (`GET /api/recent-reports`, `POST /api/report-n
 Reference: the Recent panel row Ryu liked. Finding rows in the Severity breakdown and Finding classes drill-downs now follow it:
 
 - Left: checkbox, then the title (strongest: 600 weight, normal text colour, accent only on hover) on one line with an ellipsis and the full title in the tooltip; under it a muted subline: `FID · status · class` (class only where the list is not already grouped by class), the archive badge, template-placeholder badge and the actionable "Possible report" link (warning colour).
-- Right: one cluster: severity and submission pills side by side with a fixed 6 px gap (`.frow-pills`), then a fixed-width icon column (report `fa-file-text-o`, evidence `fa-paperclip`, a muted `fa-file-o` with the reason when there is no report). Icons have `aria-label`s and tooltips with the path.
-- Alignment (revised in the follow-up): each row sizes its own pill cluster and right-aligns it against the fixed icon column, so the cluster's right edges and the icons line up down the list while a row with short pills gives its title the freed width. The first version shared columns across rows (subgrid), which left a large gap between the pills whenever one row had a wide severity (Ryu's note on Finding classes). A raw severity longer than 132 px is cut off with an ellipsis (the full value stays in the picker's label), so odd ledger values can't push the title out. The full-width Recent panel keeps its fixed columns (`--col-sev`, `--col-subm`, `--col-when`, `--col-na`).
+- Right (revised again in the design follow-up, `1117ef7`): the title is the only flexible column, so the cluster is pinned to the row's right edge: severity pill, submission pill (6 px apart), then a fixed 58 px icon column with room for both the report and evidence icons (report `fa-file-text-o` first, evidence `fa-paperclip` second, a muted `fa-file-o` with the reason when there is no report). Every row's pills end at the same x and the icons line up down the list. Icons have `aria-label`s and tooltips with the path.
+- Markup: `.frow-main` and `.frow-pills` are `display:contents`, so the title, subline and pills are placed straight onto one grid per row. The DOM order (title, subline, severity, submission, icons) is unchanged, so Tab order and the existing finding-actions hooks are too.
+- Narrow panels (container query on the list, ≤ 560 px, which is the half-width dashboard panel at 1360 to 1440 px): the submission pill moves into the muted subline after "ID · status"; the right side holds only the severity pill and icons; the title may wrap to two lines (`line-clamp: 2`), with the full title in the tooltip (the tooltip now also fires for vertically clamped `.truncate` text). A raw severity longer than 132 px is cut off with an ellipsis; the full value stays in the picker's label.
+- Phone-sized lists (≤ 420 px): severity and submission share a third line under the subline; the icons sit top-right beside the title.
+- Wide panels (> 560 px, e.g. 1920 px screens): one-line title with an ellipsis, then severity and submission together on the same line, pinned right.
+- The full-width Recent panel keeps its fixed columns (`--col-sev`, `--col-subm`, `--col-when`, `--col-na`).
 - Rhythm: 7 px vertical padding, 1 px separators, quiet row hover, no layout shift (pills keep their size; hover only adds a ring or background). Colour only where it means something: severity tints, submission accent/result tones, Possible report warning; everything else neutral tokens. Both themes use only existing tokens.
 - N/A rows: strikethrough title, opacity 0.45, rising to 0.8 on hover or focus so they stay readable and clickable. The toggle is a small bordered "✓ N/A" chip: faint check when off, filled when on.
-- Phone (≤ 650 px): the right cluster wraps as one block under the title (pills and icons on one line), no horizontal overflow.
 - Width: on the dashboard `.page` may grow to 1960 px (was 1480), so wide screens are used; the two-column grid keeps each panel's line length readable.
 
 ## Decisions made
@@ -85,6 +88,17 @@ Commits `0e8b831` (_meta hidden), `fff7368` (stale-mark pruning), `c0f3dc8` (pan
 - `recent-actions`, `report-links-recent`, `finding-actions` and `dashboard-coverage` run together: **29 tests, 29 pass**.
 - One earlier run of `recent-actions` alone had test 1 fail once while the machine load rose from 3 to 14; it passed alone right after and in the next two full-file runs (7/7, then the 29/29 run above). I didn't capture the error; treated as a load flake, not proven.
 - Not rerun after the follow-up: the full `safe_suite.py` and `npm test` (last full results above).
+
+### Design follow-up (title width, pinned and aligned cluster, narrow panels)
+
+Commits `1117ef7` (CSS and the tooltip tweak) and `1db716e` (tests).
+
+- `recent-actions.synthetic` layout tests were rewritten and one added; the file now has 8 tests:
+  - Half-width panel at 1360 px: severity right edges and the icon column (left and right) aligned across rows; the icon column is at least 50 px; submission sits in the subline; the title gets at least 45% of the row width; the title is at most two lines and the long one does wrap; a long severity is capped. Tab order goes title → severity → submission. Severity breakdown pills still save.
+  - Wide panel at 1920 px (new): severity, submission and icons on one line, 6 px apart; submission right edges and icon column aligned; title at least 45% of the row and one line.
+  - Phone 375 px, dark: pills under the subline; icons top-right beside the title, never overlapping the pills; icon column aligned; no horizontal overflow.
+- `recent-actions`, `finding-actions`, `dashboard-coverage` and `report-links-recent` run together: **30 tests, 30 pass**. Load average was about 8 to 10.
+- Screenshots regenerated (all 25 "after" files). A phone check found the icon column in a stray implicit grid column; fixed before the commit.
 
 ### Screenshots (synthetic)
 
