@@ -50,12 +50,39 @@ Reference: the Recent panel row Ryu liked. Finding rows in the Severity breakdow
 
 ## Evidence
 
-(Filled in below after the runs.)
+Ghost, Python 3.14, Node 22, Playwright 1.60, Chrome headless, `TMPDIR=/home/ryushe/.hermes/cache/scratch/bb-agents/recent`, synthetic fixtures only, `--test-concurrency=1`, load average about 8 to 11.
+
+- New Python tests `tests/test_report_na.py` (19) and 9 new in `tests/test_recent_reports.py`. They cover: mapping (packet `EVIDENCE.md` and the submission report map to one FID, owner paths, legacy names, FID not in the ledger, duplicate FIDs, navigation, top-level files, payload equal to `/api/data`, `touch()` freshness); the store (set and unset, persistence across a restart, mode 0600, the size bound, the path cap, a corrupt file set aside, an update read error not overwriting, a display read error showing unavailable, a state dir inside the root refused); the endpoint (works with the writer off, trust failures, path validation including symlinked file and directory, 404, unmarking a deleted file, 503 without a store); and `hide_na`, `na_hidden`, `na_hidden_page` and the flags in the lane payloads. With `test_archive_state` and `test_search`: **88 run, OK**.
+- `python3 -W error::ResourceWarning tests/safe_suite.py`: **354 run, OK, 1 skipped** (the real-BBH test, excluded by design), 649 s.
+- New browser tests `static/tests/recent-actions.synthetic.test.cjs` (fixture `tests/recent_actions_fixture.py`, BBH packet shape): **7/7 pass**. They cover:
+  - Recent pills save severity and submission through the BBH paths; every row of the finding follows (both panel rows and the drill-down); Undo; a result after Submitted; no pickers on unmapped rows.
+  - A stale pick is refused, not overwritten.
+  - The context menu items, open in new tab, Copy ID, and the keyboard opener.
+  - Writer off: the pills are disabled with the hint, and N/A still works.
+  - N/A: hidden with "1 N/A hidden", store file mode 0600, the report file unchanged, opacity 0.45 and line-through after "show", `aria-pressed`, the Recent view's Hide N/A with `na=show` in the hash and back, keyboard unmark keeping focus, Undo, the Reports list toggle and count after a reload.
+  - No state dir: the toggle is disabled with the reason.
+  - Aligned layout at 1360 px: severity, submission and links share one line (centres within 2 px), columns aligned across rows, the title on one line with an ellipsis; Severity breakdown pills save severity and submission.
+  - Phone 375 px, dark: the pills wrap as one line under the title, with no overflow.
+- Touched suites run together (`finding-actions`, `report-links-recent`, `ui-redesign`, `taxonomy-coverage`, `ledger-actions`): **34/34 pass**. No existing test needed changing.
+- `npm test` (26 files): **187 tests, 186 pass, 1 fail**, 509 s. The failure is `ui-redesign` "multi-select filters, chips, persisted sort and row actions": the menu's first item was not focused yet (line 147), the same load flake the report-links dossier recorded. The file alone: **7/7**. It is about the Findings-table kebab menu, which this branch does not change.
+
+### Screenshots (synthetic)
+
+`node static/tests/tools/recent-actions-screenshots.cjs $TMPDIR/screens before` (run on a clean `git archive` of `52f1b48`) and `... after` (this branch) wrote 25 PNGs each to `/home/ryushe/.hermes/cache/scratch/bb-agents/recent/screens/`: `{before,after}-{dashboard-recent,dashboard-classes,dashboard-severity,dashboard-full,recent-view}-{desktop-light,desktop-dark,wide-light,phone-light,phone-dark}.png` (desktop 1440x900, wide 1920x1080, phone 375x812). The "after" desktop-light run marks one report N/A first, so later shots show "1 N/A hidden" (marks are server-side, so every later context sees it). Checked by eye. Problems fixed that way: the drill-down title was squeezed to about 120 px by fixed columns (now subgrid columns sized to the content), and a separator dot was underlined beside "Possible report".
 
 ## Gaps and limits
+
+- On very wide screens the full-width Recent panel puts a wide gap between the title and its pills (unchanged from before; Ryu liked that panel as is).
 
 - Moving or renaming a report drops its mark (keys are paths). There is no cleanup of stale keys; they are bounded by the 10,000-entry cap.
 - The dashboard panel's "show" choice is not remembered across reloads.
 - Recent rows reflect ledger edits made outside the Board within the 5 s index interval (or immediately after a Board write).
 - Undo of a Recent pick for a finding that is not in the loaded workspace data (cold start) reports "no longer loaded" instead of undoing; refresh first.
 - Multi-select and drag are not offered on Recent rows (they are report rows; the finding lists keep them).
+
+## Decisions for Ryu
+
+- Should the dashboard panel remember "show N/A" across reloads, the way the Recent view and Reports list remember it? It doesn't today.
+- Should `_meta/` files inside a packet show in Recent at all? Today they show and map to the finding. They could be hidden by default, like generated navigation.
+- Should finding rows also get an N/A toggle on their report icon? Today they only show the state.
+- Should stale N/A marks (from moved or renamed reports) be cleaned up automatically? Today they are only bounded by the cap.
