@@ -3,6 +3,7 @@
 - Branch: `feat/board-sandbox-terminal`; base `c5cd47c`.
 - Owner surfaces: `terminal_service.py` and `terminal_*.py` (separate process), `sandbox/` (image), `static/modules/sandbox-terminal.js|css` (drawer and code-block controls), `static/vendor/xterm/` (xterm.js 5.5.0 + addon-fit 0.11.0, MIT, unmodified).
 - Ryu's request, short: from the report view, open a small sandboxed terminal already in the report's folder, run the PoC steps from the report with play buttons, tick them off, and save the output. Usable from several devices. Play buttons and check marks must never end up in the report text. Tailnet access for his account; otherwise a username and password.
+- Lifecycle change (approved by Ryu): sandboxes pause instead of closing, so coming back to a report resumes the same shell; removal only after 4 hours without a viewer.
 - Course correction (Ryu): "I want simplicity... what happens when I want to update the PoC, does the agent have to remember to recopy?... seamless integration where I can have the agent improve it then see it immediately." The report folder is therefore **bind-mounted read-write**, not copied.
 
 ## How it works
@@ -24,11 +25,19 @@ browser (Board origin https://<node>:9001)
                                         in-container forwarder 127.0.0.1:3128 → /run/bbterm/proxy.sock
 ```
 
-- **Drawer.** In the report view a Terminal button (in the live editor bar, or under the Reports heading in the non-live view) and Ctrl+` toggle a bottom drawer. It is resizable (drag or arrow keys on the handle), remembers open state and height per browser (`localStorage` `bounty-board-terminal:v1`), and is a full-width sheet on phones (60% of the screen by default). Status line: Connected / Connecting / Reconnecting / Sign-in needed / Service unavailable, session age, idle timeout, viewer count, mounted folder, "N of M steps checked", Reset sandbox (two-step confirm), Save output as evidence, Close. EasyMDE's full-screen side-by-side mode is shortened so the drawer never covers it.
+- **Drawer.** In the report view a Terminal button (in the live editor bar, or under the Reports heading in the non-live view) and Ctrl+` toggle a bottom drawer. It is resizable (drag or arrow keys on the handle), remembers open state and height per browser (`localStorage` `bounty-board-terminal:v1`), and is a full-width sheet on phones (60% of the screen by default). Status line: Connected / Connecting / Reconnecting / Sign-in needed / Service unavailable (its tooltip says when the sandbox pauses and is removed; the header itself stays quiet), session age, viewer count, mounted folder, "N of M steps checked", Reset sandbox (two-step confirm), Save output as evidence, Close. EasyMDE's full-screen side-by-side mode is shortened so the drawer never covers it.
 - **Play buttons and check marks.** The module decorates every `<pre>` in the rendered preview (`.editor-preview`, `.editor-preview-side`, `#report-preview`) with a Board-only bar: language label, ▶ (types the block, no Enter; Shift+click also sends Enter), Run (shown for shell-like languages: none, shell, bash, sh, zsh, console, shell-session, terminal, curl), and a Checked box. Every block gets ▶ and Checked, whatever its language. Text goes in through xterm's `paste()`, so multi-line blocks use bracketed paste when the shell has it on (bash does) and arrive as one command. `console`-style blocks type only their `$ ` lines. `app.js`'s Markdown renderer now adds `data-lang` to `<pre>` (one-line change).
 - **Nothing reaches the report.** Controls exist only in the preview DOM (never in the editor or the file), carry `user-select: none`, and a `copy` handler strips them from any selection, both text and HTML. The browser test checks the file and the editor value are byte-identical after typing, running and checking, and that a copy of the whole preview contains no control text or markup.
 - **Check state.** Stored by the terminal service in `<state-dir>/checks.sqlite3`, keyed by report selector and block key `sha256(normalised text)[:32]:<n>` (n counts earlier identical blocks). Editing a block resets only that block; moving blocks keeps their marks; duplicates are told apart by order. Normalisation ignores trailing whitespace and leading/trailing blank lines. `terminal_checks.block_keys` (Python) and `blockKeys` (browser, synchronous SHA-256) are the same; the browser test asserts equality on the fixture. Shared across devices (5 s poll plus window focus), survives restarts; max 500 keys per report.
-- **Sessions.** One per report selector (family, program, lane, path), created on first attach, shared by every viewer: output fans out to all, input from any, a new viewer gets the last 256 KiB of output first. The service owns the PTY, so closing tabs does not kill the shell. Each viewer has its own send queue (a slow phone is dropped at 4 MiB backlog instead of stalling the shell). If the shell exits, Enter starts a new one in the same container. Idle timeout 30 min after the last viewer leaves (`--idle-timeout`), max 4 sessions (`--max-sessions`): when full, the viewerless session idle longest is closed; if every session has a viewer, the new one is refused with a message. Reset sandbox recreates the container. Stop closes everything; start reaps containers whose name has the prefix **and** that carry the label `org.bountyboard.terminal.prefix=<prefix>`.
+- **Sessions.** One per report selector (family, program, lane, path), created on first attach, shared by every viewer: output fans out to all, input from any, a new viewer gets the last 256 KiB of output first. The service owns the PTY, so closing tabs does not kill the shell. Each viewer has its own send queue (a slow phone is dropped at 4 MiB backlog instead of stalling the shell). If the shell exits, Enter starts a new one in the same container. Reset sandbox recreates the container. Stop closes everything; start reaps containers whose name has the prefix **and** that carry the label `org.bountyboard.terminal.prefix=<prefix>`, so **a service restart drops paused sessions** (files are kept; the next open starts a fresh sandbox).
+- **Lifecycle: running → paused → removed** (`SessionManager`, one reaper pass every 10 s):
+  - *running*: at least one viewer, or no viewer for less than `--pause-after` (default 300 s, the grace period for a reload or a quick switch);
+  - *paused*: `docker pause` (cgroup freezer: processes stop, memory stays) once no viewer has been attached for `--pause-after`. Opening the report again runs `docker unpause` and reattaches to the **same** session: same shell process, cwd, history, background jobs and scrollback, no visible restart; the drawer shows a short "Resumed" toast;
+  - *removed*: `docker rm -f` once no viewer has been attached for `--remove-after` (default 4 h, measured from when the last viewer left, paused or not). The next open creates a fresh sandbox and says "This sandbox was removed after 4 hours idle; started a fresh one." Files persist because the folder is mounted.
+  - Capacity `--max-sessions` (default 12, 1 to 32): when a new report needs a sandbox and the cap is reached, the paused sandbox whose last viewer left longest ago is removed first, then a running viewerless one; never one with a viewer. If every slot has a viewer: "All 12 sandboxes have someone attached. Close the terminal on another report and try again."
+  - Memory guard: before creating a sandbox (new, recreated or reset) the service reads `MemAvailable` from `/proc/meminfo` and refuses below `--min-free-memory` (default 2 GiB; `0` disables): "Hoster is low on memory (1.5 GB free); close a terminal or try later." Unpausing is always allowed.
+  - Races: lock order is always session lock, then manager lock; the reaper re-checks viewers and timers under the session lock, so a viewer arriving while a pause is in flight waits for it and then unpauses (tested). Pause, unpause and removal are idempotent ("already paused" / "not paused" count as success). A failed pause is logged to stderr and retried on the next pass. A container that vanished outside the service is treated as removed: a pause marks the session removed; an attach (paused or running) recreates it with "The previous sandbox was gone; started a fresh one."
+  - `--idle-timeout` still works as the old name of `--remove-after`.
 - **Mounted folder** (`terminal_sandbox.resolve_mount`, re-resolved on every session start and reset):
   1. the dedicated folder `report_artifacts` resolves (REPORT.md/EVIDENCE.md folder or the finding's `report_dir`);
   2. else the report file's own folder, when it is below `reports/`, holds no other top-level `.md` and is not shared with another finding;
@@ -70,7 +79,7 @@ Not covered:
 | --- | --- | --- |
 | `GET /healthz` | none | `{ok: true}` |
 | `GET /login`, `/login.js`, `/login.css` | Host check | password page (CSP `default-src 'none'`, `frame-ancestors 'none'`) |
-| `GET /api/status` | yes, else 401 `{error: login_required, login_url}` | `{user, method: tailnet\|password, idle_timeout, max_sessions}` |
+| `GET /api/status` | yes, else 401 `{error: login_required, login_url}` | `{user, method: tailnet\|password, pause_after, remove_after, idle_timeout (= remove_after), max_sessions}` |
 | `POST /api/login` `{username, password}` / `POST /api/logout` | Origin + CSRF header | 200 + cookie; 401 invalid, 429 locked, 403 disabled |
 | `GET /api/checks?family&program&lane&path` | yes | `{checks: {key: epoch}}` |
 | `POST /api/checks` `{family, program, lane, path, key, checked}` | yes + Origin + CSRF | `{checks}`; 400 bad key, 409 cap reached |
@@ -79,7 +88,7 @@ Not covered:
 | `POST /api/evidence` `{selector}` | yes + Origin + CSRF | `{relative, name}`; 409 no session / read-only root / unsafe folder |
 | `GET /ws?…` (WebSocket) | yes + Origin | client text `{"t":"in","d":…}`, `{"t":"resize","cols","rows"}`; server binary = terminal output, text = `hello{session}`, `viewers{count}`, `reset`, `exit`, `error{code,message}`, `closed{message}` |
 
-Session info: `{id, created, idle_timeout, folder, workdir, mount_reason, viewers, notes, running}`.
+Session info: `{id, created, pause_after, remove_after, idle_timeout, folder, workdir, mount_reason, viewers, notes, running, paused}`. The WebSocket `hello` carries `event`: `started`, `attached`, `resumed`, `recreated_idle`, `recreated_vanished` or `reset`. Errors on attach include `low_memory` and `too_many_sessions`.
 
 WebSocket server (`terminal_ws.py`, RFC 6455, server side only, no extensions/subprotocols): client frames must be masked; RSV bits, unknown opcodes, fragmented or >125-byte control frames, continuation without start, a new data frame mid-message and 64-bit lengths with the MSB set close with 1002; frames or messages over 256 KiB close with 1009 before the payload is read; invalid UTF-8 text or close reason closes with 1007; close codes are validated and echoed; pings are answered; the service pings every 20 s and drops peers silent for 75 s. A standard library has no WebSocket server, and the alternatives (polling, SSE plus POST) would add latency for keystrokes, so a minimal strict implementation with 35 unit tests was chosen.
 
@@ -92,7 +101,9 @@ WebSocket server (`terminal_ws.py`, RFC 6455, server side only, no extensions/su
 - Separate process, own systemd unit, loopback only; shell-capable code never runs inside app.py.
 - Filtering forward proxy over a mounted Unix socket instead of host firewall rules (no sudo on Hoster).
 - Check marks in the terminal service, not the Board, so the Board stays free of new write endpoints; when the service is down the marks are unavailable (shown disabled).
-- Eviction of the longest-idle viewerless session when 4 are open, so quickly moving between reports does not hit a wall for 30 minutes.
+- Pause instead of close (Ryu approved): an idle sandbox measured about 16 MB and pause/unpause about 0.1 s here, so keeping 12 paused sandboxes costs little and coming back is instant. At the cap, paused sandboxes are removed before running ones and attached ones never.
+- Memory guard on creation only; unpausing never refuses, because the memory is already held.
+- Ryu kept the defaults: per-report folders for flat and bucket layouts, the folder mounted read-write, no extra image tools.
 - Login lockout is global (no trustworthy client address behind Serve).
 - Debian `stable-slim` base. Debian's Node is older than the release that honours `NODE_USE_ENV_PROXY` (Node 24 / 22.21), so plain Node `fetch` may ignore the proxy; curl, Python and httpie honour it.
 
@@ -151,7 +162,8 @@ Do these on Hoster as the Board's user. Review existing Serve config first (`tai
    WorkingDirectory=%h/path/to/bounty-board
    ExecStart=/usr/bin/python3 %h/path/to/bounty-board/terminal_service.py --root %h/Shared --port 9011 \
      --allowed-origin https://<node>:9001 --allow-tailnet-user ryushe.dev@gmail.com \
-     --password-hash-file %h/.config/bounty-board/terminal.hash --image bbterm-sandbox:latest
+     --password-hash-file %h/.config/bounty-board/terminal.hash --image bbterm-sandbox:latest \
+     --pause-after 300 --remove-after 14400 --max-sessions 12 --min-free-memory 2G
    KillSignal=SIGTERM
    TimeoutStopSec=60
    Restart=on-failure
@@ -160,7 +172,7 @@ Do these on Hoster as the Board's user. Review existing Serve config first (`tai
    [Install]
    WantedBy=default.target
    ```
-   `systemctl --user daemon-reload && systemctl --user enable --now bounty-board-terminal`. Stopping it removes every sandbox container; starting reaps leftovers (`bbterm-` prefix plus label).
+   `systemctl --user daemon-reload && systemctl --user enable --now bounty-board-terminal`. Stopping it removes every sandbox container, paused ones included; starting reaps leftovers (`bbterm-` prefix plus label). A restart therefore drops paused sessions (the files stay in the report folders).
 4. Board: add `--terminal-url /terminal/` to the existing app.py unit and restart it.
 5. Serve: `tailscale serve --bg --https=9001 --set-path /terminal http://127.0.0.1:9011`. The service accepts paths with or without the prefix.
 6. Verify on the real host:
@@ -168,12 +180,15 @@ Do these on Hoster as the Board's user. Review existing Serve config first (`tai
    - From a tailnet device: open a report, press Ctrl+`, run `id; pwd; ls` (host UID, `/report`, the report's files), `curl -sI https://example.com` (works), then each of these must print "Blocked by sandbox egress policy": `curl -s http://127.0.0.1:9001/`, `curl -s http://172.17.0.1/`, `curl -s http://192.168.1.1/`, `curl -s http://100.100.100.100/`, `curl -s http://169.254.169.254/`; `curl --noproxy '*' -s https://example.com` must fail (no network); `ls /report/..` must not show other reports.
    - `docker inspect bbterm-<id>` → NetworkMode none, ReadonlyRootfs true, CapDrop [ALL], SecurityOpt [no-new-privileges], two mounts only.
    - From a device signed in as a different tailnet user or a tagged device: the drawer shows "Sign-in needed"; the password works; five wrong passwords lock sign-in for 15 minutes.
+   - Lifecycle: start `sleep 1000 &` in a terminal, close the drawer, wait 5 minutes: `docker ps --filter name=bbterm-` shows `(Paused)`; reopen the report: "Resumed", `jobs` still lists the sleep. `docker stats --no-stream` shows the idle sandbox's memory.
    - Save output as evidence → a new `validation/terminal-*.txt` in the report folder, owned by the host user, visible in the artifacts panel.
 
 ## Decisions for Ryu
 
+Questions 1, 2 and 5 were answered: keep the per-report folder, keep read-write, no extra tools.
+
 1. Folder mounting for reports that sit directly in `reports/` or in a shared bucket folder: a new `reports/<name>/` folder next to the report (current), or refuse the terminal for those reports?
 2. Should a sandbox be allowed to delete files in the report folder at all, or should the folder be mounted read-only with a separate writable scratch folder? (Current: read-write, as asked.)
-3. Idle timeout 30 min, 4 sessions, 1 GB memory, 1 CPU, 256 processes per sandbox: keep?
+3. (Answered: pause after 5 min, remove after 4 h, 12 sandboxes, 2 GiB free-memory floor.) 1 GB memory, 1 CPU, 256 processes per sandbox: keep?
 4. Should check marks reset when the report is renamed or moved? (They are keyed by path, so they do today.)
 5. Extra tools for the image (for example Go, nuclei, a newer Node that honours the proxy variables)?
