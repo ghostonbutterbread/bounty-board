@@ -130,6 +130,23 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     await page.goto(origin + '/#/recon');
     await page.locator('.ri-overview').waitFor();
 
+    // Review 9 blocker 2: control characters are shown escaped and never offered for copying.
+    await page.locator('#ri-program').selectOption('web_bounty/globex-demo|web');
+    const evil = page.locator('[data-ri-hunt="param"]').filter({hasText: 'redirect_url'});
+    await evil.waitFor({timeout: 20000});
+    assert.match(await evil.innerText(), /\\x1b\[201~\\x15touch PWNED\\x0dredirect_url/);
+    assert.equal(await evil.locator('[data-ri-copy]').count(), 0);
+    assert.equal(await evil.locator('button[data-ri-copy-blocked][disabled]').count(), 3); // URL, curl, bbh next
+    assert.match(await evil.innerText(), /contains control characters/);
+    assert.equal(await evil.locator('a.ri-ext').count(), 0); // the escaped text is not the real URL: no link
+    const evilHost = page.locator('tr[data-ri-host]').filter({hasText: 'evil\\u202e.example.test'});
+    assert.equal(await evilHost.count(), 1);
+    assert.equal(await evilHost.locator('button[data-ri-copy-blocked][disabled]').count(), 1);
+    const hostileText = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\ufeff]/;
+    assert.equal(hostileText.test(await page.locator('#recon-intel-host').evaluate(el => el.innerHTML)), false);
+    // Ordinary items in the same view still copy.
+    assert.ok(await page.locator('[data-ri-hunt="param"] [data-ri-copy]').count() > 0);
+
     // Empty states explain what produces the data.
     await page.locator('#ri-program').selectOption('web_bounty/initech-demo|web');
     await page.locator('[data-ri-empty="url_index"]').waitFor({timeout: 20000});

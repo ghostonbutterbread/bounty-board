@@ -98,3 +98,5 @@
   .ri-bars li{grid-template-columns:minmax(0,1fr) 60px auto}
   .ri-bars li .hint{display:none}
 }
+.ri-copy-blocked{display:inline-flex;align-items:center;gap:4px}
+.ri-unsafe{color:var(--warning);font-size:var(--text-xs);font-weight:600}

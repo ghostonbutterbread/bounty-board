@@ -51,3 +51,32 @@ test('depth gap ranks surface per test run', () => {
   const tested = {urls: {value: 1000}, js_files: {value: 10}, test_runs: {value: 100}};
   assert.ok(ri.depthGap(big) > ri.depthGap(tested));
 });
+
+// Review 9 blocker 2: nothing with terminal-active or invisible characters reaches the clipboard.
+test('command builders refuse control, C1, bidi and invisible characters', () => {
+  const hostile = {
+    'bracketed paste end': '\x1b[201~',
+    'carriage return': 'a\rb',
+    'Ctrl-U': 'a\x15b',
+    'right-to-left override': 'a‮b',
+    'paste injection key': '\x1b[201~\x15touch PWNED\rredirect_url',
+  };
+  for (const [name, value] of Object.entries(hostile)) {
+    assert.equal(ri.bbhNext('acme-demo', 'open-redirect', value), null, `bbhNext param: ${name}`);
+    assert.equal(ri.bbhNext(value, 'ssrf', 'url'), null, `bbhNext program: ${name}`);
+    assert.equal(ri.bbhNext('acme-demo', value, 'url'), null, `bbhNext lane: ${name}`);
+    assert.equal(ri.bbhNext('acme-demo', 'ssrf', 'url', value), null, `bbhNext host: ${name}`);
+    assert.equal(ri.bbhStatus('acme-demo', value), null, `bbhStatus host: ${name}`);
+    assert.equal(ri.bbhStatus(value, 'cdn.example.test'), null, `bbhStatus program: ${name}`);
+    assert.equal(ri.curlCommand(`https://a.example.test/?q=${value}`), null, `curlCommand: ${name}`);
+    assert.throws(() => ri.shellQuote(value), /control characters/, `shellQuote: ${name}`);
+    assert.equal(ri.isCopySafe(value), false, name);
+  }
+  const listed = [...Array(0x20).keys(), 0x7f, ...Array.from({length: 0x20}, (_, i) => 0x80 + i), 0x061c,
+    ...[0x200b, 0x200c, 0x200d, 0x200e, 0x200f], ...[0x202a, 0x202b, 0x202c, 0x202d, 0x202e],
+    ...Array.from({length: 10}, (_, i) => 0x2060 + i), 0xfeff, 0x2028, 0x2029, 0x00ad];
+  for (const code of listed) assert.equal(ri.bbhNext('p', 'xss', `k${String.fromCharCode(code)}`), null, `U+${code.toString(16)}`);
+  // Ordinary values, including non-ASCII letters, still build commands.
+  assert.equal(ri.isCopySafe('https://a.example.test/?q=ü'), true);
+  assert.equal(ri.bbhNext('acme-demo', 'ssrf', 'url', 'cdn.example.test'), "bbh agents/url_ingest.py next 'acme-demo' --lane 'ssrf' --param 'url' --host 'cdn.example.test' --limit 20");
+});

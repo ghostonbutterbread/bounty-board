@@ -22,6 +22,7 @@ JS library are never touched; ledger.json of the library is not read.
 """
 import json
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -98,14 +99,36 @@ def to_epoch(value):
     return parsed.timestamp()
 
 
-def text(value, limit=TEXT_LIMIT):
-    """JSON-safe short string (SQLite may hold BLOBs or numbers in TEXT columns)."""
-    if value is None:
-        return None
+# Characters a terminal or editor can act on or hide: C0, DEL, C1, soft hyphen,
+# bidi controls and invisible separators. Target-controlled values (BBH stores
+# parse_qsl-decoded parameter keys) may contain them; a pasted ESC[201~ ends
+# bracketed paste and the rest runs as keystrokes.
+UNSAFE_CHARS = re.compile('[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\ufeff]')
+
+
+def _as_str(value):
     if isinstance(value, bytes):
         value = value.decode('utf-8', 'replace')
-    value = str(value).replace('\x00', '')
-    value = value.encode('utf-8', 'replace').decode('utf-8')
+    return str(value).encode('utf-8', 'replace').decode('utf-8')
+
+
+def is_unsafe(*values):
+    """True when any value contains a character UNSAFE_CHARS would escape."""
+    return any(v is not None and UNSAFE_CHARS.search(_as_str(v)) is not None for v in values)
+
+
+def escape_unsafe(value):
+    """Display-safe form: unsafe characters become \\xNN or \\uNNNN."""
+    return UNSAFE_CHARS.sub(lambda m: f'\\x{ord(m.group()):02x}' if ord(m.group()) < 0x100 else f'\\u{ord(m.group()):04x}', _as_str(value))
+
+
+def text(value, limit=TEXT_LIMIT):
+    """JSON- and display-safe short string (SQLite may hold BLOBs or numbers in
+    TEXT columns). Unsafe characters are escaped; callers that offer a value for
+    copying also send an unsafe_chars flag computed from the raw value."""
+    if value is None:
+        return None
+    value = escape_unsafe(value)
     return value if len(value) <= limit else value[:limit - 1] + '…'
 
 
@@ -363,6 +386,14 @@ class Collector:
     def __init__(self):
         self.errors = {}
         self.approximate = False
+        self.unsafe_hosts = set()
+
+    def host(self, raw):
+        """Display-safe host key; remembers hosts whose raw value had unsafe characters."""
+        key = text(raw) or ''
+        if is_unsafe(raw):
+            self.unsafe_hosts.add(key)
+        return key
 
     def fail(self, section, code, detail=''):
         self.errors[section] = {'code': code, **({'detail': detail} if detail else {})}
@@ -467,7 +498,7 @@ def host_counts(db, result, c, hosts, max_id, url_total, small, budget, windows,
                             "SUM(CASE WHEN param_keys IS NOT NULL AND param_keys NOT IN ('', '[]') THEN 1 ELSE 0 END) "
                             'FROM urls GROUP BY host')
             for host, n, routes, params in rows:
-                per_host[text(host) or ''] = {'urls': n, 'routes': routes, 'param_urls': params or 0, 'urls_exact': True}
+                per_host[c.host(host)] = {'urls': n, 'routes': routes, 'param_urls': params or 0, 'urls_exact': True}
             result['routes'] = number(db.one('SELECT COUNT(DISTINCT route_hash) FROM urls'))
             result['param_urls'] = number(sum(v['param_urls'] for v in per_host.values()))
             result['host_counts'] = 'exact'
@@ -481,7 +512,7 @@ def host_counts(db, result, c, hosts, max_id, url_total, small, budget, windows,
     scale = (url_total / sampled) if sampled else 0
     routes_seen = set()
     for host, route, keys in rows:
-        entry = per_host.setdefault(text(host) or '', {'urls': 0, 'routes': 0, 'param_urls': 0, '_routes': set(), 'urls_exact': False})
+        entry = per_host.setdefault(c.host(host), {'urls': 0, 'routes': 0, 'param_urls': 0, '_routes': set(), 'urls_exact': False})
         entry['urls'] += 1
         entry['_routes'].add(route)
         routes_seen.add(route)
@@ -492,7 +523,7 @@ def host_counts(db, result, c, hosts, max_id, url_total, small, budget, windows,
         entry['routes'] = len(entry.pop('_routes'))  # distinct routes seen in the sample: a lower bound
         entry['param_urls'] = round(entry['param_urls'] * scale)
     for host in hosts:
-        per_host.setdefault(host, {'urls': None, 'routes': None, 'param_urls': None, 'urls_exact': False})
+        per_host.setdefault(c.host(host), {'urls': None, 'routes': None, 'param_urls': None, 'urls_exact': False})
     # Long-tail hosts are invisible to a sample: count each host through its
     # index range, capped, and keep the sample estimate for the big ones.
     deadline = time.monotonic() + budget * SAMPLE_BUDGET_FACTOR
@@ -504,7 +535,7 @@ def host_counts(db, result, c, hosts, max_id, url_total, small, budget, windows,
             n = db.one('SELECT COUNT(*) FROM (SELECT 1 FROM urls WHERE host = ? LIMIT ?)', (host, HOST_COUNT_CAP + 1))
         except QueryTimeout:
             continue
-        entry = per_host[host]
+        entry = per_host[c.host(host)]  # raw value for the lookup above, display-safe key here
         if n <= HOST_COUNT_CAP:
             entry['urls'], entry['urls_exact'] = n, True
             if entry['param_urls'] is not None and entry['param_urls'] > n:
@@ -573,10 +604,10 @@ def url_detail(db, cols, c, per_host, keys, tests, budget):
     try:
         for host, runs, urls, last in db.query('SELECT u.host, COUNT(*), COUNT(DISTINCT t.url_id), MAX(t.completed_at) '
                                                'FROM test_runs t CROSS JOIN urls u ON u.id = t.url_id GROUP BY u.host'):
-            host_tests[text(host) or ''] = {'test_runs': runs, 'tested_urls': urls, 'last_test': text(last, 40)}
+            host_tests[c.host(host)] = {'test_runs': runs, 'tested_urls': urls, 'last_test': text(last, 40)}
         if {'url_id'} <= cols['observations']:
             for host, n in db.query('SELECT u.host, COUNT(*) FROM observations o CROSS JOIN urls u ON u.id = o.url_id GROUP BY u.host'):
-                host_tests.setdefault(text(host) or '', {})['observations'] = n
+                host_tests.setdefault(c.host(host), {})['observations'] = n
     except QueryTimeout:
         c.fail('host_tests', 'timeout')
     hosts = []
@@ -586,6 +617,7 @@ def url_detail(db, cols, c, per_host, keys, tests, budget):
         entry.update(host_tests.get(host, {}))
         hosts.append(entry)
     detail['hosts'] = hosts
+    detail['unsafe_hosts'] = sorted(c.unsafe_hosts)[:HOST_LIMIT]
     detail['coverage_matrix'] = tests.get('groups', [])
     detail['observation_groups'] = tests.get('observation_groups', [])
     # Recent test runs and observations (indexed ORDER BY, LIMIT).
@@ -598,7 +630,8 @@ def url_detail(db, cols, c, per_host, keys, tests, budget):
                         f'ORDER BY t.completed_at DESC LIMIT {LIST_LIMIT}')
         detail['recent_tests'] = [{'lane': text(r[0], 80), 'skill': text(r[1], 80), 'test_family': text(r[2], 80),
                                    'status': text(r[3], 40), 'completed_at': text(r[4], 40), 'url': text(r[5], 600),
-                                   'host': text(r[6]), **{k: text(v) for k, v in zip(want, r[7:])}} for r in rows]
+                                   'host': text(r[6]), 'unsafe_chars': is_unsafe(r[5], r[6]),
+                                   **{k: text(v) for k, v in zip(want, r[7:])}} for r in rows]
     except QueryTimeout:
         c.fail('recent_tests', 'timeout')
         detail['recent_tests'] = []
@@ -609,7 +642,8 @@ def url_detail(db, cols, c, per_host, keys, tests, budget):
             rows = db.query(f'SELECT o.lane, o.status, u.canonical_url, u.host{"".join(", o." + k for k in owant)} '
                             f'FROM observations o LEFT JOIN urls u ON u.id = o.url_id ORDER BY o.id DESC LIMIT {LIST_LIMIT}')
             detail['recent_observations'] = [{'lane': text(r[0], 80), 'status': text(r[1], 40), 'url': text(r[2], 600),
-                                              'host': text(r[3]), **{k: text(v) for k, v in zip(owant, r[4:])}} for r in rows]
+                                              'host': text(r[3]), 'unsafe_chars': is_unsafe(r[2], r[3]),
+                                              **{k: text(v) for k, v in zip(owant, r[4:])}} for r in rows]
         except QueryTimeout:
             c.fail('recent_observations', 'timeout')
             detail['recent_observations'] = []
@@ -653,7 +687,9 @@ def untested_params(db, cols, c, keys, tests, budget):
                     'observations': count if count <= 1000 else 1000, 'observations_capped': count > 1000,
                     'value_shape': text(row[0][2], 40) if shape else None,
                     'location': text(row[0][3 if shape else 2], 40) if location else None,
-                    'example_url': text(example[0][0], 600) if example else None, 'example_host': text(example[0][1]) if example else None})
+                    'example_url': text(example[0][0], 600) if example else None, 'example_host': text(example[0][1]) if example else None,
+                    # Copy buttons (URL, curl, bbh next) are offered only when every raw value is safe.
+                    'unsafe_chars': is_unsafe(key, *hints, *(example[0] if example else ()))})
     out.sort(key=lambda p: (-len(p['untested_lanes']), -p['observations'], p['param_key'] or ''))
     return out[:200]
 
@@ -721,7 +757,7 @@ def js_detail(db, cols, c, budget):
     d = {}
     jf = cols['js_files']
     try:
-        d['hosts'] = [{'host': text(h) or '', 'files': n, 'bytes': b or 0, 'source_maps': s or 0}
+        d['hosts'] = [{'host': text(h) or '', 'files': n, 'bytes': b or 0, 'source_maps': s or 0, 'unsafe_chars': is_unsafe(h)}
                       for h, n, b, s in db.query('SELECT target_host, COUNT(*), SUM(byte_count), '
                                                  + ("SUM(CASE WHEN source_map IS NOT NULL AND source_map != '' THEN 1 ELSE 0 END)" if 'source_map' in jf else '0')
                                                  + ' FROM js_files GROUP BY target_host ORDER BY 2 DESC LIMIT ?', (HOST_LIMIT,))]
@@ -731,13 +767,14 @@ def js_detail(db, cols, c, budget):
     alias = "(SELECT js_url FROM js_url_aliases a WHERE a.sha256 = f.sha256 LIMIT 1)" if cols['js_url_aliases'] else 'NULL'
     if 'source_map' in jf:
         try:
-            d['source_map_files'] = [{'sha256': text(s, 64), 'host': text(h), 'bytes': b, 'source_map': text(m, 600), 'js_url': text(u, 600)}
+            d['source_map_files'] = [{'sha256': text(s, 64), 'host': text(h), 'bytes': b, 'source_map': text(m, 600), 'js_url': text(u, 600),
+                                      'unsafe_chars': is_unsafe(h, m, u)}
                                      for s, h, b, m, u in db.query(f"SELECT f.sha256, f.target_host, f.byte_count, f.source_map, {alias} FROM js_files f "
                                                                    f"WHERE f.source_map IS NOT NULL AND f.source_map != '' ORDER BY f.byte_count DESC LIMIT {LIST_LIMIT}")]
         except QueryTimeout:
             c.fail('source_map_files', 'timeout')
     try:
-        d['largest_files'] = [{'sha256': text(s, 64), 'host': text(h), 'bytes': b, 'js_url': text(u, 600)}
+        d['largest_files'] = [{'sha256': text(s, 64), 'host': text(h), 'bytes': b, 'js_url': text(u, 600), 'unsafe_chars': is_unsafe(h, u)}
                               for s, h, b, u in db.query(f'SELECT f.sha256, f.target_host, f.byte_count, {alias} FROM js_files f '
                                                          f'ORDER BY f.byte_count DESC LIMIT 20')]
     except QueryTimeout:
@@ -771,13 +808,13 @@ def js_detail(db, cols, c, budget):
         try:
             d['lens_counts'] = [{'lens': text(l, 80), 'status': text(s, 40), 'count': n}
                                 for l, s, n in db.query('SELECT lens, status, COUNT(*) FROM js_observations GROUP BY lens, status ORDER BY 3 DESC LIMIT 100')]
-            d['recent_observations'] = [{k: text(v) for k, v in zip(want, r)}
+            d['recent_observations'] = [{**{k: text(v) for k, v in zip(want, r)}, 'unsafe_chars': is_unsafe(*r)}
                                         for r in db.query(f'SELECT {", ".join(want)} FROM js_observations ORDER BY {order} DESC LIMIT {LIST_LIMIT}')]
             if 'next_action' in jo:
                 rows = db.query(f"SELECT {', '.join(want)} FROM js_observations WHERE COALESCE(next_action, '') != '' "
                                 f"AND LOWER(COALESCE(status, '')) NOT IN ({','.join('?' * len(DONE_STATUSES))}) "
                                 f'ORDER BY {order} DESC LIMIT {LIST_LIMIT}', tuple(DONE_STATUSES))
-                d['open_observations'] = [{k: text(v) for k, v in zip(want, r)} for r in rows]
+                d['open_observations'] = [{**{k: text(v) for k, v in zip(want, r)}, 'unsafe_chars': is_unsafe(*r)} for r in rows]
         except QueryTimeout:
             c.fail('js_observations', 'timeout')
     lc = cols['leads']
@@ -786,7 +823,7 @@ def js_detail(db, cols, c, budget):
         if want:
             try:
                 where = "WHERE COALESCE(next_action, '') != ''" if 'next_action' in lc else ''
-                d['leads'] = [{k: text(v) for k, v in zip(want, r)}
+                d['leads'] = [{**{k: text(v) for k, v in zip(want, r)}, 'unsafe_chars': is_unsafe(*r)}
                               for r in db.query(f'SELECT {", ".join(want)} FROM leads {where} ORDER BY rowid DESC LIMIT {LIST_LIMIT}')]
             except QueryTimeout:
                 c.fail('leads', 'timeout')
@@ -854,7 +891,7 @@ def board_summary(lane, read_file, ledger_fn, coverage_fn, map_fn):
                     continue
                 host = next((h for h in (host_of(entry.get(k)) for k in ('asset', 'url', 'endpoint')) if h), None)
                 if host:
-                    hosts[host] += 1
+                    hosts[text(host)] += 1
         except (OSError, ValueError, UnicodeError, RecursionError):
             pass
         live = [f for f in findings if str(f.get('status') or '').lower() not in ('archive', 'archived')]
@@ -1085,12 +1122,12 @@ class ReconIntel:
         except SourceError as error:
             sources['url_index'] = {'state': 'missing' if error.code == 'missing' else 'error',
                                     'error': {'code': error.code, **({'detail': error.detail} if error.detail else {})}}
-        sources['url_index']['expected'] = str(Path(lane_path, *URL_INDEX_REL))
+        sources['url_index']['expected'] = escape_unsafe(Path(lane_path, *URL_INDEX_REL))
         js = None
         tried = []
         for origin, base, parts in self.js_paths(program, lane, lane_path):
             expected = str(Path(base, *parts))
-            tried.append({'origin': origin, 'path': expected})
+            tried.append({'origin': origin, 'path': escape_unsafe(expected)})
             if origin == 'artifact' and not self.artifact_state()['available']:
                 continue
             try:
@@ -1141,8 +1178,9 @@ class ReconIntel:
         sources = self.lane_sources(family, program, lane, path, 1)
         partial = any(s.get('state') == 'computing' or s.get('pending') for s in sources.values())
         lanes = sorted({entry[2] for entry in self.lanes() if entry[1] == program})
-        return {'computed_at': time.time(), 'partial': partial, 'family': family, 'program': program, 'lane': lane,
-                'lanes': lanes, 'lane_path': str(path), 'headline': headline_row(family, program, lane, sources),
+        return {'computed_at': time.time(), 'partial': partial, 'family': family, 'program': escape_unsafe(program), 'lane': escape_unsafe(lane),
+                'unsafe_chars': is_unsafe(program, lane),
+                'lanes': [escape_unsafe(l) for l in lanes], 'lane_path': escape_unsafe(path), 'headline': headline_row(family, program, lane, sources),
                 'sources': sources, 'hosts': host_rows(sources), 'artifact_root': self.artifact_state(),
                 'budget': {'query_seconds': self.budget, 'exact_row_limit': self.exact_limit, 'refresh_interval': self.refresh_interval}}
 
@@ -1176,7 +1214,9 @@ def headline_row(family, program, lane, sources):
     url, js, agg, board = (sources.get(k, {}) for k in ('url_index', 'js', 'aggregates', 'board'))
     findings = _val(board, 'findings') or {}
     activity = [v for v in (_val(url, 'last_activity'), _val(js, 'last_activity'), findings.get('last_seen')) if v]
-    return {'id': f'{family}/{program}', 'family': family, 'program': program, 'lane': lane,
+    # id stays the raw discovered identifier (sent back URL-encoded, never displayed or copied).
+    return {'id': f'{family}/{program}', 'family': family, 'program': escape_unsafe(program), 'lane': escape_unsafe(lane),
+            'unsafe_chars': is_unsafe(program, lane),
             'urls': _val(url, 'urls'), 'routes': _val(url, 'routes'), 'hosts': _val(url, 'hosts'), 'parameters': _val(url, 'parameters'),
             'param_urls': _val(url, 'param_urls'),
             'test_runs': _val(url, 'test_runs'), 'tested_urls': _val(url, 'tested_urls'), 'tested_params': _val(url, 'tested_params'),
@@ -1200,6 +1240,7 @@ def host_rows(sources):
     url_hosts = _val(sources.get('url_index', {}), 'detail', 'hosts') or []
     approximate_urls = _val(sources.get('url_index', {}), 'host_counts') == 'sample'
     js_hosts = {h['host']: h for h in (_val(sources.get('js', {}), 'detail', 'hosts') or [])}
+    unsafe = set(_val(sources.get('url_index', {}), 'detail', 'unsafe_hosts') or [])
     findings = _val(sources.get('board', {}), 'findings', 'by_host') or {}
     coverage = _val(sources.get('board', {}), 'coverage', 'by_host') or {}
     rows = {}
@@ -1217,6 +1258,7 @@ def host_rows(sources):
         row['coverage_reviewed'] = coverage.get(name, {}).get('reviewed', 0)
         row['urls_approximate'] = approximate_urls
         row['under_tested'] = under_tested(row)
+        row['unsafe_chars'] = name in unsafe or bool(js.get('unsafe_chars'))
         row['surface_score'] = (row.get('urls') or 0) + 20 * row['js_files'] + 5 * (row.get('param_urls') or 0)
     ordered = sorted(rows.values(), key=lambda r: (-r['surface_score'], r['host']))
     truncated = len(ordered) > HOST_LIMIT

@@ -84,20 +84,31 @@
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
     return (i ? v.toFixed(v >= 100 ? 0 : 1) : String(Math.round(v))) + ' ' + units[i];
   }
-  const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
+  // Characters a terminal or editor can act on or hide (C0, DEL, C1, soft hyphen,
+  // bidi and invisible separators): a pasted ESC[201~ ends bracketed paste and the
+  // rest runs as keystrokes, whatever the quoting. Values containing them are never
+  // put on the clipboard; command builders return null and the button is disabled.
+  const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\ufeff]/;
+  const isCopySafe = value => value != null && !UNSAFE.test(String(value));
+  const shellQuote = value => {
+    if (!isCopySafe(value)) throw new Error('refusing to quote a value with control characters');
+    return `'${String(value).replace(/'/g, `'\\''`)}'`;
+  };
+  const safeArgs = (...values) => values.every(v => v == null || v === '' || isCopySafe(v));
   function safeHttpUrl(value) {
     try { const u = new URL(String(value)); return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null; } catch { return null; }
   }
-  const curlCommand = url => `curl -sS -i --max-time 20 ${shellQuote(url)}`;
-  const bbhNext = (program, lane, param, host) => `bbh agents/url_ingest.py next ${shellQuote(program)} --lane ${shellQuote(lane)}`
+  const curlCommand = url => isCopySafe(url) ? `curl -sS -i --max-time 20 ${shellQuote(url)}` : null;
+  const bbhNext = (program, lane, param, host) => !isCopySafe(program) || !isCopySafe(lane) || !safeArgs(param, host) ? null
+    : `bbh agents/url_ingest.py next ${shellQuote(program)} --lane ${shellQuote(lane)}`
     + (param ? ` --param ${shellQuote(param)}` : '') + (host ? ` --host ${shellQuote(host)}` : '') + ' --limit 20';
-  const bbhStatus = (program, host) => `bbh agents/url_ingest.py status ${shellQuote(program)} --host ${shellQuote(host)} --limit 50`;
+  const bbhStatus = (program, host) => isCopySafe(program) && isCopySafe(host) ? `bbh agents/url_ingest.py status ${shellQuote(program)} --host ${shellQuote(host)} --limit 50` : null;
   // "Surface without testing": what the dashboard card and default ranks use.
   const depthGap = row => {
     const urls = metric(row.urls) || 0, js = metric(row.js_files) || 0, runs = metric(row.test_runs) || 0;
     return (urls + 20 * js) / (1 + runs);
   };
-  const helpers = {parseQuery, buildQuery, sortRows, fmtNum, fmtBytes, shellQuote, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap};
+  const helpers = {parseQuery, buildQuery, sortRows, fmtNum, fmtBytes, shellQuote, isCopySafe, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap};
   if (typeof module === 'object' && module.exports) { module.exports = helpers; return; }
   root.BoardReconIntel = helpers;
 
@@ -121,12 +132,16 @@
     ? `<time datetime="${esc(new Date(seconds * 1000).toISOString())}" title="${esc(ui().absoluteTime ? ui().absoluteTime(seconds) : new Date(seconds * 1000).toISOString())}">${esc(ui().relativeTime(seconds))}</time>`
     : '<span class="muted">—</span>';
   const isoWhen = iso => { const t = Date.parse(iso || ''); return Number.isFinite(t) ? when(t / 1000) : '<span class="muted">—</span>'; };
-  const ext = (url, label) => {
-    const href = safeHttpUrl(url);
+  // unsafe: the server escaped unsafe characters for display, so the text is not the real URL: no link.
+  const ext = (url, label, unsafe) => {
+    const href = unsafe ? null : safeHttpUrl(url);
     const text = esc(label ?? url ?? '');
     return href ? `<a class="ri-ext" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${text}${icon('external-link')}</a>` : `<span class="ri-mono">${text}</span>`;
   };
-  const copyBtn = (value, label, title) => `<button type="button" class="button sm ghost ri-copy" data-ri-copy="${esc(value)}" title="${esc(title || 'Copy ' + label)}">${icon('clipboard')}<span>${esc(label)}</span></button>`;
+  // unsafe: the server flagged a raw value of this item (unsafe_chars); the displayed text is escaped.
+  const copyBtn = (value, label, title, unsafe) => (unsafe || !isCopySafe(value))
+    ? `<span class="ri-copy-blocked"><button type="button" class="button sm ghost ri-copy" disabled data-ri-copy-blocked title="Not copied: contains control characters">${icon('ban')}<span>${esc(label)}</span></button><span class="ri-unsafe">contains control characters</span></span>`
+    : `<button type="button" class="button sm ghost ri-copy" data-ri-copy="${esc(value)}" title="${esc(title || 'Copy ' + label)}">${icon('clipboard')}<span>${esc(label)}</span></button>`;
   const badge = (text, kind = '') => `<span class="badge ${kind}">${esc(text)}</span>`;
   const statusKind = status => ({validated_signal: 'danger', deep_reviewed: 'success', surface_reviewed: 'accent', dismissed: 'outline', discovered: '',
     open: 'warning', new: 'warning', done: 'success'}[String(status || '').toLowerCase()] || '');
@@ -246,7 +261,7 @@
   function emptyUrlIndex(d) {
     const src = d.sources?.url_index || {};
     if (src.state !== 'missing') return '';
-    return `<div class="empty ri-empty" data-ri-empty="url_index">${icon('database')}<strong>No URL index yet</strong><span>Run <code>bbh agents/url_ingest.py ingest ${esc(d.program)} --source &lt;urls.txt&gt;</code> or <code>bbh agents/url_ingest.py aggregate ${esc(d.program)}</code>; it writes <code class="ri-path">${esc(src.expected || '')}</code>.</span>${copyBtn(`bbh agents/url_ingest.py aggregate ${shellQuote(d.program)}`, 'Copy command')}</div>`;
+    return `<div class="empty ri-empty" data-ri-empty="url_index">${icon('database')}<strong>No URL index yet</strong><span>Run <code>bbh agents/url_ingest.py ingest ${esc(d.program)} --source &lt;urls.txt&gt;</code> or <code>bbh agents/url_ingest.py aggregate ${esc(d.program)}</code>; it writes <code class="ri-path">${esc(src.expected || '')}</code>.</span>${copyBtn(isCopySafe(d.program) ? `bbh agents/url_ingest.py aggregate ${shellQuote(d.program)}` : null, 'Copy command', '', d.unsafe_chars)}</div>`;
   }
   function emptyJs(d) {
     const src = d.sources?.js || {};
@@ -302,7 +317,7 @@
       <td class="num">${cell(r.test_runs)}</td><td class="num">${cell(r.tested_urls)}</td><td class="num">${cell(r.findings)}</td>
       <td class="num" title="${esc(r.coverage_questions)} coverage questions">${cell(r.coverage_reviewed)}</td>
       <td class="date">${isoWhen(r.last_test)}</td>
-      <td class="ri-actions">${r.host ? copyBtn(bbhStatus(d.program, r.host), 'status', 'Copy bbh url_ingest status command for this host') : ''}</td></tr>`).join('');
+      <td class="ri-actions">${r.host ? copyBtn(bbhStatus(d.program, r.host), 'status', 'Copy bbh url_ingest status command for this host', r.unsafe_chars || d.unsafe_chars) : ''}</td></tr>`).join('');
     return `<section class="panel ri-section" id="ri-hosts" aria-label="Hosts"><div class="panel-head"><div><h2>Hosts</h2><p class="hint">Per host: URL index surface, JS library files, test runs, findings and coverage reviews. ${esc(h.rule || '')}</p></div></div>
       <div class="ri-toolbar panel-pad"><div class="input-icon">${icon('search')}<input id="ri-host-filter" type="search" aria-label="Filter hosts" placeholder="Filter hosts" value="${esc(s.hq)}" autocomplete="off"></div>
       <label class="ri-check"><input type="checkbox" id="ri-under"${s.under ? ' checked' : ''}> Under-tested only <span class="count">${esc(under)}</span></label>
@@ -340,8 +355,8 @@
       }).join('')}<td class="num"><strong>${esc(fmtNum(total))}</strong></td></tr>`;
     }).join('')}</tbody></table></div>` : '';
     const detailRows = groups.slice().sort((a, b) => String(b.last_run || '').localeCompare(String(a.last_run || ''))).map(g => `<tr><td>${esc(g.lane)}</td><td>${esc(g.skill)}</td><td>${esc(g.test_family)}</td><td>${badge(g.status, statusKind(g.status))}</td><td class="num">${esc(g.runs)}</td><td class="num">${esc(g.urls)}</td><td class="num">${esc(g.last_24h)}</td><td class="num">${esc(g.last_7d)}</td><td class="date">${isoWhen(g.last_run)}</td></tr>`).join('');
-    const recent = (det.recent_tests || []).map(t => `<tr><td class="date">${isoWhen(t.completed_at)}</td><td>${esc(t.lane)}<span class="id">${esc(t.skill)} / ${esc(t.test_family)}</span></td><td>${badge(t.status, statusKind(t.status))}</td><td>${esc(t.agent_id || '—')}</td><td class="ri-url">${t.url ? ext(t.url) : '<span class="muted">—</span>'}${t.param_key ? `<span class="id">param ${esc(t.param_key)}</span>` : ''}</td><td><span class="ri-notes" title="${esc(t.notes || t.response_summary || '')}">${esc(t.notes || t.response_summary || '')}</span></td><td>${evidenceCell(d, t.evidence_path)}</td></tr>`).join('');
-    const obs = (det.recent_observations || []).map(o => `<tr><td class="date">${isoWhen(o.created_at)}</td><td>${esc(o.lane)}</td><td>${badge(o.status, statusKind(o.status))}</td><td>${esc(o.agent_id || '—')}</td><td class="ri-url">${o.url ? ext(o.url) : '<span class="muted">—</span>'}</td><td><span class="ri-notes" title="${esc(o.notes || '')}">${esc(o.notes || '')}</span></td><td>${evidenceCell(d, o.evidence_path)}</td></tr>`).join('');
+    const recent = (det.recent_tests || []).map(t => `<tr><td class="date">${isoWhen(t.completed_at)}</td><td>${esc(t.lane)}<span class="id">${esc(t.skill)} / ${esc(t.test_family)}</span></td><td>${badge(t.status, statusKind(t.status))}</td><td>${esc(t.agent_id || '—')}</td><td class="ri-url">${t.url ? ext(t.url, null, t.unsafe_chars) : '<span class="muted">—</span>'}${t.param_key ? `<span class="id">param ${esc(t.param_key)}</span>` : ''}</td><td><span class="ri-notes" title="${esc(t.notes || t.response_summary || '')}">${esc(t.notes || t.response_summary || '')}</span></td><td>${evidenceCell(d, t.evidence_path)}</td></tr>`).join('');
+    const obs = (det.recent_observations || []).map(o => `<tr><td class="date">${isoWhen(o.created_at)}</td><td>${esc(o.lane)}</td><td>${badge(o.status, statusKind(o.status))}</td><td>${esc(o.agent_id || '—')}</td><td class="ri-url">${o.url ? ext(o.url, null, o.unsafe_chars) : '<span class="muted">—</span>'}</td><td><span class="ri-notes" title="${esc(o.notes || '')}">${esc(o.notes || '')}</span></td><td>${evidenceCell(d, o.evidence_path)}</td></tr>`).join('');
     const none = d.sources?.url_index?.state === 'ready' && !groups.length;
     return `<section class="panel panel-pad ri-section" id="ri-looked" aria-label="What has been looked for"><div class="blockhead"><h2>What has been looked for</h2></div>
       <p class="hint">Test runs recorded in the URL index (<code>url_ingest.py mark</code>), by lane and test family. Hover a cell for statuses, skills and the last run.</p>
@@ -365,13 +380,13 @@
       const target = lane || p.untested_lanes[0];
       return `<li class="ri-hunt-item" data-ri-hunt="param" data-param="${esc(p.param_key)}"><div class="ri-hunt-main"><strong class="ri-mono">${esc(p.param_key)}</strong> ${(p.untested_lanes || []).map(h => badge(h, 'warning')).join(' ')}
         <span class="hint">${esc(p.location || 'query')}${p.value_shape ? ` · ${esc(p.value_shape)}` : ''} · seen ${esc(p.observations_capped ? '1000+' : p.observations)}×</span>
-        ${p.example_url ? `<div class="ri-url">${ext(p.example_url)}</div>` : ''}</div>
-        <div class="ri-hunt-actions">${p.example_url ? copyBtn(p.example_url, 'URL') + copyBtn(curlCommand(p.example_url), 'curl', 'Copy a curl command for the example URL') : ''}${copyBtn(bbhNext(d.program, target, p.param_key), 'bbh next', `Copy bbh url_ingest next for lane ${target}`)}</div></li>`;
+        ${p.example_url ? `<div class="ri-url">${ext(p.example_url, null, p.unsafe_chars)}</div>` : ''}</div>
+        <div class="ri-hunt-actions">${p.example_url ? copyBtn(p.example_url, 'URL', '', p.unsafe_chars) + copyBtn(curlCommand(p.example_url), 'curl', 'Copy a curl command for the example URL', p.unsafe_chars) : ''}${copyBtn(bbhNext(d.program, target, p.param_key), 'bbh next', `Copy bbh url_ingest next for lane ${target}`, p.unsafe_chars || d.unsafe_chars)}</div></li>`;
     }).join('');
-    const hosts = (d.hosts?.rows || []).filter(r => r.under_tested).slice(0, 10).map(r => `<li class="ri-hunt-item" data-ri-hunt="host"><div class="ri-hunt-main"><strong class="ri-mono">${esc(r.host)}</strong> <span class="hint">${r.urls != null ? `${r.urls_approximate && !r.urls_exact ? '≈' : ''}${esc(fmtNum(r.urls))} URLs · ` : ''}${esc(r.js_files)} JS files · ${esc(r.test_runs)} test runs</span></div><div class="ri-hunt-actions">${copyBtn(r.host, 'host')}${copyBtn(bbhStatus(d.program, r.host), 'bbh status')}</div></li>`).join('');
+    const hosts = (d.hosts?.rows || []).filter(r => r.under_tested).slice(0, 10).map(r => `<li class="ri-hunt-item" data-ri-hunt="host"><div class="ri-hunt-main"><strong class="ri-mono">${esc(r.host)}</strong> <span class="hint">${r.urls != null ? `${r.urls_approximate && !r.urls_exact ? '≈' : ''}${esc(fmtNum(r.urls))} URLs · ` : ''}${esc(r.js_files)} JS files · ${esc(r.test_runs)} test runs</span></div><div class="ri-hunt-actions">${copyBtn(r.host, 'host', '', r.unsafe_chars)}${copyBtn(bbhStatus(d.program, r.host), 'bbh status', '', r.unsafe_chars || d.unsafe_chars)}</div></li>`).join('');
     const jsOpen = (jsd.open_observations || []).slice(0, 20).map(o => `<li class="ri-hunt-item" data-ri-hunt="js"><div class="ri-hunt-main"><strong>${esc(o.title || 'Observation')}</strong> ${badge(o.lens || 'lens', 'accent')} ${badge(o.status || 'open', statusKind(o.status))} ${o.confidence ? `<span class="hint">confidence ${esc(o.confidence)}</span>` : ''}
-        <div class="ri-next">${icon('arrow-right')} ${esc(o.next_action)}</div>${o.js_url ? `<div class="ri-url">${ext(o.js_url)}</div>` : ''}</div><div class="ri-hunt-actions">${o.js_url ? copyBtn(o.js_url, 'URL') : ''}${copyBtn(o.next_action, 'next action')}</div></li>`).join('');
-    const leads = (jsd.leads || []).slice(0, 20).map(l => `<li class="ri-hunt-item" data-ri-hunt="lead"><div class="ri-hunt-main"><strong>${esc(l.related_endpoint || l.lead_id || 'Lead')}</strong> ${l.lane ? badge(l.lane, 'warning') : ''} ${l.confidence ? `<span class="hint">confidence ${esc(l.confidence)}</span>` : ''}<div class="ri-next">${icon('arrow-right')} ${esc(l.next_action || '')}</div>${l.js_url ? `<div class="ri-url">${ext(l.js_url)}</div>` : ''}</div><div class="ri-hunt-actions">${l.js_url ? copyBtn(l.js_url, 'URL') : ''}</div></li>`).join('');
+        <div class="ri-next">${icon('arrow-right')} ${esc(o.next_action)}</div>${o.js_url ? `<div class="ri-url">${ext(o.js_url, null, o.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${o.js_url ? copyBtn(o.js_url, 'URL', '', o.unsafe_chars) : ''}${copyBtn(o.next_action, 'next action', '', o.unsafe_chars)}</div></li>`).join('');
+    const leads = (jsd.leads || []).slice(0, 20).map(l => `<li class="ri-hunt-item" data-ri-hunt="lead"><div class="ri-hunt-main"><strong>${esc(l.related_endpoint || l.lead_id || 'Lead')}</strong> ${l.lane ? badge(l.lane, 'warning') : ''} ${l.confidence ? `<span class="hint">confidence ${esc(l.confidence)}</span>` : ''}<div class="ri-next">${icon('arrow-right')} ${esc(l.next_action || '')}</div>${l.js_url ? `<div class="ri-url">${ext(l.js_url, null, l.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${l.js_url ? copyBtn(l.js_url, 'URL', '', l.unsafe_chars) : ''}</div></li>`).join('');
     const hintBar = hints.length ? `<div class="segmented ri-hints" role="group" aria-label="Filter by lane hint"><button type="button" data-ri-hint="" aria-pressed="${!s.hint}">All</button>${hints.map(h => `<button type="button" data-ri-hint="${esc(h)}" aria-pressed="${s.hint === h}">${esc(h)}</button>`).join('')}</div>` : '';
     return `<section class="panel panel-pad ri-section" id="ri-hunt" aria-label="What to hunt next"><div class="blockhead"><h2>What to hunt next</h2></div>
       <p class="hint">Suggestions only: copy a URL or command and run it yourself. Nothing here sends a request.</p>
@@ -391,7 +406,7 @@
     const hosts = (jsd.hosts || []).slice(0, 15).map(h => `<tr><td class="ri-mono">${esc(h.host || '(no host)')}</td><td class="num">${esc(fmtNum(h.files))}</td><td class="num">${esc(fmtBytes(h.bytes))}<span class="ri-bar ri-bar-inline"><span style="width:${Math.max(2, Math.round(100 * (h.bytes || 0) / hostMax))}%"></span></span></td><td class="num">${esc(fmtNum(h.source_maps))}</td></tr>`).join('');
     const sigMax = Math.max(1, ...(jsd.signals || []).map(x => x.count));
     const signals = (jsd.signals || []).slice(0, 16).map(x => bar(x.signal, x.count, sigMax, `<span class="hint">${esc(fmtNum(x.files))} files</span>`)).join('');
-    const maps = (jsd.source_map_files || []).slice(0, 15).map(f => `<li><span class="ri-url">${f.js_url ? ext(f.js_url) : `<span class="ri-mono">${esc(String(f.sha256 || '').slice(0, 16))}</span>`}</span><span class="hint">${esc(fmtBytes(f.bytes))} · map ${f.source_map ? ext(f.source_map, 'link') : ''}</span></li>`).join('');
+    const maps = (jsd.source_map_files || []).slice(0, 15).map(f => `<li><span class="ri-url">${f.js_url ? ext(f.js_url, null, f.unsafe_chars) : `<span class="ri-mono">${esc(String(f.sha256 || '').slice(0, 16))}</span>`}</span><span class="hint">${esc(fmtBytes(f.bytes))} · map ${f.source_map ? ext(f.source_map, 'link', f.unsafe_chars) : ''}</span></li>`).join('');
     const lens = (jsd.lens_counts || []).slice(0, 12).map(l => `<li><span>${badge(l.lens || '—', 'accent')} ${badge(l.status || '—', statusKind(l.status))}</span><span class="num">${esc(l.count)}</span></li>`).join('');
     const obs = (jsd.recent_observations || []).slice(0, 15).map(o => `<tr><td class="date">${isoWhen(o.updated_at || o.created_at)}</td><td>${badge(o.lens || '—', 'accent')}</td><td>${badge(o.status || '—', statusKind(o.status))}</td><td>${esc(o.confidence || '—')}</td><td><strong>${esc(o.title || '')}</strong>${o.summary ? `<span class="ri-notes">${esc(o.summary)}</span>` : ''}</td><td class="ri-url">${o.js_url ? ext(o.js_url) : ''}</td></tr>`).join('');
     return `<section class="panel panel-pad ri-section" id="ri-js" aria-label="JavaScript"><div class="blockhead"><h2>JavaScript</h2>${d.sources?.js?.origin ? `<span class="badge outline" title="Where the JS library was read from">${esc(d.sources.js.origin === 'artifact' ? 'artifact tier' : 'Shared lane')}</span>` : ''}</div>
@@ -495,6 +510,7 @@
     view.qTimer = setTimeout(() => { writeUrl(); paint(); }, 150);
   }
   async function copyText(value) {
+    if (!isCopySafe(value)) { ui().toast('Not copied: the value contains control characters.', 'warning'); return; }
     try { await navigator.clipboard.writeText(value); ui().toast('Copied to the clipboard.', 'success'); return; } catch {}
     const area = document.createElement('textarea');
     area.value = value; area.setAttribute('readonly', ''); area.style.position = 'fixed'; area.style.opacity = '0';

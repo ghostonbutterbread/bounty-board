@@ -2,6 +2,7 @@
 import http.client
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import tempfile
@@ -485,6 +486,92 @@ class ReadLeavesNoTraceTests(Base):
         self.assertEqual(js['origin'], 'artifact')
         self.assertEqual(js['result']['open_mode'], 'immutable')
         self.assertEqual(js['result']['files']['value'], 15)
+
+
+HOSTILE_KEY = '\x1b[201~\x15touch PWNED\rredirect_url'
+BIDI_HOST = 'evil\u202e.example.test'
+
+
+def add_hostile(path):
+    """A parameter key and host as BBH would store them from a target URL (parse_qsl-decoded)."""
+    db = sqlite3.connect(path)
+    cur = db.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, source, first_seen, last_seen) "
+                     "VALUES (?, 'hx', 'rx', 'px', ?, '/', ?, 'synthetic', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                     (f'https://{BIDI_HOST}/?a=1\r', BIDI_HOST, json.dumps([HOSTILE_KEY])))
+    db.execute("INSERT INTO parameter_observations (url_id, param_key, location, source, value_shape, lane_hints, first_seen, last_seen) "
+               "VALUES (?, ?, 'query', 'synthetic', 'text', '[\"open-redirect\"]', 'a', 'b')", (cur.lastrowid, HOSTILE_KEY))
+    db.commit()
+    db.close()
+
+
+class UnsafeCharacterTests(Base):
+    """Review 9 blocker 2: target-controlled values are display-safe and flagged so no copy is offered."""
+
+    def test_payload_escapes_and_flags_unsafe_values(self):
+        lane = make_lane(self.root)
+        add_hostile(lane / 'recon/url_index/url_index.sqlite')
+        svc = service(self.root)
+        self.addCleanup(svc.close)
+        out = full_read(self, svc)
+        encoded = json.dumps(out, ensure_ascii=False)
+        self.assertIsNone(ri.UNSAFE_CHARS.search(encoded), 'raw control or bidi characters in the payload')
+        params = {p['param_key']: p for p in out['sources']['url_index']['result']['detail']['untested_params']}
+        hostile = params['\\x1b[201~\\x15touch PWNED\\x0dredirect_url']
+        self.assertTrue(hostile['unsafe_chars'])
+        self.assertEqual(hostile['example_url'], 'https://evil\\u202e.example.test/?a=1\\x0d')
+        self.assertFalse(params['file']['unsafe_chars'])
+        hosts = {h['host']: h for h in out['hosts']['rows']}
+        self.assertTrue(hosts['evil\\u202e.example.test']['unsafe_chars'])
+        self.assertFalse(hosts['app.example.test']['unsafe_chars'])
+        self.assertFalse(out['unsafe_chars'])
+
+    def test_escape_covers_every_listed_character(self):
+        listed = [*range(0x00, 0x20), 0x7f, *range(0x80, 0xa0), 0x061c, *range(0x200b, 0x2010), *range(0x202a, 0x202f),
+                  *range(0x2060, 0x206a), 0xfeff, 0x2028, 0x2029, 0x00ad]
+        for code in listed:
+            value = f'a{chr(code)}b'
+            self.assertTrue(ri.is_unsafe(value), hex(code))
+            self.assertIsNone(ri.UNSAFE_CHARS.search(ri.text(value)), hex(code))
+        self.assertEqual(ri.text('a\x1bb\u202ec'), 'a\\x1bb\\u202ec')
+        self.assertFalse(ri.is_unsafe('plain-key_1', 'https://a.example.test/?q=ü'))
+
+
+@unittest.skipUnless(shutil.which('node') and shutil.which('bash') and hasattr(os, 'fork'), 'needs node, bash and a pty')
+class PasteTests(Base):
+    """Review 9 repro (paste.py): paste the bbh next copy text, bracketed, into an interactive bash without Enter."""
+
+    def test_copied_command_cannot_run_on_paste(self):
+        import pty
+        import select
+        import subprocess
+        marker = self.base / 'PWNED'
+        module = Path(__file__).resolve().parents[1] / 'static/modules/recon-intel.js'
+        key = HOSTILE_KEY.replace('PWNED', str(marker))
+        clip = subprocess.run(['node', '-e', 'const ri = require(process.argv[1]); const c = ri.bbhNext("acme-demo", "open-redirect", process.argv[2]); '
+                               'process.stdout.write(c == null ? "" : c);', str(module), key], capture_output=True, check=True).stdout.decode()
+        self.assertEqual(clip, '', 'a command was built from a key with control characters')
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execvp('bash', ['bash', '--norc', '--noprofile', '-i'])
+
+        def drain(seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                if select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        os.read(fd, 65536)
+                    except OSError:
+                        return
+        try:
+            drain(1.0)
+            os.write(fd, ('\x1b[200~' + clip.replace('\n', '\r') + '\x1b[201~').encode())
+            drain(1.5)
+            self.assertFalse(marker.exists(), 'pasted text ran a command before Enter')
+        finally:
+            os.write(fd, b'\x03exit\r')
+            drain(0.5)
+            os.close(fd)
+            os.waitpid(pid, 0)
 
 
 class HttpTests(Base):
