@@ -517,14 +517,15 @@ def test_summary(db, cols, c):
 
 def url_detail(db, cols, c, per_host, keys, tests, budget):
     detail = {}
-    # Tests and observations per host (joins over the small tables).
+    # Tests and observations per host. CROSS JOIN pins the small table as the outer
+    # loop; otherwise SQLite may walk the huge urls host index to avoid a sort.
     host_tests = {}
     try:
         for host, runs, urls, last in db.query('SELECT u.host, COUNT(*), COUNT(DISTINCT t.url_id), MAX(t.completed_at) '
-                                               'FROM test_runs t JOIN urls u ON u.id = t.url_id GROUP BY u.host'):
+                                               'FROM test_runs t CROSS JOIN urls u ON u.id = t.url_id GROUP BY u.host'):
             host_tests[text(host) or ''] = {'test_runs': runs, 'tested_urls': urls, 'last_test': text(last, 40)}
         if {'url_id'} <= cols['observations']:
-            for host, n in db.query('SELECT u.host, COUNT(*) FROM observations o JOIN urls u ON u.id = o.url_id GROUP BY u.host'):
+            for host, n in db.query('SELECT u.host, COUNT(*) FROM observations o CROSS JOIN urls u ON u.id = o.url_id GROUP BY u.host'):
                 host_tests.setdefault(text(host) or '', {})['observations'] = n
     except QueryTimeout:
         c.fail('host_tests', 'timeout')
