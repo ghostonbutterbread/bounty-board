@@ -652,7 +652,7 @@ def valid_terminal_url(value):
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
                 tailnet_port=443, collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
                 report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
-                live_edit_dir=None, state_dir=None, terminal_url=None):
+                live_edit_dir=None, state_dir=None, terminal_url=None, artifact_root=None, recon_query_budget=None):
     import os
     import tempfile
     import threading
@@ -719,6 +719,11 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     from report_publisher import generated_navigation as _generated_navigation
     search_index = SearchIndex(root_snapshot, FAMILIES, read_file, ledger, _generated_navigation)
     search_slots = threading.BoundedSemaphore(4)
+    # Recon intel (recon_intel.py): read-only URL index / JS library summaries, computed in the background.
+    from recon_intel import ReconIntel, QUERY_BUDGET
+    recon = ReconIntel(lambda: (root_snapshot() or (None,))[0], lambda r: discover(r, inventory_only=True),
+                       read_file, ledger, coverage, map_entries, artifact_root=artifact_root,
+                       query_budget=recon_query_budget or QUERY_BUDGET)
     collaboration_lock = threading.RLock()
     portfolio_scan = threading.BoundedSemaphore(1)
     lane_reads = threading.BoundedSemaphore(8)
@@ -1524,6 +1529,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.search_request(url)
             if url.path == '/api/recent-reports':
                 return self.recent_reports_request(url)
+            if url.path in ('/api/recon/overview', '/api/recon/program'):
+                from recon_intel import handle_request
+                return handle_request(self, url, recon)
             if url.path == '/api/archive-state':
                 return self.archive_state_request(url)
             if url.path == '/api/collaboration':
@@ -2427,6 +2435,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     server.live_streams = threading.BoundedSemaphore(32)
     server.live = live
     server.search_index = search_index
+    server.recon = recon
     base_close = server.server_close
 
     # One close path: stop the live editing watcher and the search index
@@ -2439,7 +2448,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             try:
                 search_index.close()
             finally:
-                base_close()
+                try:
+                    recon.close()
+                finally:
+                    base_close()
     server.server_close = server_close
     server.static_root = Path(__file__).parent / 'static'
     server.writer = Path(writer).absolute() if writer else None
@@ -2481,6 +2493,10 @@ def parse_config(argv=None):
                         help='maximum retained publication entries (default 1000)')
     parser.add_argument('--retention-min-free-bytes', type=int, default=DEFAULT_MIN_FREE_BYTES,
                         help='free-space floor in bytes (default 1073741824)')
+    parser.add_argument('--artifact-root', type=Path,
+                        help='bulk artifact tier holding JS libraries (default: /mnt/bounty when it is a mount point)')
+    parser.add_argument('--recon-query-budget', type=float, default=None,
+                        help='seconds one recon intel SQLite query may run before it is interrupted (default 3)')
     args = parser.parse_args(argv)
     settings = {}
     if args.config:
@@ -2527,6 +2543,11 @@ def parse_config(argv=None):
         parser.error('--terminal-url must be a same-origin path such as /terminal/')
     if args.live_edit and (args.collaboration_dir or args.report_autosave or args.experimental_fixture_publish):
         parser.error('--live-edit replaces --collaboration-dir, --report-autosave and --experimental-fixture-publish')
+    if args.recon_query_budget is not None and not 0.1 <= args.recon_query_budget <= 120:
+        parser.error('recon query budget must be from 0.1 to 120 seconds')
+    if args.artifact_root is None:
+        from recon_intel import default_artifact_root
+        args.artifact_root = default_artifact_root()
     return args
 
 
@@ -2544,6 +2565,8 @@ def main():
                 **({'live_edit_dir': args.live_edit_dir} if args.live_edit else {}),
                 state_dir=args.state_dir,
                 **({'terminal_url': args.terminal_url} if args.terminal_url else {}),
+                **({} if args.artifact_root is None else {'artifact_root': args.artifact_root}),
+                **({} if args.recon_query_budget is None else {'recon_query_budget': args.recon_query_budget}),
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
 

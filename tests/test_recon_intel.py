@@ -1,0 +1,689 @@
+"""Synthetic tests for recon_intel.py and GET /api/recon/* (disposable roots only)."""
+import http.client
+import json
+import os
+import shutil
+import sqlite3
+import stat
+import tempfile
+import threading
+import time
+import unittest
+import unittest.mock
+from pathlib import Path
+from urllib.parse import urlencode
+
+import app
+import recon_intel as ri
+from tests.recon_intel_fixture import make_js_library, make_lane, make_large_url_index, make_url_index
+
+
+def service(root, artifact_root=None, **kw):
+    snap = lambda: Path(root)
+    svc = ri.ReconIntel(snap, lambda r: app.discover(r, inventory_only=True), app.read_file, app.ledger, app.coverage,
+                        app.map_entries, artifact_root=artifact_root, **kw)
+    return svc
+
+
+def tree_snapshot(top):
+    """Every entry under top: (type, size, mtime_ns). Directory mtimes catch files created and removed again."""
+    out = {}
+    for directory, dirs, files in os.walk(top):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            info = os.lstat(path)
+            out[os.path.relpath(path, top)] = (stat.S_IFMT(info.st_mode), info.st_size if not stat.S_ISDIR(info.st_mode) else None, info.st_mtime_ns)
+    info = os.lstat(top)
+    out['.'] = (stat.S_IFMT(info.st_mode), None, info.st_mtime_ns)
+    return out
+
+
+def to_wal(path):
+    """Switch a synthetic database to WAL and close cleanly: no -wal or -shm left."""
+    db = sqlite3.connect(path)
+    db.execute('PRAGMA journal_mode=WAL')
+    db.close()
+    assert not os.path.exists(str(path) + '-wal') and not os.path.exists(str(path) + '-shm')
+
+
+def full_read(test, svc):
+    svc.overview()
+    test.assertTrue(svc.wait_idle(60))
+    svc.overview()
+    svc.program('web_bounty', 'acme-demo', 'web')
+    test.assertTrue(svc.wait_idle(60))
+    return svc.program('web_bounty', 'acme-demo', 'web')
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='recon-')
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.root = self.base / 'root'
+        self.root.mkdir()
+
+
+class UrlIndexTests(Base):
+    def test_small_index_is_exact(self):
+        path = make_url_index(self.base / 'u.sqlite')
+        r = ri.url_index_summary(path)
+        self.assertEqual(r['urls'], {'value': 98, 'approximate': False})
+        self.assertEqual(r['hosts']['value'], 3)
+        self.assertFalse(r['hosts']['approximate'])
+        self.assertEqual(r['test_runs']['value'], 4)
+        self.assertEqual(r['tested_urls']['value'], 4)
+        self.assertEqual(r['tested_params']['value'], 3)
+        self.assertEqual(r['tests_recent'], {'last_24h': 1, 'last_7d': 2, 'all': 4})
+        self.assertFalse(r['approximate'])
+        d = r['detail']
+        hosts = {h['host']: h for h in d['hosts']}
+        self.assertEqual(hosts['app.example.test']['urls'], 60)
+        self.assertEqual(hosts['app.example.test']['test_runs'], 4)
+        self.assertEqual(hosts['static.example.test']['test_runs'], 0)
+        self.assertEqual(r['routes']['value'], 7 + 8)
+        # Newest test first; long notes are truncated.
+        self.assertEqual(d['recent_tests'][0]['lane'], 'xss')
+        self.assertLessEqual(max(len(t['notes'] or '') for t in d['recent_tests']), ri.TEXT_LIMIT)
+        matrix = {(g['lane'], g['test_family']): g for g in d['coverage_matrix']}
+        self.assertEqual(matrix[('open-redirect', 'redirect-basic')]['runs'], 1)
+        # Hunt next: hinted params lacking a test in that lane (xss on q and idor on id were tested).
+        untested = {p['param_key']: p['untested_lanes'] for p in d['untested_params']}
+        self.assertEqual(untested, {'url': ['ssrf'], 'next': ['open-redirect'], 'file': ['lfi']})
+        self.assertTrue(all(p['example_url'].startswith('https://') for p in d['untested_params']))
+
+    def test_grouped_lists_are_capped_and_marked_truncated(self):
+        """Review 9 minor 3: grouped breakdowns, tested pairs and per-host joins are LIMITed."""
+        path = make_url_index(self.base / 'u.sqlite')
+        db = sqlite3.connect(path)
+        api_url = db.execute("SELECT id FROM urls WHERE host = 'api.example.test' LIMIT 1").fetchone()[0]
+        db.execute("INSERT INTO test_runs (url_id, lane, param_key, skill, test_family, status, started_at, completed_at) "
+                   "VALUES (?, 'recon', 'q', 'manual', 'general-review', 'discovered', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')", (api_url,))
+        db.execute("INSERT INTO observations (url_id, lane, param_key, status, created_at) VALUES (?, 'sqli', 'q', 'discovered', '2026-01-01')", (api_url,))
+        db.commit()
+        db.close()
+        full = ri.url_index_summary(path)
+        self.assertEqual(full['truncated'], {})
+        with unittest.mock.patch.object(ri, 'GROUP_LIMIT', 1), unittest.mock.patch.object(ri, 'TESTED_PAIRS_LIMIT', 1):
+            r = ri.url_index_summary(path)
+        self.assertEqual(set(r['truncated']), {'coverage_matrix', 'observation_groups', 'host_tests', 'host_observations', 'tested_pairs', 'tested_lanes'})
+        self.assertEqual(len(r['detail']['coverage_matrix']), 1)
+        self.assertEqual(r['detail']['coverage_matrix'][0]['runs'], 2)  # the largest group is kept (ORDER BY runs DESC)
+        self.assertEqual(len(r['detail']['observation_groups']), 1)
+        # Headline numbers stay exact when breakdowns are truncated.
+        self.assertEqual(r['tests_recent'], full['tests_recent'])
+        self.assertEqual(r['observations'], full['observations'])
+        self.assertEqual(r['test_runs']['value'], 5)
+        # Review 9b: a capped tested-pairs set must not turn tested params into "untested".
+        untested = lambda x: {p['param_key']: p['untested_lanes'] for p in x['detail']['untested_params']}
+        self.assertEqual(untested(r), untested(full))
+
+    def test_large_index_uses_estimates_within_budget(self):
+        path = make_large_url_index(self.base / 'big.sqlite', rows=300_000, hosts=40)
+        started = time.monotonic()
+        r = ri.url_index_summary(path, budget=0.5, exact_limit=50_000)
+        elapsed = time.monotonic() - started
+        self.assertEqual(r['urls'], {'value': 300_000, 'approximate': True, 'method': 'max_id'})
+        self.assertTrue(r['approximate'])
+        self.assertEqual(r['routes']['method'], 'sample_scaled')
+        self.assertEqual(r['hosts']['value'], 40)  # skip-scan over the host index is exact
+        self.assertEqual(r['host_counts'], 'sample')
+        self.assertGreater(r['sample']['rows'], 0)
+        total = sum(h['urls'] or 0 for h in r['detail']['hosts'])
+        self.assertAlmostEqual(total / 300_000, 1, delta=0.2)
+        # Bounded: a handful of query budgets, never a full scan per statement.
+        self.assertLess(elapsed, 0.5 * (ri.SAMPLE_BUDGET_FACTOR * 3 + 8))
+        self.assertEqual(r['detail']['untested_params'][0]['param_key'], 'url')
+        self.assertTrue(r['detail']['untested_params'][0]['observations_capped'])
+
+    def test_query_budget_interrupts_long_statements(self):
+        path = make_url_index(self.base / 'u.sqlite')
+        db = ri.ReadOnlyDB(path, budget=0.2)
+        try:
+            started = time.monotonic()
+            with self.assertRaises(ri.QueryTimeout):
+                db.query('WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s) SELECT COUNT(*) FROM s')
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertEqual(db.one('SELECT COUNT(*) FROM urls'), 98)  # the connection stays usable
+            with self.assertRaises(ri.SourceError):
+                db.query("INSERT INTO imports (source_file, imported_at) VALUES ('x', 'y')")
+        finally:
+            db.close()
+
+    def test_locked_database_reports_locked(self):
+        path = make_url_index(self.base / 'u.sqlite')
+        writer = sqlite3.connect(path, timeout=0)
+        writer.execute('BEGIN EXCLUSIVE')
+        try:
+            with self.assertRaises(ri.SourceError) as caught:
+                ri.url_index_summary(path, budget=0.5)
+            self.assertEqual(caught.exception.code, 'locked')
+        finally:
+            writer.rollback()
+            writer.close()
+
+    def test_wal_reader_sees_committed_rows(self):
+        path = make_url_index(self.base / 'u.sqlite')
+        writer = sqlite3.connect(path)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, first_seen, last_seen) "
+                       "VALUES ('https://new.example.test/', 'hn', 'r', 'p', 'new.example.test', '/', '[]', 'a', 'b')")
+        writer.commit()
+        try:
+            r = ri.url_index_summary(path, detail=False)
+            self.assertEqual(r['urls']['value'], 99)
+            self.assertEqual(r['hosts']['value'], 4)
+        finally:
+            writer.close()
+
+    def test_schema_drift(self):
+        path = self.base / 'drift.sqlite'
+        db = sqlite3.connect(path)
+        db.execute('CREATE TABLE urls (id INTEGER PRIMARY KEY, canonical_url TEXT, host TEXT)')
+        db.execute('CREATE TABLE test_runs (id INTEGER PRIMARY KEY, url_id INTEGER, lane TEXT)')
+        db.commit()
+        db.close()
+        with self.assertRaises(ri.SourceError) as caught:
+            ri.url_index_summary(path)
+        self.assertEqual(caught.exception.code, 'schema_mismatch')
+        # Optional tables missing (no observations/parameter_observations): still summarised.
+        path2 = make_url_index(self.base / 'u2.sqlite')
+        db = sqlite3.connect(path2)
+        db.execute('DROP TABLE observations')
+        db.execute('DROP TABLE parameter_observations')
+        db.commit()
+        db.close()
+        r = ri.url_index_summary(path2)
+        self.assertEqual(r['urls']['value'], 98)
+        self.assertIn('parameters', r['errors'])
+        self.assertEqual(r['detail']['untested_params'], [])
+
+    def test_not_a_database(self):
+        path = self.base / 'junk.sqlite'
+        path.write_bytes(b'not sqlite at all' * 100)
+        with self.assertRaises(ri.SourceError) as caught:
+            ri.url_index_summary(path)
+        self.assertEqual(caught.exception.code, 'invalid')
+
+
+class JsTests(Base):
+    def test_library_summary(self):
+        path = make_js_library(self.base / 'js_info.sqlite')
+        r = ri.js_library_summary(path)
+        self.assertEqual(r['files']['value'], 15)
+        self.assertEqual(r['bytes']['value'], sum(1000 * n for n in range(1, 16)))
+        self.assertEqual(r['source_maps']['value'], 4)
+        self.assertEqual(r['observations']['value'], 4)
+        self.assertEqual(r['open_observations']['value'], 2)
+        self.assertEqual(r['leads']['value'], 1)
+        d = r['detail']
+        self.assertEqual(d['hosts'][0]['host'], 'static.example.test')
+        self.assertEqual({o['observation_id'] for o in d['open_observations']}, {'o1', 'o3'})
+        signals = {s['signal']: s['count'] for s in d['signals']}
+        self.assertEqual(signals['sinks'], 15)
+        self.assertTrue(all(f['js_url'] for f in d['source_map_files']))
+
+    def test_js_schema_drift(self):
+        path = self.base / 'js_info.sqlite'
+        db = sqlite3.connect(path)
+        db.execute('CREATE TABLE js_files (sha256 TEXT PRIMARY KEY, byte_count INTEGER)')
+        db.commit()
+        db.close()
+        with self.assertRaises(ri.SourceError) as caught:
+            ri.js_library_summary(path)
+        self.assertEqual(caught.exception.code, 'schema_mismatch')
+
+
+class FileTests(Base):
+    def test_line_counts_exact_and_capped(self):
+        lane = make_lane(self.root)
+        out = ri.aggregates_summary(lane)
+        self.assertEqual(out['files']['urls.txt'], {'value': 120, 'approximate': False})
+        self.assertEqual(out['files']['hosts.txt']['value'], 3)
+        self.assertNotIn('alive.txt', out['files'])
+        lines, exact = ri.count_lines(lane / 'recon/aggregated/urls.txt', cap=1000)
+        self.assertFalse(exact)
+        self.assertAlmostEqual(lines, 120, delta=10)
+
+    def test_symlinked_aggregate_refused(self):
+        lane = make_lane(self.root)
+        outside = self.base / 'outside.txt'
+        outside.write_text('a\nb\n')
+        os.symlink(outside, lane / 'recon/aggregated/alive.txt')
+        out = ri.aggregates_summary(lane)
+        self.assertEqual(out['files']['alive.txt'], {'error': 'unavailable'})
+
+
+class ServiceTests(Base):
+    def test_background_compute_cache_and_invalidation(self):
+        lane = make_lane(self.root, js_shared=True)
+        svc = service(self.root, refresh_interval=0)
+        self.addCleanup(svc.close)
+        first = svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertTrue(first['partial'])
+        self.assertTrue(svc.wait_idle(30))
+        started = time.monotonic()
+        second = svc.program('web_bounty', 'acme-demo', 'web')
+        cached = time.monotonic() - started
+        self.assertFalse(second['partial'])
+        self.assertLess(cached, 0.5)
+        url = second['sources']['url_index']
+        self.assertEqual(url['state'], 'ready')
+        self.assertEqual(second['sources']['js']['origin'], 'shared')
+        self.assertEqual(second['headline']['findings'], 2)
+        self.assertEqual(second['headline']['js_files']['value'], 15)
+        hosts = {h['host']: h for h in second['hosts']['rows']}
+        self.assertTrue(hosts['static.example.test']['under_tested'])  # 12 JS files, no tests
+        self.assertFalse(hosts['app.example.test']['under_tested'])
+        self.assertEqual(hosts['app.example.test']['findings'], 1)  # archived finding excluded
+        self.assertEqual(hosts['api.example.test']['findings'], 1)
+        computed = url['computed_at']
+        # Same signature: no recompute.
+        svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertTrue(svc.wait_idle(10))
+        self.assertEqual(svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']['computed_at'], computed)
+        # A write changes the signature: served stale, then recomputed.
+        db = sqlite3.connect(lane / 'recon/url_index/url_index.sqlite')
+        db.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, first_seen, last_seen) "
+                   "VALUES ('https://n.example.test/', 'hn', 'r', 'p', 'n.example.test', '/', '[]', 'a', 'b')")
+        db.commit()
+        db.close()
+        stale = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']
+        self.assertTrue(stale['stale'])
+        self.assertTrue(svc.wait_idle(30))
+        fresh = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']
+        self.assertGreater(fresh['computed_at'], computed)
+        self.assertEqual(fresh['result']['urls']['value'], 99)
+
+    def test_locked_source_is_retried_without_a_file_change(self):
+        lane = make_lane(self.root)
+        path = lane / 'recon/url_index/url_index.sqlite'
+        svc = service(self.root, refresh_interval=0, query_budget=0.5)
+        self.addCleanup(svc.close)
+        writer = sqlite3.connect(path, timeout=0)
+        writer.execute('BEGIN EXCLUSIVE')
+        try:
+            svc.program('web_bounty', 'acme-demo', 'web')
+            self.assertTrue(svc.wait_idle(30))
+            locked = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']
+            self.assertEqual(locked['error'], {'code': 'locked'})
+        finally:
+            writer.rollback()
+            writer.close()
+        deadline = time.monotonic() + 30
+        while True:  # each request reschedules the transient failure until it succeeds
+            out = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']
+            if out['state'] == 'ready' or time.monotonic() > deadline:
+                break
+            svc.wait_idle(5)
+        self.assertEqual(out['state'], 'ready')
+        self.assertEqual(out['result']['urls']['value'], 98)
+
+    def test_refresh_interval_limits_recompute(self):
+        lane = make_lane(self.root)
+        svc = service(self.root, refresh_interval=3600)
+        self.addCleanup(svc.close)
+        svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertTrue(svc.wait_idle(30))
+        before = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']['computed_at']
+        os.utime(lane / 'recon/url_index/url_index.sqlite', None)
+        out = svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']
+        self.assertTrue(out['stale'])
+        self.assertTrue(svc.wait_idle(5))
+        self.assertEqual(svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']['computed_at'], before)
+        # An explicit refresh overrides the interval.
+        svc.program('web_bounty', 'acme-demo', 'web', refresh=True)
+        self.assertTrue(svc.wait_idle(30))
+        self.assertGreater(svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']['computed_at'], before)
+
+    def test_large_index_through_service_is_partial_then_cached(self):
+        lane = make_lane(self.root, url_index=False)
+        make_large_url_index(lane / 'recon/url_index/url_index.sqlite', rows=250_000)
+        svc = service(self.root, query_budget=0.5, exact_limit=50_000)
+        self.addCleanup(svc.close)
+        overview = svc.overview()
+        self.assertTrue(overview['partial'])
+        self.assertEqual(overview['programs'][0]['states']['url_index']['state'], 'computing')
+        self.assertTrue(svc.wait_idle(60))
+        row = svc.overview()['programs'][0]
+        self.assertEqual(row['urls'], {'value': 250_000, 'approximate': True, 'method': 'max_id'})
+        self.assertTrue(row['approximate'])
+        started = time.monotonic()
+        svc.overview()
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_missing_artifact_root(self):
+        make_lane(self.root)
+        svc = service(self.root, artifact_root=self.base / 'no-such-mount')
+        self.addCleanup(svc.close)
+        out = svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertFalse(out['artifact_root']['available'])
+        js = out['sources']['js']
+        self.assertEqual(js['state'], 'missing')
+        self.assertEqual([e['origin'] for e in js['expected']], ['artifact', 'shared'])
+        self.assertTrue(js['expected'][0]['path'].endswith('acme-demo/web/recon/js/_library/js_info.sqlite'))
+        none = service(self.root)
+        self.addCleanup(none.close)
+        self.assertFalse(none.artifact_state()['configured'])
+
+    def test_artifact_library_preferred_and_symlinks_checked(self):
+        make_lane(self.root, js_shared=True)
+        artifacts = self.base / 'artifacts'
+        make_js_library(artifacts / 'acme-demo/web/recon/js/_library/js_info.sqlite', hosts={'cdn.example.test': 2})
+        svc = service(self.root, artifact_root=artifacts)
+        self.addCleanup(svc.close)
+        svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertTrue(svc.wait_idle(30))
+        out = svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertEqual(out['sources']['js']['origin'], 'artifact')
+        self.assertEqual(out['headline']['js_files']['value'], 2)
+        # A program directory symlinked outside the artifact root is refused.
+        outside = self.base / 'elsewhere'
+        make_js_library(outside / 'web/recon/js/_library/js_info.sqlite')
+        os.rename(artifacts / 'acme-demo', artifacts / 'moved')
+        os.symlink(outside, artifacts / 'acme-demo')
+        svc2 = service(self.root, artifact_root=artifacts)
+        self.addCleanup(svc2.close)
+        js = svc2.program('web_bounty', 'acme-demo', 'web')['sources']['js']
+        self.assertEqual(js['error'], {'code': 'unavailable', 'detail': 'symlink_outside_root'})
+        # Inside the root it is followed.
+        os.unlink(artifacts / 'acme-demo')
+        os.symlink(artifacts / 'moved', artifacts / 'acme-demo')
+        svc3 = service(self.root, artifact_root=artifacts)
+        self.addCleanup(svc3.close)
+        svc3.program('web_bounty', 'acme-demo', 'web')
+        self.assertTrue(svc3.wait_idle(30))
+        self.assertEqual(svc3.program('web_bounty', 'acme-demo', 'web')['sources']['js']['origin'], 'artifact')
+
+    def test_symlinked_url_index_refused(self):
+        lane = make_lane(self.root, url_index=False)
+        real = make_url_index(self.base / 'real.sqlite')
+        (lane / 'recon/url_index').mkdir(parents=True)
+        os.symlink(real, lane / 'recon/url_index/url_index.sqlite')
+        svc = service(self.root)
+        self.addCleanup(svc.close)
+        out = svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertEqual(out['sources']['url_index']['error']['code'], 'unavailable')
+
+    def test_unknown_program_and_binaries_lanes(self):
+        make_lane(self.root)
+        (self.root / 'binaries/initech/apk').mkdir(parents=True)
+        svc = service(self.root)
+        self.addCleanup(svc.close)
+        self.assertIsNone(svc.program('web_bounty', 'nope', 'web'))
+        self.assertIsNone(svc.program('binaries', 'initech', 'apk'))
+        self.assertIsNone(svc.program('web_bounty', '../root', 'web'))
+        self.assertEqual([r['program'] for r in svc.overview()['programs']], ['acme-demo'])
+
+    def test_missing_url_index_reports_expected_path(self):
+        make_lane(self.root, url_index=False)
+        svc = service(self.root)
+        self.addCleanup(svc.close)
+        out = svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertEqual(out['sources']['url_index']['state'], 'missing')
+        self.assertTrue(out['sources']['url_index']['expected'].endswith('acme-demo/web/recon/url_index/url_index.sqlite'))
+
+
+class ReadLeavesNoTraceTests(Base):
+    """Review 9 blocker 1: a read never creates, modifies or leaves files next to a database."""
+
+    def setUp(self):
+        super().setUp()
+        self.lane = make_lane(self.root)
+        self.index = self.lane / 'recon/url_index/url_index.sqlite'
+
+    def read_unchanged(self, artifact_root=None):
+        before = tree_snapshot(self.base)
+        time.sleep(0.02)
+        svc = service(self.root, artifact_root=artifact_root)
+        try:
+            out = full_read(self, svc)
+        finally:
+            svc.close()
+        self.assertEqual(tree_snapshot(self.base), before)
+        return out
+
+    def test_clean_wal_index_leaves_no_files(self):
+        to_wal(self.index)
+        out = self.read_unchanged()
+        url = out['sources']['url_index']
+        self.assertEqual(url['state'], 'ready')
+        self.assertEqual(url['result']['open_mode'], 'immutable')
+        self.assertEqual(url['result']['urls']['value'], 98)
+
+    def test_empty_wal_file_reads_immutable(self):
+        to_wal(self.index)
+        Path(str(self.index) + '-wal').write_bytes(b'')
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['result']['open_mode'], 'immutable')
+        Path(str(self.index) + '-shm').write_bytes(b'')  # empty -wal beside a -shm: still nothing to miss
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['result']['open_mode'], 'immutable')
+
+    def test_active_writer_wal_creates_nothing(self):
+        writer = sqlite3.connect(self.index)
+        self.addCleanup(writer.close)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('PRAGMA wal_autocheckpoint=0')
+        writer.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, first_seen, last_seen) "
+                       "VALUES ('https://w.example.test/', 'hw', 'r', 'p', 'w.example.test', '/', '[]', 'a', 'b')")
+        writer.commit()
+        self.assertGreater(os.path.getsize(str(self.index) + '-wal'), 0)
+        out = self.read_unchanged()
+        url = out['sources']['url_index']['result']
+        self.assertEqual(url['open_mode'], 'ro')
+        self.assertEqual(url['urls']['value'], 99)  # committed rows in the WAL are visible
+
+    def test_rollback_journal_index_unchanged(self):
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['result']['open_mode'], 'ro')
+
+    def test_read_only_directory(self):
+        to_wal(self.index)
+        folder = self.index.parent
+        os.chmod(folder, 0o555)
+        self.addCleanup(os.chmod, folder, 0o755)
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['state'], 'ready')
+        self.assertEqual(out['sources']['url_index']['result']['urls']['value'], 98)
+
+    def test_side_file_that_is_not_regular_is_not_opened(self):
+        # Review 9b: a FIFO beside the database would block the worker inside SQLite.
+        to_wal(self.index)
+        for suffix in ('-wal', '-shm', '-journal'):
+            fifo = str(self.index) + suffix
+            os.mkfifo(fifo)
+            try:
+                with self.assertRaises(ri.SourceError) as caught:
+                    ri.open_plan(self.index)
+                self.assertEqual(caught.exception.code, 'unavailable', suffix)
+                self.assertIn('regular file', caught.exception.detail)
+            finally:
+                os.unlink(fifo)
+
+    def test_malformed_immutable_read_is_transient(self):
+        # Review 9b: torn pages seen by an immutable read are retried, not cached as invalid.
+        to_wal(self.index)
+        db = ri.ReadOnlyDB(self.index)
+        self.addCleanup(db.close)
+        self.assertEqual(db.mode, 'immutable')
+        self.assertEqual(db._classify(sqlite3.DatabaseError('database disk image is malformed')).code, 'changed')
+        db.mode = 'ro'
+        self.assertEqual(db._classify(sqlite3.DatabaseError('database disk image is malformed')).code, 'invalid')
+
+    def test_wal_without_shm_is_not_opened(self):
+        other = self.base / 'writer'
+        other.mkdir()
+        source = make_url_index(other / 'u.sqlite')
+        writer = sqlite3.connect(source)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('PRAGMA wal_autocheckpoint=0')
+        writer.execute("UPDATE urls SET source = 'changed'")
+        writer.commit()
+        import shutil
+        shutil.copyfile(source, self.index)
+        shutil.copyfile(str(source) + '-wal', str(self.index) + '-wal')
+        writer.close()
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['error'], {'code': 'unavailable', 'detail': 'writer state unclear'})
+
+    def test_artifact_js_library_same_rule(self):
+        artifacts = self.base / 'artifacts'
+        library = make_js_library(artifacts / 'acme-demo/web/recon/js/_library/js_info.sqlite')
+        to_wal(library)
+        to_wal(self.index)
+        out = self.read_unchanged(artifact_root=artifacts)
+        js = out['sources']['js']
+        self.assertEqual(js['origin'], 'artifact')
+        self.assertEqual(js['result']['open_mode'], 'immutable')
+        self.assertEqual(js['result']['files']['value'], 15)
+
+
+HOSTILE_KEY = '\x1b[201~\x15touch PWNED\rredirect_url'
+BIDI_HOST = 'evil\u202e.example.test'
+
+
+def add_hostile(path):
+    """A parameter key and host as BBH would store them from a target URL (parse_qsl-decoded)."""
+    db = sqlite3.connect(path)
+    cur = db.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, source, first_seen, last_seen) "
+                     "VALUES (?, 'hx', 'rx', 'px', ?, '/', ?, 'synthetic', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                     (f'https://{BIDI_HOST}/?a=1\r', BIDI_HOST, json.dumps([HOSTILE_KEY])))
+    db.execute("INSERT INTO parameter_observations (url_id, param_key, location, source, value_shape, lane_hints, first_seen, last_seen) "
+               "VALUES (?, ?, 'query', 'synthetic', 'text', '[\"open-redirect\"]', 'a', 'b')", (cur.lastrowid, HOSTILE_KEY))
+    db.commit()
+    db.close()
+
+
+class UnsafeCharacterTests(Base):
+    """Review 9 blocker 2: target-controlled values are display-safe and flagged so no copy is offered."""
+
+    def test_payload_escapes_and_flags_unsafe_values(self):
+        lane = make_lane(self.root)
+        add_hostile(lane / 'recon/url_index/url_index.sqlite')
+        svc = service(self.root)
+        self.addCleanup(svc.close)
+        out = full_read(self, svc)
+        encoded = json.dumps(out, ensure_ascii=False)
+        self.assertIsNone(ri.DISPLAY_ESCAPE.search(encoded), 'raw control or bidi characters in the payload')
+        params = {p['param_key']: p for p in out['sources']['url_index']['result']['detail']['untested_params']}
+        hostile = params['\\x1b[201~\\x15touch PWNED\\x0dredirect_url']
+        self.assertTrue(hostile['unsafe_chars'])
+        self.assertEqual(hostile['example_url'], 'https://evil\\u202e.example.test/?a=1\\x0d')
+        self.assertFalse(params['file']['unsafe_chars'])
+        hosts = {h['host']: h for h in out['hosts']['rows']}
+        self.assertTrue(hosts['evil\\u202e.example.test']['unsafe_chars'])
+        self.assertFalse(hosts['app.example.test']['unsafe_chars'])
+        self.assertFalse(out['unsafe_chars'])
+
+    def test_escape_covers_every_listed_character(self):
+        listed = [*range(0x00, 0x20), 0x7f, *range(0x80, 0xa0), 0x061c, *range(0x200b, 0x2010), *range(0x202a, 0x202f),
+                  *range(0x2060, 0x206a), 0xfeff, 0x2028, 0x2029, 0x00ad]
+        for code in listed:
+            value = f'a{chr(code)}b'
+            self.assertTrue(ri.is_unsafe(value), hex(code))
+            self.assertIsNone(ri.DISPLAY_ESCAPE.search(ri.text(value)), hex(code))
+        self.assertEqual(ri.text('a\x1bb\u202ec'), 'a\\x1bb\\u202ec')
+        # Review 9b: ZWNJ (Persian) and ZWJ (emoji sequences) display as they are but are never offered for copying.
+        for value in ('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645', '\U0001f469\u200d\U0001f4bb'):
+            self.assertEqual(ri.text(value), value)
+            self.assertTrue(ri.is_unsafe(value))
+        self.assertFalse(ri.is_unsafe('plain-key_1', 'https://a.example.test/?q=ü'))
+
+
+@unittest.skipUnless(shutil.which('node') and shutil.which('bash') and hasattr(os, 'fork'), 'needs node, bash and a pty')
+class PasteTests(Base):
+    """Review 9 repro (paste.py): paste the bbh next copy text, bracketed, into an interactive bash without Enter."""
+
+    def test_copied_command_cannot_run_on_paste(self):
+        import pty
+        import select
+        import subprocess
+        marker = self.base / 'PWNED'
+        module = Path(__file__).resolve().parents[1] / 'static/modules/recon-intel.js'
+        key = HOSTILE_KEY.replace('PWNED', str(marker))
+        clip = subprocess.run(['node', '-e', 'const ri = require(process.argv[1]); const c = ri.bbhNext("acme-demo", "open-redirect", process.argv[2]); '
+                               'process.stdout.write(c == null ? "" : c);', str(module), key], capture_output=True, check=True).stdout.decode()
+        self.assertEqual(clip, '', 'a command was built from a key with control characters')
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execvp('bash', ['bash', '--norc', '--noprofile', '-i'])
+
+        def drain(seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                if select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        os.read(fd, 65536)
+                    except OSError:
+                        return
+        try:
+            drain(1.0)
+            os.write(fd, ('\x1b[200~' + clip.replace('\n', '\r') + '\x1b[201~').encode())
+            drain(1.5)
+            self.assertFalse(marker.exists(), 'pasted text ran a command before Enter')
+        finally:
+            os.write(fd, b'\x03exit\r')
+            drain(0.5)
+            os.close(fd)
+            os.waitpid(pid, 0)
+
+
+class HttpTests(Base):
+    def setUp(self):
+        super().setUp()
+        make_lane(self.root, js_shared=True)
+        self.server = app.make_server(self.root, port=0, artifact_root=self.base / 'absent')
+        self.addCleanup(self.server.server_close)
+        self.port = self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+
+    def get(self, path, params=None, host=None):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        try:
+            conn.request('GET', path + (f'?{urlencode(params)}' if params else ''),
+                         headers={'Host': host or f'127.0.0.1:{self.port}'})
+            response = conn.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            conn.close()
+
+    def test_overview_and_program(self):
+        status, body = self.get('/api/recon/overview')
+        self.assertEqual(status, 200)
+        self.assertIn('partial', body)
+        self.assertEqual(body['programs'][0]['id'], 'web_bounty/acme-demo')
+        self.assertTrue(self.server.recon.wait_idle(30))
+        status, body = self.get('/api/recon/program', {'family': 'web_bounty', 'program': 'acme-demo', 'lane': 'web'})
+        self.assertEqual(status, 200)
+        self.assertTrue(self.server.recon.wait_idle(30))
+        status, body = self.get('/api/recon/program', {'family': 'web_bounty', 'program': 'acme-demo', 'lane': 'web'})
+        self.assertFalse(body['partial'])
+        self.assertEqual(body['headline']['urls']['value'], 98)
+        self.assertIn('computed_at', body)
+        self.assertFalse(body['artifact_root']['available'])
+        json.dumps(body, allow_nan=False)
+
+    def test_rejections(self):
+        self.assertEqual(self.get('/api/recon/overview', host='evil.example')[0], 403)
+        self.assertEqual(self.get('/api/recon/overview', {'x': '1'})[0], 400)
+        self.assertEqual(self.get('/api/recon/program', {'family': 'web_bounty', 'program': 'acme-demo'})[0], 400)
+        self.assertEqual(self.get('/api/recon/program', {'family': 'web_bounty', 'program': '../../etc', 'lane': 'web'})[0], 400)
+        self.assertEqual(self.get('/api/recon/program', {'family': 'web_bounty', 'program': 'other', 'lane': 'web'})[0], 404)
+        self.assertEqual(self.get('/api/recon/program', {'family': 'web_bounty', 'program': 'acme-demo', 'lane': 'web', 'refresh': '2'})[0], 400)
+
+
+class ConfigTests(unittest.TestCase):
+    def test_flags(self):
+        args = app.parse_config(['--root', '/tmp', '--artifact-root', '/srv/artifacts', '--recon-query-budget', '1.5'])
+        self.assertEqual(args.artifact_root, Path('/srv/artifacts'))
+        self.assertEqual(args.recon_query_budget, 1.5)
+        default = app.parse_config(['--root', '/tmp'])
+        self.assertEqual(default.artifact_root, ri.default_artifact_root())
+        with self.assertRaises(SystemExit):
+            app.parse_config(['--root', '/tmp', '--recon-query-budget', '0'])
+
+
+if __name__ == '__main__':
+    unittest.main()

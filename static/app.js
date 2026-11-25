@@ -55,6 +55,7 @@
   function hrefFor(target={}) {
     if(!target || typeof target!=='object' || target.view==='dashboard')return '#/dashboard';
     if(target.view==='recent')return recentRoute(target.query);
+    if(target.view==='recon')return reconRoute(target.query);
     const program=target.program==null ? state.program : String(target.program);
     if(!program)return '#/programs';
     const lane=target.lane!=null ? String(target.lane) : program===state.program ? state.lane : String((list(programs().find(p=>String(p.id)===program)?.lanes)||[])[0]?.name ?? '');
@@ -453,7 +454,7 @@
   // the Recent filters without a render, so they are also refreshed just before
   // the pointer or keyboard can use them (hover status, middle-click, menu).
   function syncNavLinks() {
-    document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('href',b.dataset.view==='recent' ? recentRoute(state.recentQuery) : b.dataset.view==='program' ? programRoute() : '#/dashboard'));
+    document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('href',b.dataset.view==='recent' ? recentRoute(state.recentQuery) : b.dataset.view==='recon' ? reconRoute(state.reconQuery) : b.dataset.view==='program' ? programRoute() : '#/dashboard'));
   }
   for(const type of ['pointerover','pointerdown','focusin','contextmenu'])document.querySelector('.sidebar .nav')?.addEventListener(type,syncNavLinks,true);
   document.querySelectorAll('[data-view]').forEach(link => link.addEventListener('click', event => {if(!plainClick(event))return;event.preventDefault();state.view=link.dataset.view;state.routeNotice='';routePush=true;render();}));
@@ -1622,12 +1623,12 @@
     portfolioButton.disabled=!!state.data?._portfolioLoading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     syncNavLinks();
-    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':'Programs';
+    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':state.view==='recon'?'Recon intel':'Programs';
     const trail=document.querySelector('#breadcrumb-trail'), crumbProgram=state.view==='program' && !state.loading ? currentProgram() : null;
     if(trail)trail.innerHTML=crumbProgram ? [programLabel(crumbProgram),state.lane,(sections.find(([k])=>k===state.section)||[])[1]].filter(Boolean).map(part=>`<span class="sep" aria-hidden="true">/</span> <span class="crumb-current">${esc(part)}</span>`).join(' ') : '';
     if(state.loading) app.innerHTML=skeleton();
     else if(state.error) app.innerHTML=`<div class="panel empty error-state" role="alert">${icon('exclamation-circle')}<h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
-    else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():workspace();
+    else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():state.view==='recon'?reconView():workspace();
     for(const old of keptHosts){const fresh=app.querySelector(`#${old.id}`);if(fresh && ['family','program','lane','path','reportId'].every(k=>fresh.dataset[k]===old.dataset[k]))fresh.replaceWith(old);}
     const reportList=app.querySelector('.report-links');if(reportList && reportListScroll)reportList.scrollTop=reportListScroll;
     if(state.routeNotice && !state.loading)app.insertAdjacentHTML('afterbegin',`<div class="message warning" role="alert">${esc(state.routeNotice)} <button type="button" class="link-button" data-dismiss-route-notice>Dismiss</button></div>`);
@@ -1667,6 +1668,11 @@
   function recentView() {
     return `${title('Recent reports','Reports across every program and lane, by last modified time.')}<div class="stack">${rootWarning()}<div id="recent-reports-host"><div class="panel state">Loading recent reports…</div></div></div>`;
   }
+  // Recon intel view: the page frame only; static/modules/recon-intel.js fills
+  // #recon-intel-host from /api/recon/* and owns the #/recon?<query> keys.
+  function reconView() {
+    return `${title('Recon intel','URL index, JS library and test depth per program: what has been looked for and what to hunt next.')}<div class="stack">${rootWarning()}<div id="recon-intel-host"><div class="panel state">Loading recon intel…</div></div></div>`;
+  }
   function skeleton() {
     const line=w=>`<span class="skeleton sk-line" style="width:${w}%"></span>`;
     return `<div class="skeleton-page" aria-busy="true"><p class="skeleton-caption">${icon('circle-o-notch fa-spin')}Loading workspace…</p><div class="panel panel-pad"><span class="skeleton sk-title"></span>${line(42)}<div class="stats">${('<div class="stat">'+line(30)+line(60)+'</div>').repeat(4)}</div></div><div class="dashboard-grid"><div class="panel panel-pad">${line(35)}${line(90)}${line(80)}${line(70)}</div><div class="panel panel-pad">${line(35)}${line(85)}${line(75)}${line(60)}</div></div></div>`;
@@ -1676,18 +1682,21 @@
   // #/recent?<query>: the Recent view's filters (recent-reports.js owns the
   // keys and validation; the app only stores and round-trips the string).
   function recentRoute(query) { return `#/recent${query ? '?'+String(query) : ''}`; }
+  function reconRoute(query) { return `#/recon${query ? '?'+String(query) : ''}`; }
   function programRoute() {
     if(!state.program)return '#/programs';
     return `#/programs/${encodeURIComponent(state.program)}/${encodeURIComponent(state.lane)}/${state.section}${state.section==='reports' && state.report ? '/'+encodeURIComponent(state.report) : ''}`;
   }
   function routeFor() {
     if(state.view==='recent')return recentRoute(state.recentQuery);
+    if(state.view==='recon')return reconRoute(state.reconQuery);
     if(state.view!=='program')return '#/dashboard';
     return programRoute();
   }
   function parseRoute(hash) {
     const raw=String(hash||'').replace(/^#\/?/,''), mark=raw.indexOf('?');
     if((mark<0 ? raw : raw.slice(0,mark))==='recent')return {view:'recent',recentQuery:mark<0 ? '' : raw.slice(mark+1)};
+    if((mark<0 ? raw : raw.slice(0,mark))==='recon')return {view:'recon',reconQuery:mark<0 ? '' : raw.slice(mark+1)};
     const parts=raw.split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
     if(parts[0]==='dashboard')return {view:'dashboard'};
     if(parts[0]==='programs'){
@@ -1706,6 +1715,7 @@
     const missingProgram=next.program ? !programs().some(p=>String(p.id)===String(next.program)) : false;
     if(next.view)state.view=next.view;
     if(next.view==='recent' && typeof next.recentQuery==='string')state.recentQuery=next.recentQuery;
+    if(next.view==='recon' && typeof next.reconQuery==='string')state.reconQuery=next.reconQuery;
     if(next.program!==undefined && next.program!==state.program){
       ++laneGeneration;state.program=next.program;state.lane=next.lane||'';state.report='';state.filters=emptyFilters();normalizeSelection();
     } else if(next.lane && next.lane!==state.lane && (list(currentProgram()?.lanes)||[]).some(l=>String(l.name)===next.lane)){
@@ -1882,6 +1892,7 @@
   if(initialRoute){
     state.view=initialRoute.view;
     if(initialRoute.view==='recent')state.recentQuery=initialRoute.recentQuery;
+    if(initialRoute.view==='recon')state.reconQuery=initialRoute.reconQuery;
     if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
   }
   // Public UI helpers for feature modules (see style.css header for tokens).
