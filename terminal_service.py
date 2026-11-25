@@ -53,6 +53,7 @@ MAX_BODY = 64 * 1024
 MAX_INPUT = 64 * 1024
 VIEWER_QUEUE_BYTES = 4 * 1024 * 1024
 PING_INTERVAL = 20
+MAX_CONNECTIONS = 64  # concurrent connections (each WebSocket viewer holds one)
 PEER_TIMEOUT = 75
 STATIC = Path(__file__).parent / 'terminal_static'
 
@@ -93,7 +94,10 @@ class Viewer:
                 return
             self.pending += len(payload)
             if self.pending > VIEWER_QUEUE_BYTES:
+                # Too far behind: drop it now. abort() does not wait for a sender
+                # stuck in sendall() to a client that stopped reading.
                 self.closed = True
+                self.ws.abort()
                 self.queue.put(None)
                 return
         self.queue.put((kind, payload))
@@ -125,7 +129,8 @@ class Viewer:
 
 def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_record=None, state_dir,
                  backend=None, max_sessions=12, pause_after=300, remove_after=4 * 3600, min_free_memory=2 * 1024 ** 3,
-                 idle_timeout=None, reap_interval=10, clock=time.time, mem_available=None):
+                 idle_timeout=None, reap_interval=10, clock=time.time, mem_available=None,
+                 max_connections=MAX_CONNECTIONS, ping_interval=PING_INTERVAL, peer_timeout=PEER_TIMEOUT):
     root = Path(root).absolute()
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -290,9 +295,10 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             if path == '/api/login':
                 sid, error = auth.login(body.get('username', ''), body.get('password', ''))
                 if error:
-                    status = {'locked': 429, 'disabled': 403}.get(error, 401)
+                    status = {'locked': 429, 'busy': 429, 'disabled': 403}.get(error, 401)
                     return self.reply(status, {'error': error, 'message': {
                         'locked': 'Too many failed attempts. Try again in 15 minutes.',
+                        'busy': 'Too many sign-in attempts at once. Try again in a moment.',
                         'disabled': 'Password sign-in is not configured.'}.get(error, 'Wrong username or password.')})
                 return self.reply(200, {'ok': True}, [('Set-Cookie', auth.session_cookie(sid))])
             if path == '/api/logout':
@@ -350,29 +356,37 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             self.end_headers()
             self.wfile.flush()
             self.close_connection = True
+            # Sends and reads both time out: a client that stops reading cannot pin
+            # this thread in sendall(), and a silent one (no pongs) is dropped.
+            self.connection.settimeout(peer_timeout)
+            _, method = self.identity()
             ws = terminal_ws.WebSocket(self.rfile, self.connection, max_frame=256 * 1024, max_message=256 * 1024)
             viewer = Viewer(ws)
             try:
                 session = manager.attach(sel, viewer)
-            except sb.SandboxError as error:
-                viewer.send_control({'type': 'error', 'code': error.code, 'message': error.message})
+            except Exception as error:
+                code, message = ((error.code, error.message) if isinstance(error, sb.SandboxError)
+                                 else ('sandbox_failed', 'The sandbox could not start.'))
+                viewer.send_control({'type': 'error', 'code': code, 'message': message})
                 viewer.close()
+                # Give the client 5 s to answer the close, then drop the connection.
+                self.connection.settimeout(5)
                 ws.recv()
-                return
-            except Exception:
-                viewer.send_control({'type': 'error', 'code': 'sandbox_failed', 'message': 'The sandbox could not start.'})
-                viewer.close()
+                ws.abort()
                 return
             stop = threading.Event()
 
             def pinger():
-                while not stop.wait(PING_INTERVAL):
-                    if time.monotonic() - ws.last_received > PEER_TIMEOUT:
-                        ws.close(1001, 'timeout')
-                        try:
-                            self.connection.shutdown(2)
-                        except OSError:
-                            pass
+                while not stop.wait(ping_interval):
+                    if time.monotonic() - ws.last_received > peer_timeout:
+                        ws.abort()
+                        return
+                    if method == 'password' and not auth.session_user(self.headers):
+                        # Signed out or expired: an open terminal must not outlive the session.
+                        viewer.send_control({'type': 'closed', 'message': 'Signed out. Sign in again to use the terminal.'})
+                        ws.close(1008, 'signed out')
+                        time.sleep(0.5)
+                        ws.abort()
                         return
                     ws.ping()
             threading.Thread(target=pinger, daemon=True).start()
@@ -405,7 +419,29 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 viewer.close()
 
     class Server(ThreadingHTTPServer):
+        """Thread per connection, but never more than MAX_CONNECTIONS at once:
+        a flood is refused at accept time instead of creating unbounded threads."""
         daemon_threads = True
+
+        def process_request(self, request, client_address):
+            if not self.slots.acquire(blocking=False):
+                try:
+                    request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+                except OSError:
+                    pass
+                self.shutdown_request(request)
+                return
+            try:
+                super().process_request(request, client_address)
+            except BaseException:
+                self.slots.release()
+                raise
+
+        def process_request_thread(self, request, client_address):
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self.slots.release()
 
         def handle_error(self, request, client_address):
             if not isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
@@ -419,6 +455,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 super().server_close()
 
     server = Server(('127.0.0.1', port), Handler)
+    server.slots = threading.BoundedSemaphore(max_connections)
     server.manager, server.auth, server.checks = manager, auth, checks
     return server
 

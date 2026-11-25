@@ -132,12 +132,16 @@ def _unmask(payload, mask):
     return (int.from_bytes(payload, "big") ^ key).to_bytes(n, "big")
 
 
+MAX_FRAGMENTS = 1024  # frames per message; zero-length continuations must not grow memory
+
+
 class WebSocket:
-    def __init__(self, rfile, sock, *, max_frame=1 << 20, max_message=1 << 20):
+    def __init__(self, rfile, sock, *, max_frame=1 << 20, max_message=1 << 20, max_fragments=MAX_FRAGMENTS):
         self.rfile = rfile
         self.sock = sock
         self.max_frame = max_frame
         self.max_message = max_message
+        self.max_fragments = max_fragments
         self.last_received = time.monotonic()
         self.closed = False          # no more sends (close frame sent / failed)
         self._done = False           # recv() finished for good
@@ -182,6 +186,12 @@ class WebSocket:
         if self._done or code in _FAIL_CODES:
             self._shutdown()
         return sent
+
+    def abort(self):
+        """Drop the connection now without taking the send lock, so a sender
+        stuck in sendall() to a peer that stopped reading is released."""
+        self.closed = True
+        self._shutdown()
 
     def _shutdown(self):
         self._done = True
@@ -288,6 +298,8 @@ class WebSocket:
                 raise WebSocketClosed(CLOSE_INVALID_DATA, "invalid UTF-8") from None
         else:
             self._msg_parts.append(payload)
+        if len(self._msg_parts) > self.max_fragments:
+            raise WebSocketClosed(CLOSE_TOO_BIG, "too many fragments")
         self._msg_len += len(payload)
         if not fin:
             return None

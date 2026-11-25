@@ -4,6 +4,7 @@ import json
 import shutil
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import urlencode
@@ -221,6 +222,155 @@ class ServiceTests(unittest.TestCase):
         client = self.ws(fx.selector('D99-missing/x.md'))
         client.pump_until(lambda c: any(m['type'] == 'error' for m in c.controls))
         self.assertEqual(client.controls[-1]['code'], 'report_not_found')
+        client.close()
+
+
+class HardeningTests(unittest.TestCase):
+    """Regression tests for the security review of 9235727."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = fx.tmp_base('hardening')
+        cls.root = fx.make_root(cls.base)
+        cls.server = ts.make_service(cls.root, port=0, allowed_origins=[ORIGIN], allowed_users=['ryu@example.test'],
+                                     hash_record=ta.hash_password(PASSWORD, n=2 ** 14), state_dir=cls.base / 'state',
+                                     backend=sb.LocalBackend(cls.base / 'local'), reap_interval=0, min_free_memory=0,
+                                     max_connections=12, ping_interval=0.3, peer_timeout=2)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def setUp(self):
+        self.server.auth.failures = []
+        self.server.auth.locked_until = 0
+
+    request = ServiceTests.request
+    ws = ServiceTests.ws
+
+    def login(self):
+        status, response, _ = self.request('POST', '/terminal/api/login', {'username': 'ryushe', 'password': PASSWORD}, tailnet=False)
+        self.assertEqual(status, 200)
+        return response.getheader('Set-Cookie').split(';')[0]
+
+    def test_parallel_logins_run_at_most_two_scrypt_verifications(self):
+        # Review blocker 1: 100 parallel logins reached 1.48 GiB (32 MiB per scrypt verify).
+        import unittest.mock
+        active, peak, lock = [0], [0], threading.Lock()
+        real = ta.verify_password
+
+        def counting(record, password):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                time.sleep(0.05)
+                return real(record, password)
+            finally:
+                with lock:
+                    active[0] -= 1
+        statuses = []
+        with unittest.mock.patch.object(ta, 'verify_password', counting):
+            def attempt():
+                try:
+                    statuses.append(self.request('POST', '/terminal/api/login', {'username': 'ryushe', 'password': 'wrong'},
+                                                 tailnet=False)[0])
+                except (ConnectionError, http.client.HTTPException):
+                    statuses.append('refused')  # over the connection cap: 503 and close
+            threads = [threading.Thread(target=attempt) for _ in range(50)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(60)
+        self.assertLessEqual(peak[0], ta.MAX_VERIFY)
+        self.assertEqual(len(statuses), 50)
+        self.assertTrue(set(statuses) <= {401, 429, 503, 'refused'}, statuses)
+        self.assertLessEqual(statuses.count(401), ta.MAX_FAILURES, 'never more failed guesses than the lockout budget')
+        self.assertTrue(429 in statuses or 'refused' in statuses)
+
+    def test_connection_cap_refuses_floods(self):
+        import socket as socket_mod
+        idle = []
+        try:
+            for _ in range(12):
+                idle.append(socket_mod.create_connection(('127.0.0.1', self.port), timeout=5))
+            time.sleep(0.3)
+            extra = socket_mod.create_connection(('127.0.0.1', self.port), timeout=5)
+            self.assertTrue(extra.recv(100).startswith(b'HTTP/1.1 503'))
+            extra.close()
+        finally:
+            for sock in idle:
+                sock.close()
+        deadline = time.time() + 10
+        while time.time() < deadline and self.request('GET', '/healthz', origin=False)[0] != 200:
+            time.sleep(0.2)
+        self.assertEqual(self.request('GET', '/terminal/api/status')[0], 200, 'slots are released')
+
+    def test_stalled_viewer_is_dropped(self):
+        # Review item 3: a client that stops reading used to pin its thread (and its
+        # viewer slot) forever: the sender sat in sendall() holding the send lock.
+        import socket as socket_mod
+        sel = fx.selector(fx.SECOND)
+        reader = self.ws(sel)
+        reader.pump_until(lambda c: any(m['type'] == 'hello' for m in c.controls))
+        stalled = self.ws(sel)
+        stalled.sock.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_RCVBUF, 4096)
+        stop = threading.Event()
+
+        def keep_reading():  # the healthy device keeps up and answers nothing else
+            reader.sock.settimeout(0.5)
+            while not stop.is_set():
+                try:
+                    reader.frame()
+                except Exception:
+                    pass
+        drain = threading.Thread(target=keep_reading, daemon=True)
+        drain.start()
+        reader.send_json({'t': 'in', 'd': 'yes stall-output-line-padding-padding | head -c 20000000; echo done-$((6*7))\r'})
+        deadline = time.time() + 25
+        viewers = 2
+        while time.time() < deadline:
+            _, _, payload = self.request('GET', '/terminal/api/session?' + urlencode(sel))
+            viewers = payload['session']['viewers']
+            if viewers == 1:
+                break
+            time.sleep(0.3)
+        stop.set()
+        drain.join(5)
+        self.assertEqual(viewers, 1, 'the stalled viewer was detached and the reading one stayed')
+        stalled.close()
+        reader.close()
+
+    def test_logout_ends_the_open_websocket(self):
+        # Review item 7: logout or expiry did not end an open terminal.
+        cookie = self.login()
+        client = self.ws(fx.selector(fx.THIRD), tailnet=False, cookie=cookie)
+        self.assertEqual(client.status, 101)
+        client.pump_until(lambda c: any(m['type'] == 'hello' for m in c.controls))
+        self.request('POST', '/terminal/api/logout', {}, tailnet=False, headers={'Cookie': cookie})
+        started = time.time()
+        with self.assertRaises(EOFError):
+            client.pump_until(lambda c: False, limit=1000)
+        self.assertLess(time.time() - started, 5)
+        client.close()
+
+    def test_attach_error_does_not_wait_forever(self):
+        # Review item 8: the error path blocked in ws.recv() until the client spoke.
+        client = self.ws(fx.selector(fx.NAVIGATION))
+        client.pump_until(lambda c: any(m['type'] == 'error' for m in c.controls))
+        client.sock.settimeout(10)
+        started = time.time()
+        while True:
+            try:
+                if not client.sock.recv(4096):
+                    break
+            except OSError:
+                break
+        self.assertLess(time.time() - started, 8, 'server closed the connection on its own')
         client.close()
 
 

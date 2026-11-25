@@ -1,6 +1,7 @@
 import email.message
 import os
 import socket
+import time
 import struct
 import sys
 import threading
@@ -165,6 +166,36 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(self.ws.recv(), ("binary", b"abcdef"))
         self.assertEqual(read_server_frame(self.cli_r)[:4], (True, 0xA, b"pp", False))
         self.assertGreaterEqual(self.ws.last_received, before)
+
+    def test_zero_length_continuations_are_capped(self):
+        # Review item 9: empty continuation frames used to grow the part list forever.
+        frames = [client_frame(2, b"a", fin=False)] + [client_frame(0, b"", fin=False)] * tw.MAX_FRAGMENTS
+        threading.Thread(target=self.send, args=tuple(frames), daemon=True).start()
+        self.expect_close(1009)
+
+    def test_fragment_cap_allows_normal_fragmentation(self):
+        self.send(*([client_frame(2, b"x", fin=False)] + [client_frame(0, b"x", fin=False)] * 10 + [client_frame(0, b"x")]))
+        self.assertEqual(self.ws.recv(), ("binary", b"x" * 12))
+
+    def test_abort_releases_a_sender_blocked_on_a_stalled_peer(self):
+        # Review item 3: the peer stops reading; sendall blocks while holding the send lock.
+        self.srv.settimeout(None)
+        blocked = threading.Event()
+        def flood():
+            blocked.set()
+            while self.ws.send_binary(b"z" * 65536):
+                pass
+        sender = threading.Thread(target=flood, daemon=True)
+        sender.start()
+        blocked.wait(5)
+        time.sleep(0.3)
+        self.assertTrue(sender.is_alive(), "sender is stuck in sendall")
+        started = time.monotonic()
+        self.ws.abort()  # must not wait for the send lock
+        sender.join(5)
+        self.assertFalse(sender.is_alive())
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(self.ws.closed)
 
     def test_split_multibyte_text_ok(self):
         data = "€".encode()

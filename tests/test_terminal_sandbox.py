@@ -83,6 +83,39 @@ class AuthTests(unittest.TestCase):
         self.now[0] += ta.LOCKOUT_SECONDS + 1
         self.assertIsNone(self.auth.login('ryushe', 'correct horse battery')[1])
 
+    def test_parallel_logins_are_bounded_and_respect_lockout(self):
+        # Review blocker 1: no more than MAX_VERIFY scrypt runs at once; failure slots reserved first.
+        import unittest.mock
+        active, peak, lock = [0], [0], threading.Lock()
+        real = ta.verify_password
+
+        def counting(record, password):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                time.sleep(0.05)
+                return real(record, password)
+            finally:
+                with lock:
+                    active[0] -= 1
+        results = []
+        with unittest.mock.patch.object(ta, 'verify_password', counting):
+            threads = [threading.Thread(target=lambda: results.append(self.auth.login('ryushe', 'nope')[1])) for _ in range(50)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertLessEqual(peak[0], ta.MAX_VERIFY)
+        self.assertEqual(len(results), 50)
+        self.assertTrue(set(results) <= {'invalid', 'busy', 'locked'})
+        self.assertLessEqual(results.count('invalid'), ta.MAX_FAILURES)
+        self.assertIn('busy', results)
+        while results.count('invalid') < ta.MAX_FAILURES and self.auth.login('ryushe', 'nope')[1] == 'invalid':
+            results.append('invalid')
+        self.assertEqual(self.auth.login('ryushe', 'correct horse battery')[1], 'locked')
+        self.assertEqual(self.auth.pending, 0)
+
     def test_password_disabled_without_hash(self):
         auth = ta.Auth(allowed_users=[], trusted_hosts=set())
         self.assertEqual(auth.login('ryushe', 'x')[1], 'disabled')

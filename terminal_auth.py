@@ -37,6 +37,7 @@ LOCKOUT_SECONDS = 15 * 60
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 15, 8, 1
 SCRYPT_MAXMEM = 128 * 1024 * 1024
 MIN_PASSWORD = 12
+MAX_VERIFY = 2  # concurrent scrypt verifications (about 32 MiB each)
 
 
 class HashFileError(Exception):
@@ -115,6 +116,8 @@ class Auth:
         self.failures = []
         self.locked_until = 0.0
         self.lock = threading.Lock()
+        self.verify_slots = threading.BoundedSemaphore(MAX_VERIFY)
+        self.pending = 0
         # Burn the same scrypt time for unknown usernames.
         self._dummy = hash_password(secrets.token_hex(16), salt=b'\0' * 16)
 
@@ -153,24 +156,41 @@ class Auth:
         return (user, 'password') if user else (None, None)
 
     def login(self, username, password):
-        """Return (session_id, None) or (None, error) where error is 'invalid', 'locked' or 'disabled'."""
+        """Return (session_id, None) or (None, error); error is 'invalid', 'locked', 'busy' or 'disabled'.
+
+        Each scrypt verification allocates about 32 MiB, so at most
+        ``MAX_VERIFY`` run at once; extra attempts get 'busy' without hashing.
+        A failure slot is reserved under the lock before hashing, so parallel
+        attempts cannot exceed the lockout budget while their hashes run.
+        """
         if not self.password_enabled:
             return None, 'disabled'
         now = self.clock()
         with self.lock:
             if now < self.locked_until:
                 return None, 'locked'
-        name_ok = hmac.compare_digest(str(username).encode(), USERNAME.encode())
-        password = password if isinstance(password, str) and len(password) <= 1024 else ''
+            self.failures = [t for t in self.failures if now - t < FAILURE_WINDOW]
+            if len(self.failures) + self.pending >= MAX_FAILURES:
+                return None, 'busy' if self.pending else 'locked'
+            if not self.verify_slots.acquire(blocking=False):
+                return None, 'busy'
+            self.pending += 1
         try:
-            ok = verify_password(self.hash_record if name_ok else self._dummy, password) and name_ok
-        except HashFileError:
-            ok = False
+            name_ok = hmac.compare_digest(str(username).encode(), USERNAME.encode())
+            password = password if isinstance(password, str) and len(password) <= 1024 else ''
+            try:
+                ok = verify_password(self.hash_record if name_ok else self._dummy, password) and name_ok
+            except HashFileError:
+                ok = False
+        finally:
+            self.verify_slots.release()
+            with self.lock:
+                self.pending -= 1
         with self.lock:
             if now < self.locked_until:
                 return None, 'locked'
             if not ok:
-                self.failures = [t for t in self.failures if now - t < FAILURE_WINDOW] + [now]
+                self.failures.append(now)
                 if len(self.failures) >= MAX_FAILURES:
                     self.locked_until = now + LOCKOUT_SECONDS
                     self.failures = []
