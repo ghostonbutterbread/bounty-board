@@ -596,15 +596,10 @@ a.link-button:hover{text-decoration:underline}
    time and the N/A toggle (report rows). */
 :root{--col-sev:96px;--col-subm:156px;--col-links:54px;--col-when:76px;--col-na:52px}
 .page:has(.dashboard-grid){max-width:1960px}
-/* Drill-downs sit in half-width panels: the columns size to the widest pill
-   in the expanded list (one grid shared through subgrid by every program
-   group), so the title keeps the most room and every row still lines up. */
-.drill:has(.frow){display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;column-gap:var(--space-3)}
-.drill:has(.frow)>*{grid-column:1/-1}
-.drill:has(.frow) .drill-group,.drill:has(.frow) .drill-group>ul{display:grid;grid-template-columns:subgrid;grid-column:1/-1}
-.drill:has(.frow) .drill-group>h4{grid-column:1/-1}
-.drill ul{gap:0}
-.drill li.frow{display:grid;grid-template-columns:subgrid;grid-column:1/-1;align-items:center;padding:7px 6px;border-bottom:1px solid var(--border);border-radius:0}
+/* Drill-downs sit in half-width panels. Each row sizes its own pill cluster,
+   so a title only gives up the room its own pills need; the cluster is
+   right-aligned against a fixed icon column, so right edges line up. */
+.drill li.frow{display:grid;grid-template-columns:auto minmax(0,1fr) auto var(--col-links);column-gap:var(--space-3);align-items:center;padding:7px 6px;border-bottom:1px solid var(--border);border-radius:0}
 .drill li.frow:last-child{border-bottom:0}
 .drill li.frow:hover{background:color-mix(in srgb,var(--surface) 55%,transparent)}
 .frow>.row-select{grid-column:1;grid-row:1;margin:0}
@@ -630,7 +625,6 @@ a.row-icon:hover{background:var(--surface-3);color:var(--accent-text)}
 .row-icon.is-na-link{opacity:.45}
 @media (max-width:650px){
   .drill{padding-left:var(--space-3)}
-  .drill:has(.frow),.drill:has(.frow) .drill-group,.drill:has(.frow) .drill-group>ul{display:block}
   .drill li.frow{grid-template-columns:auto auto minmax(0,1fr);row-gap:4px;column-gap:var(--space-2)}
   .frow-main{grid-column:2/-1}
   .frow-pills{grid-column:2;grid-row:2;justify-self:start}
