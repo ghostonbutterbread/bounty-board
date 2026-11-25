@@ -408,15 +408,29 @@ class ArchiveState:
     def key(family, program, lane, fid):
         return f'{family}/{program}/{lane}/{fid}'
 
-    def read(self):
+    def read(self, for_update=False):
+        """Stored entries. A missing file is empty.
+
+        For display (``for_update=False``) any read problem shows as empty. For
+        an update an unreadable file raises, so a transient error can never
+        overwrite every stored status, and a corrupt file is moved aside
+        (``archive-state.json.corrupt-<time>``) before it is replaced."""
         import re
         try:
             raw = json.loads(self.path.read_text(encoding='utf-8'))
         except FileNotFoundError:
             return {}
-        except (OSError, ValueError, UnicodeError):
+        except (ValueError, UnicodeError):
+            if for_update:
+                self._set_aside()
+            return {}
+        except OSError:
+            if for_update:
+                raise
             return {}
         if not isinstance(raw, dict):
+            if for_update:
+                self._set_aside()
             return {}
         out = {}
         for key, value in raw.items():
@@ -425,6 +439,10 @@ class ArchiveState:
                     key == self.key(value.get('family'), value.get('program'), value.get('lane'), value.get('fid'))):
                 out[key] = value
         return out
+
+    def _set_aside(self):
+        import time
+        self.path.replace(self.path.with_name(f'{self.NAME}.corrupt-{time.strftime("%Y%m%dT%H%M%S")}-{time.time_ns() % 1000000}'))
 
     def lane(self, family, program, lane):
         prefix = self.key(family, program, lane, '')
@@ -453,14 +471,14 @@ class ArchiveState:
 
     def record(self, family, program, lane, fid, previous_status):
         from datetime import datetime, timezone
-        data = self.read()
+        data = self.read(for_update=True)
         data[self.key(family, program, lane, fid)] = {
             'family': family, 'program': program, 'lane': lane, 'fid': fid, 'previous_status': previous_status,
             'archived_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
         self.write(data)
 
     def forget(self, family, program, lane, fid):
-        data = self.read()
+        data = self.read(for_update=True)
         if data.pop(self.key(family, program, lane, fid), None) is not None:
             self.write(data)
 
@@ -480,7 +498,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     import tempfile
     import threading
     from collaborative_engine import CollaborationStore, GitUnavailableError
-    if state_dir is not None and Path(state_dir).absolute().is_relative_to(Path(root).absolute()):
+    if state_dir is not None and (Path(state_dir).absolute().is_relative_to(Path(root).absolute()) or
+                                  Path(state_dir).resolve().is_relative_to(Path(root).resolve())):
         raise ValueError('the Board state directory must be outside the data root')
     if live_edit_dir is not None and (collaboration_dir is not None or report_autosave or experimental_fixture_publish):
         raise ValueError('live editing replaces the shared-draft store, report autosave and fixture publication')

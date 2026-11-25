@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 import app
-import test_ledger_actions
+from tests import test_ledger_actions
 
 
 class ArchiveStateTests(test_ledger_actions.LedgerActionTests):
@@ -114,10 +114,47 @@ class ArchiveStateTests(test_ledger_actions.LedgerActionTests):
         self.assertEqual(self.stored()['entries'], {})
         self.assertEqual(self.patch('D01', 'archive')[1]['archive_state'], 'saved')
         self.assertEqual(self.stored()['entries']['D01']['previous_status'], 'raw')
+        aside = sorted(p.name for p in self.state.glob('archive-state.json.corrupt-*'))
+        self.assertEqual(len(aside), 1)
+        self.assertEqual((self.state / aside[0]).read_text(), '{not json')
 
     def test_state_dir_inside_the_data_root_is_refused(self):
         with self.assertRaises(ValueError):
             app.make_server(self.root, 0, state_dir=self.root / 'state')
+
+    def test_state_dir_symlinked_into_the_data_root_is_refused(self):
+        (self.root / 'inside').mkdir()
+        link = self.base / 'state-link'
+        link.symlink_to(self.root / 'inside', target_is_directory=True)
+        with self.assertRaises(ValueError):
+            app.make_server(self.root, 0, state_dir=link)
+
+
+class ArchiveStoreReadErrorTests(unittest.TestCase):
+    def entry(self, store, fid):
+        return {store.key('web_bounty', 'p', 'web', fid): {'family': 'web_bounty', 'program': 'p', 'lane': 'web', 'fid': fid,
+                                                           'previous_status': 'raw', 'archived_at': '2026-01-01T00:00:00Z'}}
+
+    def test_unreadable_file_is_never_overwritten_by_an_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = app.ArchiveState(Path(tmp))
+            store.write({**self.entry(store, 'D01'), **self.entry(store, 'D02')})
+            before = store.path.read_bytes()
+            real_read_text = Path.read_text
+
+            def failing(path, *args, **kwargs):
+                if path == store.path:
+                    raise PermissionError('simulated')
+                return real_read_text(path, *args, **kwargs)
+            from unittest import mock
+            with mock.patch.object(Path, 'read_text', failing):
+                self.assertEqual(store.lane('web_bounty', 'p', 'web'), {})  # display shows empty
+                with self.assertRaises(OSError):
+                    store.record('web_bounty', 'p', 'web', 'D03', 'confirmed')
+                with self.assertRaises(OSError):
+                    store.forget('web_bounty', 'p', 'web', 'D01')
+            self.assertEqual(store.path.read_bytes(), before)
+            self.assertEqual(sorted(store.lane('web_bounty', 'p', 'web')), ['D01', 'D02'])
 
 
 class ArchiveStoreUnitTests(unittest.TestCase):

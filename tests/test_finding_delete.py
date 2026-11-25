@@ -8,7 +8,7 @@ import json
 import os
 import unittest
 
-import test_ledger_actions
+from tests import test_ledger_actions
 
 HELP_WITH_DELETE = ('--edit-finding --patch-file --root --family --lane --from-file --set-submission '
                     '--submission-state --submission-result --submission-report --delete-finding --actor')
