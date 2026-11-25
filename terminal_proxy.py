@@ -34,7 +34,13 @@ __all__ = ['Refused', 'address_allowed', 'resolve', 'FilteringProxy']
 CGNAT = ipaddress.ip_network('100.64.0.0/10')
 TAILSCALE_V6 = ipaddress.ip_network('fd7a:115c:a1e0::/48')
 NAT64 = ipaddress.ip_network('64:ff9b::/96')
-EXPLICIT_BLOCKS = (CGNAT, TAILSCALE_V6)
+# Deprecated IPv6 forms that can embed or alias private space: IPv4-compatible
+# (::a.b.c.d), SIIT IPv4-translated (::ffff:0:a.b.c.d) and site-local fec0::/10.
+DEPRECATED_V6 = (ipaddress.ip_network('::/96'), ipaddress.ip_network('::ffff:0:0:0/96'), ipaddress.ip_network('fec0::/10'))
+EXPLICIT_BLOCKS = (CGNAT, TAILSCALE_V6, *DEPRECATED_V6)
+HANDSHAKE_DEADLINE = 20     # seconds for a whole request head or SOCKS handshake
+PER_LISTENER_CONNECTIONS = 24
+HOST_ADDRESS_REFRESH = 60
 
 MAX_HEAD = 64 * 1024
 MAX_HEADERS = 100
@@ -187,11 +193,23 @@ def _origin_request(method, target, version, headers):
 
 
 class _Reader:
-    def __init__(self, sock):
-        self.sock, self.buf = sock, b''
+    """Buffered reads for the handshake, bounded by one total deadline
+    (slowloris: per-recv timeouts alone would let a client trickle forever)."""
+
+    def __init__(self, sock, deadline=None, idle=None):
+        self.sock, self.buf, self.deadline, self.idle = sock, b'', deadline, idle
 
     def fill(self):
-        data = self.sock.recv(65536)
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('handshake deadline')
+            self.sock.settimeout(min(remaining, self.idle) if self.idle else remaining)
+        try:
+            data = self.sock.recv(65536)
+        finally:
+            if self.deadline is not None:
+                self.sock.settimeout(self.idle)
         if not data:
             raise EOFError
         self.buf += data
@@ -254,11 +272,19 @@ class _Listener:
 
 class FilteringProxy:
     def __init__(self, *, allow_networks=(), static_hosts=None, connect_timeout=10, idle_timeout=600,
-                 max_connections=64, log=None, resolver=socket.getaddrinfo):
+                 max_connections=64, per_listener_connections=PER_LISTENER_CONNECTIONS,
+                 handshake_deadline=HANDSHAKE_DEADLINE, host_addresses=None, log=None, resolver=socket.getaddrinfo):
         self.allow_networks = tuple(allow_networks)
         self.static_hosts = {k.lower(): v for k, v in (static_hosts or {}).items()}
         self.connect_timeout, self.idle_timeout = connect_timeout, idle_timeout
         self.max_connections = max_connections
+        self.per_listener_connections = per_listener_connections
+        self.handshake_deadline = handshake_deadline
+        # The host's own interface addresses (its public IP included) are refused
+        # too; refreshed every minute. Tests may pass a callable.
+        self._host_addresses_source = host_addresses or local_addresses
+        self._host_addresses = frozenset()
+        self._host_addresses_at = float('-inf')
         self.resolver = resolver  # test hook; production uses socket.getaddrinfo
         self._log = log or (lambda _msg: None)
         self._lock = threading.Lock()
@@ -276,7 +302,7 @@ class FilteringProxy:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             sock.bind(path)
-            os.chmod(path, 0o666)
+            os.chmod(path, 0o600)  # the container runs as the service's own UID
             sock.listen(64)
             sock.settimeout(0.25)
             listener = _Listener(self, sock, path)
@@ -286,6 +312,16 @@ class FilteringProxy:
         with self._lock:
             self._listeners.append(listener)
         return listener
+
+    def host_addresses(self):
+        now = time.monotonic()
+        if now - self._host_addresses_at >= HOST_ADDRESS_REFRESH:
+            try:
+                found = frozenset(ipaddress.ip_address(a) for a in self._host_addresses_source())
+            except Exception:  # keep the last known set rather than fail open on a read error
+                found = self._host_addresses
+            self._host_addresses, self._host_addresses_at = found, now
+        return self._host_addresses
 
     def close(self):
         with self._lock:
@@ -307,6 +343,8 @@ class FilteringProxy:
         with self._lock:
             if self._closed or len(self._conns) >= self.max_connections:
                 return False
+            if owner is not None and sum(1 for r in self._conns.values() if r['owner'] is owner) >= self.per_listener_connections:
+                return False  # one sandbox cannot use up every slot
             self._conns[conn] = {'owner': owner, 'socks': [conn], 'dead': False}
             return True
 
@@ -341,7 +379,7 @@ class FilteringProxy:
     def _run(self, conn):
         try:
             conn.settimeout(self.idle_timeout)
-            reader = _Reader(conn)
+            reader = _Reader(conn, deadline=time.monotonic() + self.handshake_deadline, idle=self.idle_timeout)
             reader.fill()
             if reader.buf[0] == 0x05:
                 self._serve_socks(conn, reader)
@@ -363,6 +401,9 @@ class FilteringProxy:
         try:
             addrs = resolve(host, port, allow_networks=self.allow_networks,
                             static_hosts=self.static_hosts, resolver=self.resolver)
+            own = self.host_addresses()
+            if any(ipaddress.ip_address(sockaddr[0]) in own for _family, sockaddr in addrs):
+                raise Refused('host_address')
             upstream = self._connect(addrs)
         except Refused as exc:
             self._log(f'{proto} {host!r}:{port} refused {exc.reason}')
@@ -480,6 +521,31 @@ class FilteringProxy:
         if reader.buf:
             upstream.sendall(reader.buf)
         self._relay(conn, upstream)
+
+
+def local_addresses(fib_trie='/proc/net/fib_trie', if_inet6='/proc/net/if_inet6'):
+    """Every address assigned to this host (IPv4 LOCAL routes and IPv6 interface addresses)."""
+    found = set()
+    try:
+        with open(fib_trie) as stream:
+            previous = None
+            for line in stream:
+                text = line.strip()
+                if text.startswith('|--'):
+                    previous = text[3:].strip()
+                elif previous and '/32 host LOCAL' in text:
+                    found.add(previous)
+    except OSError:
+        pass
+    try:
+        with open(if_inet6) as stream:
+            for line in stream:
+                raw = line.split()[0] if line.strip() else ''
+                if len(raw) == 32:
+                    found.add(str(ipaddress.IPv6Address(int(raw, 16))))
+    except (OSError, ValueError):
+        pass
+    return found
 
 
 def _socks_reply(conn, code):

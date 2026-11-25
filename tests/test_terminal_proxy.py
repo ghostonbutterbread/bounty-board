@@ -34,7 +34,9 @@ class AddressAllowedTests(unittest.TestCase):
     REFUSED = ['127.0.0.1', '10.0.0.1', '172.17.0.1', '192.168.1.10', '100.100.100.100', '100.64.0.1',
                '169.254.169.254', '0.0.0.0', '224.0.0.1', '255.255.255.255', '::1', '::', 'fe80::1',
                'fd7a:115c:a1e0::1', 'fc00::1', 'ff02::1', '::ffff:127.0.0.1', '::ffff:10.0.0.1',
-               '64:ff9b::a00:1', '2002:0a00:0001::1']
+               '64:ff9b::a00:1', '2002:0a00:0001::1',
+               # Review item 10: deprecated embeddings and site-local.
+               '::8.8.8.8', '::10.0.0.1', '::ffff:0:10.0.0.1', '::ffff:0:8.8.8.8', 'fec0::1', 'feff::1']
     ALLOWED = ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']
 
     def test_table(self):
@@ -245,7 +247,8 @@ class ProxyTests(unittest.TestCase):
 
     # -- allowed paths -----------------------------------------------------
     def test_listen_unix_mode(self):
-        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o666)
+        # Review item 12: owner only (the container runs as the service's UID).
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
 
     def test_connect_relays_both_ways(self):
         with self.client() as s:
@@ -408,6 +411,78 @@ class ProxyTests(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertIn(b' 400 ', resp)
+
+    def test_per_listener_cap_leaves_room_for_other_sandboxes(self):
+        # Review item 4: one sandbox could take every global slot.
+        self.proxy.close()
+        self.proxy = self.make_proxy(max_connections=10, per_listener_connections=3)
+        self.listener = self.proxy.listen_unix(self.path)
+        other_path = os.path.join(self.dir, 'o')
+        self.proxy.listen_unix(other_path)
+        held = []
+        for _ in range(3):
+            c = self.client()
+            c.sendall(b'\x05')  # partial greeting holds the slot
+            held.append(c)
+        time.sleep(0.2)
+        with self.client() as s:
+            resp = self.read_all(s)
+        self.assertTrue(resp == b'' or resp.startswith(b'HTTP/1.1 503'), resp)
+        with self.client(other_path) as s:  # another sandbox still gets in
+            s.sendall(b'GET /x HTTP/1.1\r\n\r\n')
+            self.assertIn(b' 400 ', self.read_all(s))
+        for c in held:
+            c.close()
+
+    def test_handshake_has_a_total_deadline(self):
+        # Review item 5: a client trickling bytes reset the per-recv timeout forever.
+        self.proxy.close()
+        self.proxy = self.make_proxy(handshake_deadline=1.0, idle_timeout=10)
+        self.listener = self.proxy.listen_unix(self.path)
+        with self.client() as s:
+            started = time.monotonic()
+            closed = False
+            for _ in range(40):
+                try:
+                    s.sendall(b'X')
+                except OSError:
+                    closed = True
+                    break
+                time.sleep(0.1)
+                s.setblocking(False)
+                try:
+                    data = s.recv(65536)
+                    if data == b'' or data.startswith(b'HTTP/1.1'):
+                        closed = True
+                        break
+                except BlockingIOError:
+                    pass
+                finally:
+                    s.setblocking(True)
+            self.assertTrue(closed, 'connection closed by the deadline')
+            self.assertLess(time.monotonic() - started, 3.5)
+
+    def test_host_own_addresses_are_refused(self):
+        # Review item 10: the sandbox must not reach host services via the host's public IP.
+        self.proxy.close()
+        self.proxy = self.make_proxy(host_addresses=lambda: {'127.0.0.2'})
+        self.listener = self.proxy.listen_unix(self.path)
+        resp = self.http_exchange(f'GET http://allowed.example.test:{self.http_port}/x HTTP/1.1\r\n\r\n'.encode())
+        self.assertIn(b'403', resp.split(b'\r\n')[0])
+        self.assertIn(b'host_address', resp)
+
+    def test_local_addresses_reads_proc(self):
+        from terminal_proxy import local_addresses
+        found = local_addresses()
+        self.assertIn('127.0.0.1', found)
+        base = os.environ.get('TMPDIR') or None
+        fib = os.path.join(self.dir, 'fib')
+        with open(fib, 'w') as f:
+            f.write('Main:\n  +-- 0.0.0.0/0 3 0 5\n     |-- 203.0.113.7\n        /32 host LOCAL\n     |-- 203.0.113.0\n        /24 link UNICAST\n')
+        inet6 = os.path.join(self.dir, 'inet6')
+        with open(inet6, 'w') as f:
+            f.write('20010db8000000000000000000000001 02 40 00 80     eth0\n')
+        self.assertEqual(local_addresses(fib, inet6), {'203.0.113.7', '2001:db8::1'})
 
     def test_handle_close_unlinks_and_closes_relays(self):
         s = self.client()
