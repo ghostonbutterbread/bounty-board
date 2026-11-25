@@ -10,6 +10,7 @@ lock that serializes refreshes. Nothing here writes to the data root.
 import heapq
 import os
 import re
+from collections import Counter
 import stat as stat_module
 import threading
 import time
@@ -22,6 +23,10 @@ MAX_QUERY = 200
 _CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f  ]')
 _SPACE = re.compile(r'\s+')
 _HEADING = re.compile(r'^#{1,6}\s+(.+?)\s*#*\s*$')
+# Report -> finding mapping by location: a packet folder directly under
+# reports/ ("F012-xss/...", "F012/...") or a legacy "<FID> - Title.md" file.
+_PACKET_DIR = re.compile(r'^([A-Za-z][0-9]{2,})(?:-.*)?$')
+_LEGACY_NAME = re.compile(r'^([A-Za-z][0-9]{2,}) - .+\.md$', re.IGNORECASE)
 
 
 def fold(text):
@@ -95,6 +100,11 @@ class SearchIndex:
         self._last_pass = 0.0
         self._last_search = 0.0
         self.passes = 0
+        # touch() bumps _touch_gen; a pass that started after it records it in
+        # _fresh_gen, so recent(fresh_wait) never answers from a pass that may
+        # have read the ledger before the write.
+        self._touch_gen = 0
+        self._fresh_gen = 0
 
     # ---- lifecycle -------------------------------------------------------
     def start(self):
@@ -120,6 +130,13 @@ class SearchIndex:
             idle = time.monotonic() - self._last_search > 60
             self._wake.wait(None if idle else self.interval)
 
+    def touch(self):
+        """Mark the index stale (a finding was written): the next recent() with
+        fresh_wait redoes a pass first instead of waiting for the interval."""
+        self._touch_gen += 1
+        self._last_pass = 0.0
+        self._wake.set()
+
     def invalidate(self):
         """Drop everything (root changed); the next pass rebuilds from scratch."""
         self._lanes = {}
@@ -132,6 +149,7 @@ class SearchIndex:
     # ---- indexing --------------------------------------------------------
     def refresh(self):
         with self._pass_lock:
+            generation = self._touch_gen
             snapshot = self._root_snapshot()
             if snapshot is None:
                 self._lanes, self._instance, self._built = {}, None, False
@@ -181,6 +199,7 @@ class SearchIndex:
             self._built = True
             self._first_pass.set()
             self._last_pass = time.monotonic()
+            self._fresh_gen = max(self._fresh_gen, generation)
             self.passes += 1
 
     def _scan_lane(self, lane, key, old, budget, warnings):
@@ -194,8 +213,10 @@ class SearchIndex:
         else:
             lane_warnings = []
             raw = self._ledger(lane, lane_warnings) if ledger_sig is not None else None
-            raw_findings = [{k: f.get(k) for k in ('fid', 'title', 'class_name', 'severity', 'status',
-                                                    'report_path', 'evidence_path')} for f in raw or []]
+            raw_findings = [{**{k: f.get(k) for k in ('fid', 'title', 'class_name', 'severity', 'status',
+                                                      'report_path', 'evidence_path', 'submission_status',
+                                                      'metadata_revision')},
+                             'submission': self._submission(f.get('submission'))} for f in raw or []]
             if 'ledger_unavailable_or_invalid' in lane_warnings:
                 warnings.add('ledger_unavailable')
         old_reports = old['reports'] if old is not None else {}
@@ -239,12 +260,15 @@ class SearchIndex:
             fields = {'fid': plain(str(fid)), 'title': title, 'class': plain(str(f.get('class_name') or '')),
                       'severity': plain(str(f.get('severity') or '')), 'status': plain(str(f.get('status') or ''))}
             findings.append({**fields, 'low': {k: fold(v) for k, v in fields.items()}, 'link': link})
+        unique = self._unique_fids(raw_findings)
         for rel, entry in reports.items():
             registered = owners['report_path'].get(rel, [])
             evidence = owners['evidence_path'].get(rel, [])
             entry['owner_fids'] = [str(x) for x in registered or evidence]
             entry['report_kind'] = ('registered_report' if registered else 'generated_evidence' if evidence
                                     else 'generated_report' if entry['generated'] else 'unregistered')
+            entry['finding_fid'], entry['finding_match'] = (None, None) if entry['nav'] else \
+                self._map_finding(rel, registered, evidence, unique)
         return {'family': family, 'program': program, 'lane': name, 'ledger_sig': ledger_sig,
                 'raw_findings': raw_findings, 'findings': findings, 'reports': reports}
 
@@ -277,7 +301,8 @@ class SearchIndex:
         stem = filename[:-3]
         entry = {'sig': sig, 'mtime': mtime, 'title': stem, 'text': '', 'low': '', 'path_low': fold(rel), 'title_low': fold(stem), 'base_low': fold(stem),
                  'has_text': False, 'truncated': False, 'nav': False, 'generated': False,
-                 'unread': 'budget', 'owner_fids': [], 'report_kind': 'unregistered'}
+                 'unread': 'budget', 'owner_fids': [], 'report_kind': 'unregistered',
+                 'finding_fid': None, 'finding_match': None}
         try:
             text = self._read_file(lane, 'reports/' + rel).decode('utf-8')
         except (OSError, ValueError, UnicodeError):
@@ -316,6 +341,47 @@ class SearchIndex:
         except ValueError:
             return None
 
+    @staticmethod
+    def _submission(value):
+        if not isinstance(value, dict):
+            return None
+        return {k: value.get(k) if isinstance(value.get(k), str) else None for k in ('state', 'result')}
+
+    @staticmethod
+    def _unique_fids(raw_findings):
+        """{FID folded to upper case: ledger FID} for string FIDs occurring exactly once."""
+        seen = {}
+        for f in raw_findings:
+            fid = f.get('fid')
+            if isinstance(fid, str) and fid:
+                seen.setdefault(fid.upper(), []).append(fid)
+        return {key: fids[0] for key, fids in seen.items() if len(fids) == 1}
+
+    @staticmethod
+    def _map_finding(rel, registered, evidence, unique):
+        """(fid, match) for one non-navigation report, or (None, None).
+
+        Priority: report_path owner, evidence_path owner, packet folder (first
+        path segment "<FID>" or "<FID>-..."), legacy "<FID> - Title.md" file
+        name. Only FIDs occurring exactly once in the ledger map; a tier with
+        several distinct owners is ambiguous and maps to nothing."""
+        for owners, match in ((registered, 'report_path'), (evidence, 'evidence_path')):
+            distinct = {str(fid) for fid in owners}
+            if len(distinct) > 1:
+                return None, None
+            if distinct:
+                fid = distinct.pop()
+                return (fid, match) if unique.get(fid.upper()) == fid else (None, None)
+        segments = rel.split('/')
+        if len(segments) > 1:
+            found = _PACKET_DIR.match(segments[0])
+            if found and found.group(1).upper() in unique:
+                return unique[found.group(1).upper()], 'packet'
+        found = _LEGACY_NAME.match(segments[-1])
+        if found and found.group(1).upper() in unique:
+            return unique[found.group(1).upper()], 'legacy'
+        return None, None
+
     def _ownership(self, lane, raw_findings):
         base = lane / 'reports'
         owners = {'report_path': {}, 'evidence_path': {}}
@@ -347,20 +413,23 @@ class SearchIndex:
         """
         if keep_alive:
             self._last_search = time.monotonic()
+        wanted = self._touch_gen
         snapshot = self._root_snapshot()
         if snapshot is None or snapshot[2] != self._instance:
             if self._instance is not None:
                 self.invalidate()
             self._wake.set()
             self.start()
-        elif time.monotonic() - self._last_pass > self.interval / 2:
+        elif self._fresh_gen < wanted or time.monotonic() - self._last_pass > self.interval / 2:
             passes = self.passes
-            stale = fresh_wait and self._built and time.monotonic() - self._last_pass > self.interval
+            touched = self._fresh_gen < wanted
+            stale = fresh_wait and self._built and (touched or time.monotonic() - self._last_pass > self.interval)
             self._wake.set()
             self.start()
             if stale:
                 deadline = time.monotonic() + fresh_wait
-                while self.passes == passes and time.monotonic() < deadline and not self._stopped.is_set():
+                while ((self.passes == passes or self._fresh_gen < wanted) and time.monotonic() < deadline
+                       and not self._stopped.is_set()):
                     time.sleep(0.02)
         self.start()
         if not self._built:
@@ -458,13 +527,19 @@ class SearchIndex:
 
     # ---- recent reports ----------------------------------------------------
     def recent(self, *, limit=50, offset=0, within=None, programs=(), lane=None, query='',
-               order='newest', include_navigation=False, fresh_wait=2.0):
+               order='newest', include_navigation=False, fresh_wait=2.0, na_keys=None, hide_na=False):
         """Reports across every program and lane ordered by file modification time.
 
         Filters: `within` (seconds before now), `programs` (ids "family/name"),
         `lane`, `query` (every term must occur in the title or path) and
         generated navigation (excluded unless `include_navigation`). Facet
         counts for programs and lanes each ignore their own filter.
+
+        `na_keys` is the set of Board N/A marks ("family/program/lane/path"),
+        or None when that store is unavailable. With `hide_na`, marked reports
+        are left out of items, totals and facets; `na_hidden` counts those that
+        match every other filter and `na_hidden_page` those whose sort position
+        falls within the returned page's span.
         """
         started = time.perf_counter()
         snapshot = self._activate(fresh_wait, keep_alive=False)
@@ -472,7 +547,10 @@ class SearchIndex:
         since = now - within if within is not None else None
         terms = parse_terms(query)
         wanted = set(programs)
+        marks = na_keys if na_keys is not None else frozenset()
+        hiding = bool(hide_na and marks)
         matches = []
+        hidden = []
         program_counts, lane_counts, names = {}, {}, {}
         total_reports = 0
         if self._instance is not None and snapshot is not None and snapshot[2] == self._instance:
@@ -482,8 +560,15 @@ class SearchIndex:
                 in_program = not wanted or pid in wanted
                 in_lane = lane is None or l['lane'] == lane
                 findings = None
+                prefix = f"{pid}/{l['lane']}/"
                 for rel, r in l['reports'].items():
                     if r['nav'] and not include_navigation:
+                        continue
+                    na = prefix + rel in marks
+                    if na and hiding:
+                        if ((since is None or r['mtime'] >= since) and in_program and in_lane and
+                                (not terms or all(t in r['title_low'] or t in r['path_low'] for t in terms))):
+                            hidden.append((r['mtime'], pid, l['lane'], rel, None, None, True))
                         continue
                     total_reports += 1
                     if since is not None and r['mtime'] < since:
@@ -496,21 +581,46 @@ class SearchIndex:
                         lane_counts[l['lane']] = lane_counts.get(l['lane'], 0) + 1
                     if in_program and in_lane:
                         if findings is None:
-                            findings = {f['fid']: f for f in l['findings']}
-                        matches.append((r['mtime'], pid, l['lane'], rel, r, findings))
-        matches.sort(key=lambda m: m[:4], reverse=order != 'oldest')
+                            counts = Counter(f.get('fid') for f in l['raw_findings'])
+                            findings = {f['fid']: f for f in l['raw_findings']
+                                        if isinstance(f.get('fid'), str) and counts[f['fid']] == 1}
+                        matches.append((r['mtime'], pid, l['lane'], rel, r, findings, na))
+        newest = order != 'oldest'
+        matches.sort(key=lambda m: m[:4], reverse=newest)
+        page_hidden = 0
+        if hidden:
+            # Hidden reports between the previous page's last item (or the
+            # list start) and this page's last item.
+            combined = sorted(matches + hidden, key=lambda m: m[:4], reverse=newest)
+            visible = run = 0
+            for m in combined:
+                if visible >= offset + limit:
+                    break
+                if m[4] is None:
+                    run += 1
+                    continue
+                if visible >= offset:
+                    page_hidden += run
+                run = 0
+                visible += 1
         items = []
-        for mtime, pid, lane_name, rel, r, findings in matches[offset:offset + limit]:
-            owner = next((findings[fid] for fid in r['owner_fids'] if fid in findings), None)
+        for mtime, pid, lane_name, rel, r, findings, na in matches[offset:offset + limit]:
+            owner = findings.get(r.get('finding_fid')) if r.get('finding_fid') else None
+            finding = None
+            if owner is not None:
+                finding = {'fid': owner['fid'], 'title': owner['title'], 'severity': owner['severity'],
+                           'status': owner['status'], 'submission': owner.get('submission'),
+                           'submission_status': owner.get('submission_status'),
+                           'metadata_revision': owner.get('metadata_revision'), 'match': r['finding_match']}
             items.append({'path': rel, 'name': rel.rsplit('/', 1)[-1], 'title': r['title'], 'program': pid,
                           'program_name': names[pid][0], 'family': names[pid][1], 'lane': lane_name,
                           'modified': mtime, 'report_kind': 'generated_navigation' if r['nav'] else r['report_kind'],
-                          'owner_fids': r['owner_fids'][:5],
-                          'finding': {'fid': owner['fid'], 'severity': owner['severity'], 'title': owner['title']} if owner else None,
+                          'owner_fids': r['owner_fids'][:5], 'finding': finding, 'na': na,
                           'target': {'program': pid, 'lane': lane_name, 'section': 'reports', 'report': rel}})
         return {'index_state': self.state(), 'root_instance': self._instance, 'now': now,
                 'total': len(matches), 'total_reports': total_reports, 'offset': offset, 'limit': limit, 'order': order,
-                'items': items,
+                'items': items, 'na_available': na_keys is not None, 'na_hidden': len(hidden),
+                'na_hidden_page': page_hidden,
                 'facets': {'programs': sorted(({'id': pid, 'name': names[pid][0], 'family': names[pid][1], 'count': n}
                                                for pid, n in program_counts.items()), key=lambda x: (x['name'].lower(), x['id'])),
                            'lanes': [{'name': k, 'count': v} for k, v in sorted(lane_counts.items())]},

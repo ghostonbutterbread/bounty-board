@@ -93,7 +93,12 @@ class IndexTests(Base):
 
     def test_linked_finding_and_severity(self):
         items = {i['path']: i for i in self.index.recent()['items']}
-        self.assertEqual(items['confirmed/xss-profile.md']['finding'], {'fid': 'AC-1', 'severity': 'HIGH', 'title': 'Stored XSS in profile bio'})
+        finding = items['confirmed/xss-profile.md']['finding']
+        self.assertEqual({k: finding[k] for k in ('fid', 'severity', 'title', 'status', 'match', 'submission', 'submission_status')},
+                         {'fid': 'AC-1', 'severity': 'HIGH', 'title': 'Stored XSS in profile bio', 'status': 'confirmed',
+                          'match': 'report_path', 'submission': None, 'submission_status': None})
+        self.assertRegex(finding['metadata_revision'], r'^[0-9a-f]{64}$')
+        self.assertEqual(items['raw/redirect-evidence.md']['finding']['match'], 'evidence_path')
         self.assertEqual(items['confirmed/xss-profile.md']['report_kind'], 'registered_report')
         self.assertEqual(items['raw/redirect-evidence.md']['finding']['fid'], 'AC-3')
         self.assertEqual(items['raw/redirect-evidence.md']['report_kind'], 'generated_evidence')
@@ -285,6 +290,202 @@ class APITests(Base):
         self.get({'q': 'x', 'nav': '1'})
         self.assertEqual(before, sorted((str(p), p.lstat().st_mtime_ns) for p in self.root.rglob('*')))
 
+
+
+NAV = '<!-- generated: bounty-core-report-navigation -->\n# Nav\n'
+
+
+def mapping_root(root):
+    """One lane exercising every report -> finding mapping rule (synthetic)."""
+    findings = [
+        {'fid': 'F012', 'title': 'Packet XSS', 'severity': 'HIGH', 'status': 'confirmed',
+         'submission': {'state': 'submitted', 'result': 'valid', 'report': 'R-1'}, 'submission_status': 'submitted'},
+        {'fid': 'F020', 'title': 'Registered', 'severity': 'LOW', 'status': 'raw', 'report_path': 'reports/reg/report.md'},
+        {'fid': 'F030', 'title': 'Evidence', 'severity': 'MEDIUM', 'status': 'raw', 'evidence_path': 'reports/ev/e.md'},
+        {'fid': 'F040', 'title': 'Legacy', 'severity': 'CRITICAL', 'status': 'raw', 'submission': 'not-a-dict'},
+        {'fid': 'F050', 'title': 'Dup one', 'severity': 'LOW'},
+        {'fid': 'F050', 'title': 'Dup two', 'severity': 'LOW'},
+        # A registered report wins over the packet folder it sits in.
+        {'fid': 'F060', 'title': 'Owner wins', 'severity': 'INFO', 'report_path': 'reports/F012-xss/owned.md'},
+    ]
+    reports = {
+        'F012-xss/EVIDENCE.md': '# Evidence\n',
+        'F012-xss/acme.example-xss-F012.md': '# Submission\n',
+        'F012-xss/_meta/x.md': '# Meta\n',
+        'F012/notes.md': '# Notes\n',
+        'F012-xss/owned.md': '# Owned\n',
+        'F012-xss/nav.md': NAV,
+        'reg/report.md': '# Registered\n',
+        'ev/e.md': '# Evidence 30\n',
+        'findings/high/F040 - Legacy title.md': '# Legacy\n',
+        'F050-dup/a.md': '# Dup\n',
+        'F099-missing/a.md': '# Missing\n',
+        'F099 - Not in ledger.md': '# Missing legacy\n',
+        'active.md': '# Active\n',
+        'F012.md': '# Top-level file named like a FID\n',
+        'index/F012.md': '# F012\n',
+    }
+    write_lane(root, 'web_bounty', 'mapco', 'web', findings, reports)
+    return root
+
+
+class MappingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='recent-map-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'root'
+        mapping_root(self.root)
+        self.index = make_index(self.root)
+        self.addCleanup(self.index.close)
+        self.index.refresh()
+
+    def items(self, **kw):
+        return {i['path']: i for i in self.index.recent(limit=200, **kw)['items']}
+
+    def mapped(self, **kw):
+        return {p: (i['finding']['fid'], i['finding']['match']) if i['finding'] else None for p, i in self.items(**kw).items()}
+
+    def test_mapping_rules(self):
+        self.assertEqual(self.mapped(), {
+            'F012-xss/EVIDENCE.md': ('F012', 'packet'),
+            'F012-xss/acme.example-xss-F012.md': ('F012', 'packet'),
+            'F012-xss/_meta/x.md': ('F012', 'packet'),
+            'F012/notes.md': ('F012', 'packet'),
+            'F012-xss/owned.md': ('F060', 'report_path'),
+            'reg/report.md': ('F020', 'report_path'),
+            'ev/e.md': ('F030', 'evidence_path'),
+            'findings/high/F040 - Legacy title.md': ('F040', 'legacy'),
+            'F050-dup/a.md': None,
+            'F099-missing/a.md': None,
+            'F099 - Not in ledger.md': None,
+            'active.md': None,
+            'F012.md': None,
+        })
+
+    def test_navigation_never_maps(self):
+        items = self.items(include_navigation=True)
+        self.assertIsNone(items['F012-xss/nav.md']['finding'])
+        self.assertEqual(items['F012-xss/nav.md']['report_kind'], 'generated_navigation')
+
+    def test_finding_payload(self):
+        items = self.items()
+        self.assertEqual({k: v for k, v in items['F012-xss/EVIDENCE.md']['finding'].items() if k != 'metadata_revision'},
+                         {'fid': 'F012', 'title': 'Packet XSS', 'severity': 'HIGH', 'status': 'confirmed',
+                          'submission': {'state': 'submitted', 'result': 'valid'}, 'submission_status': 'submitted', 'match': 'packet'})
+        self.assertIsNone(items['findings/high/F040 - Legacy title.md']['finding']['submission'])
+
+    def test_duplicate_owner_maps_to_nothing(self):
+        lane = self.root / 'web_bounty/mapco/web/ledgers/ledger.json'
+        data = json.loads(lane.read_text())
+        data['findings'][4]['report_path'] = 'reports/active.md'
+        lane.write_text(json.dumps(data))
+        self.index.refresh()
+        self.assertIsNone(self.mapped()['active.md'])
+
+    def test_touch_makes_a_ledger_change_visible_without_waiting(self):
+        index = make_index(self.root)
+        self.addCleanup(index.close)
+        index.interval = 3600  # never stale on its own
+        self.assertEqual(index.recent(fresh_wait=3)['index_state'], 'ready')
+        ledger = self.root / 'web_bounty/mapco/web/ledgers/ledger.json'
+        data = json.loads(ledger.read_text())
+        data['findings'][0]['severity'] = 'LOW'
+        tmp = ledger.with_name('ledger.tmp')
+        tmp.write_text(json.dumps(data))
+        tmp.replace(ledger)
+        stale = {i['path']: i for i in index.recent(fresh_wait=3)['items']}
+        self.assertEqual(stale['F012/notes.md']['finding']['severity'], 'HIGH', 'interval not elapsed: cached')
+        index.touch()
+        fresh = {i['path']: i for i in index.recent(fresh_wait=3)['items']}
+        self.assertEqual(fresh['F012/notes.md']['finding']['severity'], 'LOW')
+
+
+class NaIndexTests(Base):
+    KEYS = {'web_bounty/globex/web/sqli.md', 'web_bounty/acme/web/raw/redirect-evidence.md'}
+
+    def setUp(self):
+        super().setUp()
+        self.index = make_index(self.root)
+        self.addCleanup(self.index.close)
+        self.index.refresh()
+
+    def test_flags_without_hiding(self):
+        out = self.index.recent(na_keys=self.KEYS)
+        self.assertTrue(out['na_available'])
+        self.assertEqual({i['path'] for i in out['items'] if i['na']}, {'sqli.md', 'raw/redirect-evidence.md'})
+        self.assertEqual((out['total'], out['na_hidden'], out['na_hidden_page']), (5, 0, 0))
+
+    def test_store_unavailable(self):
+        out = self.index.recent(na_keys=None, hide_na=True)
+        self.assertFalse(out['na_available'])
+        self.assertEqual(out['total'], 5)
+        self.assertFalse(any(i['na'] for i in out['items']))
+
+    def test_hide_na_with_counts_and_facets(self):
+        # Newest first: sqli(NA), xss-profile, notes, redirect(NA), unowned.
+        out = self.index.recent(na_keys=self.KEYS, hide_na=True)
+        self.assertEqual([i['path'] for i in out['items']], ['confirmed/xss-profile.md', 'notes.md', 'raw/unowned.md'])
+        self.assertEqual((out['total'], out['na_hidden'], out['na_hidden_page']), (3, 2, 2))
+        self.assertNotIn('web_bounty/globex', {p['id'] for p in out['facets']['programs']})
+        page = self.index.recent(na_keys=self.KEYS, hide_na=True, limit=1)
+        self.assertEqual((page['na_hidden'], page['na_hidden_page']), (2, 1))  # sqli precedes xss-profile
+        page = self.index.recent(na_keys=self.KEYS, hide_na=True, limit=1, offset=1)
+        self.assertEqual(page['na_hidden_page'], 0)  # nothing between xss-profile and notes
+        page = self.index.recent(na_keys=self.KEYS, hide_na=True, limit=1, offset=2)
+        self.assertEqual(page['na_hidden_page'], 1)  # redirect between notes and unowned
+        page = self.index.recent(na_keys=self.KEYS, hide_na=True, offset=9)
+        self.assertEqual((page['items'], page['na_hidden_page'], page['na_hidden']), ([], 0, 2))
+        # na_hidden respects the other filters.
+        self.assertEqual(self.index.recent(na_keys=self.KEYS, hide_na=True, programs=['binaries/initech'])['na_hidden'], 0)
+        self.assertEqual(self.index.recent(na_keys=self.KEYS, hide_na=True, within=DAY)['na_hidden'], 1)
+
+
+class NaAPITests(Base):
+    def setUp(self):
+        super().setUp()
+        self.state = Path(self.tmp.name) / 'state'
+        self.server = app.make_server(self.root, port=0, state_dir=self.state)
+        self.server.search_index.interval = 0.05
+        self.port = self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(lambda: (self.server.shutdown(), self.server.server_close()))
+        self.server.report_na.set('web_bounty', 'globex', 'web', 'sqli.md', True)
+
+    get = APITests.get
+
+    def test_recent_hide_na_over_http(self):
+        status, body = self.get({})
+        self.assertEqual(status, 200)
+        self.assertTrue(body['na_available'])
+        self.assertTrue(next(i for i in body['items'] if i['path'] == 'sqli.md')['na'])
+        status, body = self.get({'hide_na': '1', 'limit': '8'})
+        self.assertEqual((status, body['na_hidden'], body['na_hidden_page']), (200, 1, 1))
+        self.assertNotIn('sqli.md', [i['path'] for i in body['items']])
+        for bad in ('hide_na=2', 'hide_na=', 'hide_na=1&hide_na=0', 'hide_na=true'):
+            self.assertEqual(self.get(bad)[0], 400, bad)
+
+    def test_recent_finding_matches_api_data(self):
+        _, data = self.get('', path='/api/data')
+        findings = {f['fid']: f for p in data['programs'] for l in p['lanes'] for f in l['findings'] or []}
+        _, body = self.get({})
+        for item in body['items']:
+            if item['finding']:
+                source = findings[item['finding']['fid']]
+                for key in ('severity', 'status', 'title', 'metadata_revision', 'submission_status'):
+                    self.assertEqual(item['finding'][key], source[key], key)
+
+    def test_data_and_lane_reports_na_flags(self):
+        _, data = self.get('', path='/api/data')
+        self.assertEqual(data['capabilities']['report_na'], {'enabled': True})
+        flags = {(p['id'], r['path']): r['na'] for p in data['programs'] for l in p['lanes'] for r in l['reports'] or []}
+        self.assertTrue(flags[('web_bounty/globex', 'sqli.md')])
+        self.assertFalse(flags[('web_bounty/acme', 'raw/unowned.md')])
+        instance = self.get('phase=identity', path='/api/data')[1]['root_instance']
+        status, lane = self.get({'root_instance': instance, 'family': 'web_bounty', 'program': 'globex', 'lane': 'web'},
+                                path='/api/lane-reports')
+        self.assertEqual(status, 200)
+        self.assertTrue(lane['na_available'])
+        self.assertEqual([(r['path'], r['na']) for r in lane['reports']], [('sqli.md', True)])
 
 if __name__ == '__main__':
     unittest.main()

@@ -483,6 +483,114 @@ class ArchiveState:
             self.write(data)
 
 
+class ReportNaState:
+    """Board-only "not applicable" marks on report files (noise), keyed by path.
+
+    Lives in the Board's private state directory (never under the data root)
+    and never touches the ledger or report files. One small JSON file, bounded
+    to MAX entries (oldest marked_at dropped), replaced atomically under its
+    own lock, so it works while the BBH writer is off. A moved or renamed
+    report simply has no mark; stale keys are harmless."""
+    MAX = 10000
+    MAX_PATH = 1024
+    NAME = 'report-na.json'
+
+    def __init__(self, directory):
+        import threading
+        self.directory = Path(directory)
+        self.path = self.directory / self.NAME
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def key(family, program, lane, path):
+        return f'{family}/{program}/{lane}/{path}'
+
+    def read(self, for_update=False):
+        """Stored marks. A missing file is empty.
+
+        For display (``for_update=False``) any read problem returns None
+        (unavailable). For an update an unreadable file raises, so a transient
+        error never overwrites stored marks, and a corrupt file is moved aside
+        (``report-na.json.corrupt-<time>``) before it is replaced."""
+        try:
+            raw = json.loads(self.path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return {}
+        except (ValueError, UnicodeError):
+            if for_update:
+                self._set_aside()
+                return {}
+            return None
+        except OSError:
+            if for_update:
+                raise
+            return None
+        if not isinstance(raw, dict):
+            if for_update:
+                self._set_aside()
+                return {}
+            return None
+        out = {}
+        for key, value in raw.items():
+            if (isinstance(value, dict) and all(isinstance(value.get(k), str) for k in ('family', 'program', 'lane', 'path', 'marked_at')) and
+                    key == self.key(value['family'], value['program'], value['lane'], value['path'])):
+                out[key] = value
+        return out
+
+    def _set_aside(self):
+        import time
+        self.path.replace(self.path.with_name(f'{self.NAME}.corrupt-{time.strftime("%Y%m%dT%H%M%S")}-{time.time_ns() % 1000000}'))
+
+    def keys(self):
+        """Marked keys for display, or None when the store cannot be read."""
+        data = self.read()
+        return None if data is None else set(data)
+
+    def write(self, data):
+        import os
+        import tempfile
+        if len(data) > self.MAX:
+            data = dict(sorted(data.items(), key=lambda item: item[1]['marked_at'])[-self.MAX:])
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkstemp creates the file with mode 0600.
+        fd, temp = tempfile.mkstemp(prefix='.report-na-', dir=self.directory)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(data, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.path)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+
+    def set(self, family, program, lane, path, na):
+        """Mark (na=True) or unmark a report; returns marked_at or None."""
+        from datetime import datetime, timezone
+        if not isinstance(path, str) or not 0 < len(path) <= self.MAX_PATH:
+            raise ValueError('invalid report path')
+        key = self.key(family, program, lane, path)
+        with self.lock:
+            data = self.read(for_update=True)
+            if not na:
+                if data.pop(key, None) is not None:
+                    self.write(data)
+                return None
+            marked_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            data[key] = {'family': family, 'program': program, 'lane': lane, 'path': path, 'marked_at': marked_at}
+            self.write(data)
+            return marked_at
+
+
+def report_na_flags(store):
+    """One read of the N/A marks for a response: (keys or None, available)."""
+    keys = store.keys() if store is not None else None
+    return keys, keys is not None
+
+
 def valid_tailnet_host(host):
     import re
     label = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
@@ -1305,7 +1413,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             try:
                 params = parse_qs(url.query, keep_blank_values=True, strict_parsing=bool(url.query),
                                   encoding='utf-8', errors='strict', max_num_fields=110)
-                allowed = {'limit', 'offset', 'within', 'program', 'lane', 'q', 'order', 'nav'}
+                allowed = {'limit', 'offset', 'within', 'program', 'lane', 'q', 'order', 'nav', 'hide_na'}
                 if not set(params) <= allowed or any(len(v) != 1 for k, v in params.items() if k != 'program'):
                     raise ValueError('invalid parameters')
 
@@ -1330,15 +1438,18 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     raise ValueError('invalid query')
                 order = params.get('order', ['newest'])[0]
                 nav = params.get('nav', ['0'])[0]
-                if order not in ('newest', 'oldest') or nav not in ('0', '1'):
+                hide_na = params.get('hide_na', ['0'])[0]
+                if order not in ('newest', 'oldest') or nav not in ('0', '1') or hide_na not in ('0', '1'):
                     raise ValueError('invalid order')
             except (ValueError, UnicodeError):
                 return self.reply(400, {'error': 'invalid_recent_reports', 'message': 'Invalid recent report parameters.'})
             if not search_slots.acquire(blocking=False):
                 return self.reply(503, {'error': 'search_busy'}, {'Retry-After': '1'})
             try:
+                na_keys, _ = report_na_flags(self.server.report_na)
                 return self.reply(200, search_index.recent(limit=limit, offset=offset, within=within, programs=programs,
-                                                           lane=lane, query=query, order=order, include_navigation=nav == '1'))
+                                                           lane=lane, query=query, order=order, include_navigation=nav == '1',
+                                                           na_keys=na_keys, hide_na=hide_na == '1'))
             finally:
                 search_slots.release()
 
@@ -1422,6 +1533,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'report_autosave': report_autosave,
                                           'live_edit': live is not None,
                                           'fixture_publish': experimental_fixture_publish}
+                na_keys, na_available = report_na_flags(self.server.report_na)
+                result['capabilities']['report_na'] = {'enabled': na_available}
+                for program_entry in result.get('programs', []):
+                    for lane_entry in program_entry['lanes']:
+                        prefix = f"{program_entry['id']}/{lane_entry['name']}/"
+                        for report in lane_entry.get('reports') or []:
+                            report['na'] = bool(na_keys) and prefix + report['path'] in na_keys
                 if phased and before:
                     result['capabilities']['source_authoritative'] = phase != 'summary'
                 self.reply(200, result)
@@ -1453,9 +1571,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         items = reports(lane_dir, warnings, findings, report_autosave)
                         if root_snapshot() != before:
                             self.reply(409, {'error': 'root_changed'}); return
+                        na_keys, na_available = report_na_flags(self.server.report_na)
+                        prefix = f'{family}/{program}/{name}/'
+                        for report in items or []:
+                            report['na'] = bool(na_keys) and prefix + report['path'] in na_keys
                         self.reply(200, {'root_instance': before[2], 'family': family, 'program': program,
                                          'lane': name, 'reports': items, 'warnings': warnings,
-                                         'source_authoritative': True})
+                                         'source_authoritative': True, 'na_available': na_available})
                         return
                     entries = map_entries(lane_dir, warnings)
                     selected = {'name': name, 'findings': findings, 'map': entries,
@@ -1577,6 +1699,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.live_request('POST')
             if urlsplit(self.path).path == '/api/collaboration':
                 return self.collaboration_admitted(write=True)
+            if urlsplit(self.path).path == '/api/report-na':
+                # Board-only state: independent of the BBH writer and its lock.
+                return self.report_na_request()
             # Ledger actions share the metadata lock with PATCH /api/finding.
             action = {'/api/finding/submission': self.set_submission, '/api/finding/new': self.add_finding,
                       '/api/finding/reclassify': self.reclassify_finding, '/api/finding/delete': self.delete_finding}.get(urlsplit(self.path).path)
@@ -1687,6 +1812,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     result = subprocess.run([str(self.server.writer), 'agents/manual_hunter.py', program,
                         '--family', family, '--lane', lane, '--root', str(root), '--edit-finding', fid,
                         '--patch-file', str(patchfile)], capture_output=True, timeout=60)
+                # The ledger may have changed (even after a failure): let Recent re-read it.
+                search_index.touch()
                 if result.returncode != 0:
                     self.server.writer_enabled = False
                     return self.reply(502, {'error': 'writer_failed', 'message': 'Update may be incomplete; refresh before retrying.'})
@@ -1746,6 +1873,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             import subprocess
             try:
                 result = subprocess.run([str(self.server.writer), *argv], capture_output=True, text=True, timeout=60)
+                # The ledger may have changed (even after a failure): let Recent re-read it.
+                search_index.touch()
                 if result.returncode != 0:
                     outcome = refused(result) if refused else None
                     if outcome is not None:
@@ -2096,6 +2225,70 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return {'archive_state': 'unavailable'}
             return {}
 
+        def report_na_request(self):
+            """POST /api/report-na: mark or unmark one report file as N/A (Board-only state).
+
+            Same trust checks as the ledger actions. Marking requires the report
+            to exist as a regular file under the lane's reports/ with no
+            symlinked component; unmarking skips that check so a stale mark on
+            a moved or deleted file can be cleared."""
+            import re
+            if (not self.trusted_request(require_origin=True) or
+                    self.headers.get_all('X-Requested-With', []) != ['Bounty-Board'] or
+                    [x.lower() for x in self.headers.get_all('Content-Type', [])] != ['application/json'] or
+                    self.headers.get('Transfer-Encoding')):
+                return self.reply(403, {'error': 'untrusted_origin'})
+            try:
+                lengths = self.headers.get_all('Content-Length', [])
+                if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 4096:
+                    raise ValueError('invalid length')
+                payload = json.loads(self.rfile.read(int(lengths[0])))
+                if not isinstance(payload, dict) or set(payload) != {'family', 'program', 'lane', 'path', 'na'}:
+                    raise ValueError('invalid payload')
+                family, program, lane, path, na = (payload[k] for k in ('family', 'program', 'lane', 'path', 'na'))
+                if (not isinstance(family, str) or family not in FAMILIES or not isinstance(lane, str) or lane not in FAMILIES[family] or
+                        not isinstance(program, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', program) or
+                        type(na) is not bool or not isinstance(path, str) or
+                        not re.fullmatch(LINE_CHAR + '{1,%d}' % ReportNaState.MAX_PATH, path) or '\\' in path or
+                        not path.lower().endswith('.md') or any(p in ('', '.', '..') for p in path.split('/'))):
+                    raise ValueError('invalid fields')
+            except (ValueError, UnicodeError, json.JSONDecodeError):
+                return self.reply(400, {'error': 'invalid_report_na'})
+            if na and not self.regular_report(family, program, lane, path):
+                return self.reply(404, {'error': 'report_not_found'})
+            store = self.server.report_na
+            if store is None:
+                return self.reply(503, {'error': 'report_na_unavailable'})
+            try:
+                marked_at = store.set(family, program, lane, path, na)
+            except OSError:
+                return self.reply(503, {'error': 'report_na_unavailable'})
+            return self.reply(200, {'path': path, 'na': na, 'marked_at': marked_at})
+
+        def regular_report(self, family, program, lane, path):
+            """True when root/family/program/lane/reports/<path> is a regular file, never following a symlink."""
+            import os
+            import stat
+            parts = [family, program, lane, 'reports', *path.split('/')]
+            try:
+                fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            except OSError:
+                return False
+            try:
+                for part in parts[:-1]:
+                    next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    os.close(fd)
+                    fd = next_fd
+                file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    return stat.S_ISREG(os.fstat(file_fd).st_mode)
+                finally:
+                    os.close(file_fd)
+            except OSError:
+                return False
+            finally:
+                os.close(fd)
+
         def archive_state_request(self, url):
             """GET /api/archive-state: previous statuses the Board stored for archived findings in one lane."""
             import re
@@ -2163,6 +2356,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     server.writer_features = writer_features(server.writer) if server.writer_enabled else frozenset()
     # Private Board state (previous status of archived findings); never under the data root.
     server.archive_state = ArchiveState(state_dir) if state_dir is not None else None
+    # Board-only N/A marks on report files; same private state directory.
+    server.report_na = ReportNaState(state_dir) if state_dir is not None else None
     return server
 
 
