@@ -39,9 +39,10 @@ browser (Board origin https://<node>:9001)
   - Races: lock order is always session lock, then manager lock; the reaper re-checks viewers and timers under the session lock, so a viewer arriving while a pause is in flight waits for it and then unpauses (tested). Pause, unpause and removal are idempotent ("already paused" / "not paused" count as success). A failed pause is logged to stderr and retried on the next pass. A container that vanished outside the service is treated as removed: a pause marks the session removed; an attach (paused or running) recreates it with "The previous sandbox was gone; started a fresh one."
   - `--idle-timeout` still works as the old name of `--remove-after`.
 - **Mounted folder** (`terminal_sandbox.resolve_mount`, re-resolved on every session start and reset):
-  1. the dedicated folder `report_artifacts` resolves (REPORT.md/EVIDENCE.md folder or the finding's `report_dir`);
-  2. else the report file's own folder, when it is below `reports/`, holds no other top-level `.md` and is not shared with another finding;
-  3. else (report directly in `reports/`, or in a bucket folder with several reports) a **per-report folder next to the report**, named after the file without `.md` (`reports/x.md` → `reports/x/`, `reports/bucket/one.md` → `reports/bucket/one/`), created on first open. Mounting the bucket would expose every report in it.
+  Follows the BBH report packet format: each finding has a packet folder `reports/<FID>-<slug>/` (or legacy `reports/<FID>/`) holding `EVIDENCE.md`, the submission report `<target-domain>-<vuln-type>-<FID>.md`, optional `poc.py`/`poc.<ext>` and `_meta/`. Files directly in `reports/` (active.md, confirmed.md, index/, severity/, categories/, daily/ ...) are generated navigation.
+  1. **Report inside a packet folder** `reports/<FID>[-slug]/...` → that packet folder; the shell starts at the packet root. Exact-FID rule: the folder name is a ledger FID verbatim (case and punctuation) or that FID, `-`, and a lowercase slug (`[a-z0-9]+` joined by single `-`). `D10-xss` never belongs to D1; `D1-Bad-Slug`, `D1_odd`, `D1-`, `D1--double`, `d1-lower` and `D100-x` (no FID D100) are not packets; when two FIDs match (AC and AC-1 for `AC-1-idor`) the longer wins. The FID must be in the lane's `ledgers/ledger.json`: without the ledger the end of the FID cannot be known.
+  2. **Report elsewhere mapped to a ledger finding** (legacy `reports/findings/<bucket>/<FID> - title.md`, a file directly in `reports/`), by the finding's `report_path`/`evidence_path` or by an exact `<FID> - …` / `<FID>.md` file name → that finding's packet: its `report_dir` when that is a packet folder for the same FID directly under `reports/`, else the legacy `reports/<FID>/`, and only if it exists. The drawer says "Opened the finding folder reports/D10-xss/ (D10, from the ledger)."
+  3. **Anything else** (navigation pages, unmapped files, a ledger finding whose packet folder is missing) → the Terminal button is disabled with "This report is not inside a finding folder (reports/<FID>-…/)." (`GET /api/mount` tells the Board before anyone clicks; the play buttons are disabled with the same reason; check marks still work). No folder is ever created, and `reports/` and the lane are never mounted.
   Every component from the data root down is opened with `O_NOFOLLOW` (no symlinks anywhere), the lane root and `reports/` itself are never mounted, dot names are refused, and paths with commas, quotes or control characters are refused (Docker's `--mount` syntax). After `docker run`, the path is checked again to still be the same directory (device and inode) reached without symlinks, otherwise the container is removed. A viewer attaching to a session whose folder was moved or renamed sees "The report folder moved or was renamed. Reset sandbox to open the new location."
 - **Ownership.** The container runs as the host user's UID:GID (`--user`), with HOME a tmpfs owned by that UID, so files created in `/report` belong to the host user and sync like any other report file. Build the image with matching `UID`/`GID` build args so the user has a name in the container.
 - **Network.** `--network none`; the only way out is the service's filtering proxy, reached through the per-session socket and the in-container forwarder on 127.0.0.1:3128. `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY=socks5h://…` (and lower-case), `NO_PROXY=localhost,127.0.0.1,::1`, `NODE_USE_ENV_PROXY=1` are set, so curl, wget, Python requests/urllib, httpie and Go tools work. The proxy speaks HTTP CONNECT, absolute-form HTTP (one request per connection) and SOCKS5 CONNECT. It resolves names itself, refuses the whole name if any answer is non-global, connects only to the vetted address (no rebinding), and vets every connection. Refused: loopback, RFC 1918, CGNAT 100.64.0.0/10 (Tailscale), link-local incl. 169.254.169.254, IPv6 ULA incl. fd7a:115c:a1e0::/48, multicast, unspecified/reserved, plus IPv4 embedded in mapped, NAT64, 6to4 and Teredo addresses.
@@ -83,12 +84,13 @@ Not covered:
 | `POST /api/login` `{username, password}` / `POST /api/logout` | Origin + CSRF header | 200 + cookie; 401 invalid, 429 locked, 403 disabled |
 | `GET /api/checks?family&program&lane&path` | yes | `{checks: {key: epoch}}` |
 | `POST /api/checks` `{family, program, lane, path, key, checked}` | yes + Origin + CSRF | `{checks}`; 400 bad key, 409 cap reached |
+| `GET /api/mount?…` | yes | `{ok: true, folder, fid, rule: packet\|ledger, reason}` or `{ok: false, code: not_in_packet\|unsafe_folder\|report_not_found, message}` |
 | `GET /api/session?…` | yes | `{session: info or null}` |
 | `POST /api/reset` `{selector}` | yes + Origin + CSRF | `{session}` |
 | `POST /api/evidence` `{selector}` | yes + Origin + CSRF | `{relative, name}`; 409 no session / read-only root / unsafe folder |
 | `GET /ws?…` (WebSocket) | yes + Origin | client text `{"t":"in","d":…}`, `{"t":"resize","cols","rows"}`; server binary = terminal output, text = `hello{session}`, `viewers{count}`, `reset`, `exit`, `error{code,message}`, `closed{message}` |
 
-Session info: `{id, created, pause_after, remove_after, idle_timeout, folder, workdir, mount_reason, viewers, notes, running, paused}`. The WebSocket `hello` carries `event`: `started`, `attached`, `resumed`, `recreated_idle`, `recreated_vanished` or `reset`. Errors on attach include `low_memory` and `too_many_sessions`.
+Session info: `{id, created, pause_after, remove_after, idle_timeout, folder, workdir, mount_reason, mount_rule, fid, viewers, notes, running, paused}`. The WebSocket `hello` carries `event`: `started`, `attached`, `resumed`, `recreated_idle`, `recreated_vanished` or `reset`. Errors on attach include `low_memory` and `too_many_sessions`.
 
 WebSocket server (`terminal_ws.py`, RFC 6455, server side only, no extensions/subprotocols): client frames must be masked; RSV bits, unknown opcodes, fragmented or >125-byte control frames, continuation without start, a new data frame mid-message and 64-bit lengths with the MSB set close with 1002; frames or messages over 256 KiB close with 1009 before the payload is read; invalid UTF-8 text or close reason closes with 1007; close codes are validated and echoed; pings are answered; the service pings every 20 s and drops peers silent for 75 s. A standard library has no WebSocket server, and the alternatives (polling, SSE plus POST) would add latency for keystrokes, so a minimal strict implementation with 35 unit tests was chosen.
 
@@ -97,13 +99,13 @@ WebSocket server (`terminal_ws.py`, RFC 6455, server side only, no extensions/su
 ## Decisions
 
 - Mount, not copy (Ryu's correction): edits are seamless in both directions; the price is that the terminal can change and delete files in that folder.
-- Per-report folder next to the report for flat and bucket layouts, rather than mounting a folder shared by other reports or refusing.
+- Mount only finding packet folders (Ryu's correction): no folders are created; navigation pages and unmapped files get a disabled Terminal button with the reason. An earlier version created `reports/<name>/` folders next to flat reports; that code and its tests are removed.
 - Separate process, own systemd unit, loopback only; shell-capable code never runs inside app.py.
 - Filtering forward proxy over a mounted Unix socket instead of host firewall rules (no sudo on Hoster).
 - Check marks in the terminal service, not the Board, so the Board stays free of new write endpoints; when the service is down the marks are unavailable (shown disabled).
 - Pause instead of close (Ryu approved): an idle sandbox measured about 16 MB and pause/unpause about 0.1 s here, so keeping 12 paused sandboxes costs little and coming back is instant. At the cap, paused sandboxes are removed before running ones and attached ones never.
 - Memory guard on creation only; unpausing never refuses, because the memory is already held.
-- Ryu kept the defaults: per-report folders for flat and bucket layouts, the folder mounted read-write, no extra image tools.
+- Ryu kept the folder mounted read-write and no extra image tools.
 - Login lockout is global (no trustworthy client address behind Serve).
 - Debian `stable-slim` base. Debian's Node is older than the release that honours `NODE_USE_ENV_PROXY` (Node 24 / 22.21), so plain Node `fetch` may ignore the proxy; curl, Python and httpie honour it.
 
@@ -140,13 +142,23 @@ Run on Ghost, same TMPDIR, load average about 8 to 17.
 - `python3 -W error::ResourceWarning tests/safe_suite.py`: 434 tests, OK (12 skipped: the 11 Docker tests and the existing skip).
 - `npm test`: 169 tests, 168 pass, 1 fail (`live-editor` "outside write appears in an idle editor with a notice", 30 s wait for the notice); `live-editor.synthetic.test.cjs` alone straight afterwards: 8/8 pass.
 
+### Mount rule change (finding packet folders only) evidence
+
+Run on Ghost, same TMPDIR. The fixture now uses the packet layout: `reports/D1-sqli-login/` (EVIDENCE.md, `example-com-sqli-D1.md`, `poc.py`, `_meta/`), `reports/D10-xss/`, legacy `reports/AC-1/`, `reports/D7-open-redirect/`, legacy files under `reports/findings/`, navigation (`active.md`, `index/all.md`) and look-alike folders that must not count.
+
+- `tests.test_terminal_sandbox`: 46 OK. Mount tests replaced: exact-FID rule (D1 vs D10, digits in slugs, longest FID for AC/AC-1, refused `D100-x`, `D1-Bad-Slug`, `D1_odd`, `D1-`, `D1--double`, `d1-lower`, `D1-x_y`, `D1-x.y`, `D1 x`, `xD1`); rule 1 mounts the packet root (from the report, EVIDENCE.md or any file in it; legacy `reports/AC-1/`); rule 2 by file name (`D10 - HIGH - …`, `reports/D10.md`) and by ledger `report_path` (D7); rule 3 refuses navigation, index pages, unmapped files, a finding whose packet folder is missing and every look-alike folder, with the exact message, and the `reports/` listing is unchanged afterwards (nothing created); ledger `report_dir` must be a packet for that FID directly under `reports/` (`reports` itself, another FID's packet, a nested folder all refused); symlinked packets refused for rule 1 and rule 2, symlinked lane refused; comma injection through an FID; moved packet. The folder-creation tests are removed.
+- `tests.test_terminal_service`: 18 OK. New: `GET /api/mount` for a packet report, a legacy report (rule `ledger`), navigation (`ok: false`, `not_in_packet`, exact message), bad selector 400, anonymous 401; a WebSocket attach to a navigation page gets `not_in_packet`; evidence for it is refused.
+- `tests.test_terminal_ws` 35 OK, `tests.test_terminal_proxy` 30 OK.
+- `tests.test_terminal_docker`: 11 OK in 2 of 2 runs (19 to 32 s) with the packet layout (the mount is `reports/D1-sqli-login`; a sibling packet and the navigation pages are not visible). Measured again on this run: idle sandbox 18.3 MiB (same while paused), pause median 52 ms, unpause median 82 ms.
+- `static/tests/sandbox-terminal.synthetic.test.cjs`: 7 pass. New: `active.md` shows a disabled Terminal button with the reason as its title and visible text, Ctrl+` does nothing, no `reports/active` folder appears; the legacy D10 report enables the button, opens D10's packet root (`basename $PWD` = `D10-xss`, EVIDENCE.md listed) and shows "Opened the finding folder reports/D10-xss/ (D10, from the ledger)."; switching to `index/all.md` hides the drawer and disables the button again. Screenshot: `$TMPDIR/screens/not-in-packet-light.png`.
+
 ## Gaps
 
 - `sandbox/Dockerfile` (apt packages) was not built here: there is no network in this environment. The real-container tests use `sandbox/Dockerfile.test` (python:3.12-slim, same user, forwarder, bashrc and layout, no curl/jq/node). Build and verify the real image on Hoster (steps below).
 - Login sessions are in memory; a service restart signs out password users (tailnet users are unaffected).
 - The check-mark poll is 5 s; there is no push.
 - The transcript is what the PTY printed (echoed input included); full-screen programs (vim, less) leave noise even after ANSI stripping.
-- Per-report folders (rule 3) are not listed in the artifacts panel, because `report_artifacts` only lists dedicated folders; the evidence file is still written and the drawer shows its path.
+- A packet folder whose FID is not in the lane ledger is not recognised (the exact-FID rule needs the ledger); such reports get the disabled button.
 - No disk quota on the mounted folder.
 - A service restart drops paused sessions (containers are cleaned up at start); there is no state file to adopt them.
 - A paused sandbox keeps its memory; the 2 GiB floor only guards creation. Twelve idle sandboxes measured about 16 MB each here, but one with a big process paused inside keeps all of it until removal or eviction.
@@ -201,9 +213,9 @@ Do these on Hoster as the Board's user. Review existing Serve config first (`tai
 
 ## Decisions for Ryu
 
-Questions 1, 2 and 5 were answered: keep the per-report folder, keep read-write, no extra tools.
+Questions 1, 2 and 5 were answered: mount only finding packet folders (no folder creation), keep read-write, no extra tools.
 
-1. Folder mounting for reports that sit directly in `reports/` or in a shared bucket folder: a new `reports/<name>/` folder next to the report (current), or refuse the terminal for those reports?
+1. (Answered: packet folders only.)
 2. Should a sandbox be allowed to delete files in the report folder at all, or should the folder be mounted read-only with a separate writable scratch folder? (Current: read-write, as asked.)
 3. (Answered: pause after 5 min, remove after 4 h, 12 sandboxes, 2 GiB free-memory floor.) 1 GB memory, 1 CPU, 256 processes per sandbox: keep?
 4. Should check marks reset when the report is renamed or moved? (They are keyed by path, so they do today.)

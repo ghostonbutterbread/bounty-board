@@ -89,7 +89,7 @@ Limits:
 
 ### Optional sandbox terminal
 
-`terminal_service.py` is a separate stdlib process that gives each report a sandboxed shell in a bottom drawer of the report view (Terminal button or Ctrl+`). The shell runs in a hardened Docker container with the report's own folder mounted read-write at `/report`, so a PoC that an agent edits on the host is runnable immediately and a fix made in the terminal lands in the real folder. In the rendered preview each fenced code block gets a play button (types it; Shift+click or Run also presses Enter) and a Checked box; these exist only in the Board, never in the Markdown. Internet egress goes through a filtering proxy that refuses the host, LAN, tailnet and cloud metadata.
+`terminal_service.py` is a separate stdlib process that gives each report a sandboxed shell in a bottom drawer of the report view (Terminal button or Ctrl+`). The shell runs in a hardened Docker container with the report's finding packet folder (`reports/<FID>-<slug>/`, or the packet the ledger names for a legacy report) mounted read-write at `/report`, so a PoC that an agent edits on the host is runnable immediately and a fix made in the terminal lands in the real folder. In the rendered preview each fenced code block gets a play button (types it; Shift+click or Run also presses Enter) and a Checked box; these exist only in the Board, never in the Markdown. Internet egress goes through a filtering proxy that refuses the host, LAN, tailnet and cloud metadata.
 
 ```sh
 docker build -t bbterm-sandbox:latest --build-arg UID=$(id -u) --build-arg GID=$(id -g) sandbox/
@@ -99,7 +99,7 @@ python3 app.py ... --terminal-url /terminal/
 tailscale serve --bg --https=9001 --set-path /terminal http://127.0.0.1:9011
 ```
 
-A sandbox nobody is watching is paused after 5 minutes (`--pause-after`) and resumes instantly with the same shell when the report is opened again; it is removed after 4 hours without a viewer (`--remove-after`). At most 12 are kept (`--max-sessions`, paused ones are removed first when full), and new ones are refused when the host has less than 2 GiB available (`--min-free-memory`). A service restart drops paused sandboxes; files stay in the report folder.
+Navigation pages and files outside a finding folder get a disabled Terminal button with the reason; no folders are created. A sandbox nobody is watching is paused after 5 minutes (`--pause-after`) and resumes instantly with the same shell when the report is opened again; it is removed after 4 hours without a viewer (`--remove-after`). At most 12 are kept (`--max-sessions`, paused ones are removed first when full), and new ones are refused when the host has less than 2 GiB available (`--min-free-memory`). A service restart drops paused sandboxes; files stay in the report folder.
 
 The Board shows the terminal only with `--terminal-url`. Threat model, contract and deployment steps: [docs/integrations/sandbox-terminal.md](docs/integrations/sandbox-terminal.md).
 
