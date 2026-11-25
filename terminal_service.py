@@ -14,6 +14,7 @@ Routes (after the optional prefix):
   POST /api/login, /api/logout  password sessions (JSON, X-Requested-With)
   GET  /api/checks?<selector>   check marks for a report's code blocks
   POST /api/checks              {family, program, lane, path, key, checked}
+  GET  /api/mount?<selector>    which finding folder the report would open, or why not
   GET  /api/session?<selector>  session info, if one is running
   POST /api/reset               recreate a report's sandbox
   POST /api/evidence            save the transcript into <report folder>/validation/
@@ -260,6 +261,17 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                     return self.websocket()
                 if path == '/api/checks':
                     return self.reply(200, {'checks': checks.get(self.selector_from_query())})
+                if path == '/api/mount':
+                    # Whether this report has a finding folder to open (the Board disables the
+                    # Terminal button with the message when it does not).
+                    try:
+                        mount = sb.resolve_mount(root, self.selector_from_query())
+                    except sb.SandboxError as error:
+                        if error.code == 'bad_selector':
+                            raise
+                        return self.reply(200, {'ok': False, 'code': error.code, 'message': error.message})
+                    return self.reply(200, {'ok': True, 'folder': mount.folder, 'fid': mount.fid, 'rule': mount.rule,
+                                            'reason': mount.reason})
                 if path == '/api/session':
                     session = manager.get(self.selector_from_query())
                     return self.reply(200, {'session': session.info() if session else None})
@@ -309,7 +321,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             except ValueError:
                 return self.reply(400, {'error': 'bad_request'})
             except sb.SandboxError as error:
-                status = {'bad_selector': 400, 'report_not_found': 404, 'root_not_writable': 409,
+                status = {'bad_selector': 400, 'report_not_found': 404, 'root_not_writable': 409, 'not_in_packet': 409,
                           'unsafe_folder': 409, 'too_many_sessions': 503}.get(error.code, 500)
                 return self.reply(status, {'error': error.code, 'message': error.message})
             return self.reply(404, {'error': 'not_found'})

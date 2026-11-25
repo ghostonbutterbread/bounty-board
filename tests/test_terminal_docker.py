@@ -162,7 +162,7 @@ class DockerSandboxTests(unittest.TestCase):
         self.assertEqual(info['Config']['User'], f'{os.getuid()}:{os.getgid()}')
         self.assertEqual(set(host['Tmpfs']), {'/tmp', '/home/sandbox'})
         mounts = {(m['Destination'], m['Source'], m['RW']) for m in info['Mounts']}
-        self.assertEqual(mounts, {('/report', str(self.lane / 'reports/finding-a'), True),
+        self.assertEqual(mounts, {('/report', str(self.lane / 'reports/D1-sqli-login'), True),
                                   ('/run/bbterm', str(self.base / 'state/proxy' / self.session.id), False)})
         self.assertNotIn('docker.sock', json.dumps(info))
         if info.get('AppArmorProfile') is not None and Path('/sys/kernel/security/apparmor').exists():
@@ -180,25 +180,25 @@ class DockerSandboxTests(unittest.TestCase):
         self.viewer.wait_for('poc-ran-ok')
 
     def test_03_host_edit_visible_immediately(self):
-        (self.lane / 'reports/finding-a/poc.py').write_text('print("agent-edited-" + str(6*7))\n')
+        (self.lane / 'reports/D1-sqli-login/poc.py').write_text('print("agent-edited-" + str(6*7))\n')
         self.session.write(b'python3 poc.py\n')
         self.viewer.wait_for('agent-edited-42')
 
     def test_04_container_edit_lands_on_host_with_host_owner(self):
         self.session.write(b'echo fixed-in-terminal > made-here.txt; mkdir -p sub && echo x > sub/y\n')
-        target = self.lane / 'reports/finding-a/made-here.txt'
+        target = self.lane / 'reports/D1-sqli-login/made-here.txt'
         deadline = time.time() + 10
         while not target.exists() and time.time() < deadline:
             time.sleep(0.1)
         self.assertEqual(target.read_text(), 'fixed-in-terminal\n')
-        for path in (target, self.lane / 'reports/finding-a/sub', self.lane / 'reports/finding-a/sub/y'):
+        for path in (target, self.lane / 'reports/D1-sqli-login/sub', self.lane / 'reports/D1-sqli-login/sub/y'):
             st = path.stat()
             self.assertEqual((st.st_uid, st.st_gid), (os.getuid(), os.getgid()))
 
     def test_05_nothing_outside_the_folder(self):
         self.assertNotEqual(self.exec('cat', '/report/../flat.md').returncode, 0)
         listing = self.exec('ls', '-a', '/').stdout.split()
-        self.assertNotIn('flat.md', listing)
+        self.assertNotIn(fx.THIRD, listing)
         mountinfo = self.exec('cat', '/proc/self/mountinfo').stdout
         self.assertNotIn(str(self.root) + ' ', mountinfo)
         self.assertNotIn('docker.sock', mountinfo)
@@ -282,7 +282,7 @@ class DockerSandboxTests(unittest.TestCase):
 
     def test_07_idle_reap_and_stale_reap(self):
         viewer = FakeViewer()
-        other = self.manager.attach(fx.selector('solo/notes.md'), viewer)
+        other = self.manager.attach(fx.selector(fx.SECOND), viewer)
         name = self.backend.name(other)
         self.assertIn(name, our_containers())
         self.manager.detach(other, viewer)
@@ -311,7 +311,7 @@ class DockerSandboxTests(unittest.TestCase):
         self.session.write(b'echo evidence-line-$((7*6))\n')
         self.viewer.wait_for('evidence-line-42')
         rel = sb.save_evidence(self.root, fx.selector(), self.session.transcript_text())
-        self.assertTrue(rel.startswith('reports/finding-a/validation/terminal-'))
+        self.assertTrue(rel.startswith('reports/D1-sqli-login/validation/terminal-'))
         self.assertIn('evidence-line-42', (self.lane / rel).read_text())
         self.assertEqual(self.exec('ls', '/report/validation').returncode, 0)  # visible in the sandbox too
 
@@ -337,7 +337,7 @@ class DockerSandboxTests(unittest.TestCase):
         manager = sb.SessionManager(self.root, sb.DockerBackend(image=IMAGE, state_dir=self.base / 'state3', proxy=self.proxy,
                                                                 prefix='bbterm-test-stop-'), reap_interval=0)
         viewer = FakeViewer()
-        session = manager.attach(fx.selector('flat.md'), viewer)
+        session = manager.attach(fx.selector(fx.THIRD), viewer)
         name = manager.backend.name(session)
         self.assertIn(name, our_containers())
         manager.backend.pause(session)  # a paused sandbox is removed too

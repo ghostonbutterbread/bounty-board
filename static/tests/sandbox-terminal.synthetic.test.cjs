@@ -10,7 +10,7 @@ const {chromium}=require('playwright');
 
 const repo=path.resolve(__dirname,'../..');
 const shots=process.env.TERMINAL_SCREENSHOT_DIR;
-const REPORT='finding-a/REPORT.md';
+const REPORT='D1-sqli-login/example-com-sqli-D1.md';
 
 async function withFixture(mode,fn){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bt-'));
@@ -34,11 +34,11 @@ async function withFixture(mode,fn){
   }
 }
 
-async function openReport(page,base,{live=true}={}){
+async function openReport(page,base,{live=true,report=REPORT}={}){
   await page.goto(base);
   await page.getByRole('button',{name:'Open workspace'}).click();
   await page.getByRole('button',{name:'Reports',exact:true}).click();
-  await page.locator('#report-select').selectOption(REPORT);
+  await page.locator('#report-select').selectOption(report);
   if(live){
     await page.locator('#live-report-host .live-editor .CodeMirror').waitFor({timeout:15000});
     await page.locator('[data-live-status]').filter({hasText:/^(Saved|Read-only)$/}).waitFor({timeout:15000});
@@ -60,7 +60,7 @@ async function theme(page,value){await page.evaluate(v=>{localStorage.setItem('b
 
 test('drawer connects; play, Run and checks work; nothing reaches the Markdown or the clipboard',{timeout:180000},async()=>{
   await withFixture('tailnet',async({base,newPage,keys,lane})=>{
-    const reportFile=path.join(lane,'reports/finding-a/REPORT.md');
+    const reportFile=path.join(lane,'reports/D1-sqli-login/example-com-sqli-D1.md');
     const original=fs.readFileSync(reportFile,'utf8');
     const page=await newPage();
     await openReport(page,base);
@@ -68,7 +68,7 @@ test('drawer connects; play, Run and checks work; nothing reaches the Markdown o
     assert.equal(await toggle.count(),1);
     await toggle.click();
     await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
-    assert.match(await page.locator('[data-term-meta]').textContent(),/Folder reports\/finding-a/);
+    assert.match(await page.locator('[data-term-meta]').textContent(),/Folder reports\/D1-sqli-login/);
     assert.doesNotMatch(await page.locator('[data-term-meta]').textContent(),/Pauses|removed/,'lifecycle timing stays out of the header');
     assert.equal(await page.locator('[data-term-status]').getAttribute('title'),'Pauses 5 min after the last viewer leaves and is removed after 4 hours. Files in the report folder are kept.');
     await waitScreen(page,l=>l.some(x=>x.includes('sandbox$')),'a prompt');
@@ -93,7 +93,7 @@ test('drawer connects; play, Run and checks work; nothing reaches the Markdown o
     await bar(page,5).locator('[data-term-run]').click();
     await waitScreen(page,l=>l.some(x=>x.trim()==='loop-1')&&l.some(x=>x.trim()==='loop-2'),'loop output');
     // A host-side edit (an agent improving the PoC) is visible immediately.
-    fs.writeFileSync(path.join(lane,'reports/finding-a/poc.py'),'print("improved-by-agent")\n');
+    fs.writeFileSync(path.join(lane,'reports/D1-sqli-login/poc.py'),'print("improved-by-agent")\n');
     await page.locator('[data-term-screen] textarea').focus();
     await page.keyboard.type('python3 poc.py\n');
     await waitScreen(page,l=>l.some(x=>x.trim()==='improved-by-agent'),'edited PoC output');
@@ -140,13 +140,13 @@ test('drawer connects; play, Run and checks work; nothing reaches the Markdown o
 
     // Save output as evidence: a new file in the real folder, shown in the artifacts panel.
     await page.locator('[data-term-evidence]').click();
-    await page.locator('[data-term-note]').filter({hasText:/Saved reports\/finding-a\/validation\/terminal-\d{8}-\d{6}\.txt/}).waitFor({timeout:10000});
-    const saved=fs.readdirSync(path.join(lane,'reports/finding-a/validation'));
+    await page.locator('[data-term-note]').filter({hasText:/Saved reports\/D1-sqli-login\/validation\/terminal-\d{8}-\d{6}\.txt/}).waitFor({timeout:10000});
+    const saved=fs.readdirSync(path.join(lane,'reports/D1-sqli-login/validation'));
     assert.equal(saved.length,1);
-    const transcript=fs.readFileSync(path.join(lane,'reports/finding-a/validation',saved[0]),'utf8');
+    const transcript=fs.readFileSync(path.join(lane,'reports/D1-sqli-login/validation',saved[0]),'utf8');
     assert.match(transcript,/improved-by-agent/);
     assert.doesNotMatch(transcript,/\x1b/);
-    await page.locator(`#report-artifacts-host [data-artifact="reports/finding-a/validation/${saved[0]}"]`).waitFor({timeout:10000});
+    await page.locator(`#report-artifacts-host [data-artifact="reports/D1-sqli-login/validation/${saved[0]}"]`).waitFor({timeout:10000});
 
     // Ctrl+` toggles; the open state and height are remembered per browser.
     await page.locator('#live-report-host .CodeMirror textarea').focus();
@@ -294,6 +294,37 @@ test('a paused sandbox resumes with the same shell and a Resumed toast',{timeout
     await page.keyboard.type('echo "$KEPT in $(basename $PWD), jobs=$(jobs -r | wc -l)"\n');
     await waitScreen(page,l=>l.some(x=>x.trim()==='still-here in sub, jobs=1'),'same shell, cwd and background job');
     assert.equal(await page.locator('[data-term-note]').isHidden(),true,'no restart notice');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+test('only reports in a finding folder get a terminal; legacy reports open their ledger packet',{timeout:120000},async()=>{
+  await withFixture('tailnet',async({base,newPage,lane})=>{
+    const page=await newPage();
+    await openReport(page,base,{report:'active.md'});
+    const toggle=page.locator('[data-term-toggle]');
+    await page.waitForFunction(()=>document.querySelector('[data-term-toggle]')?.disabled===true,null,{timeout:15000});
+    const reason='This report is not inside a finding folder (reports/<FID>-…/).';
+    assert.equal(await toggle.getAttribute('title'),reason);
+    assert.equal(await page.locator('[data-term-reason]').textContent(),reason);
+    await page.keyboard.press('Control+Backquote');
+    assert.equal(await page.locator('#term-drawer:visible').count(),0);
+    assert.equal(fs.existsSync(path.join(lane,'reports/active')),false,'no folder is created');
+    // A legacy report mapped through the ledger opens D10's packet and says so.
+    await page.locator('#report-select').selectOption('findings/confirmed/D10 - HIGH - stored xss.md');
+    await page.waitForFunction(()=>document.querySelector('[data-term-toggle]')?.disabled===false,null,{timeout:15000});
+    assert.equal(await page.locator('[data-term-reason]').isHidden(),true);
+    await toggle.click();
+    await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
+    await page.locator('[data-term-note]').filter({hasText:'Opened the finding folder reports/D10-xss/ (D10, from the ledger).'}).waitFor({timeout:10000});
+    await page.locator('[data-term-screen] textarea').focus();
+    await page.keyboard.type('basename "$PWD"; ls\n');
+    await waitScreen(page,l=>l.some(x=>x.trim()==='D10-xss')&&l.some(x=>/EVIDENCE\.md/.test(x)),'packet root of D10');
+    // Back to a navigation page: the drawer hides, the button is disabled again.
+    await page.locator('#report-select').selectOption('index/all.md');
+    await page.waitForFunction(()=>document.querySelector('[data-term-toggle]')?.disabled===true,null,{timeout:15000});
+    assert.equal(await page.locator('#term-drawer:visible').count(),0);
+    await theme(page,'light');await page.waitForTimeout(200);await shot(page,'not-in-packet-light.png');
     assert.deepEqual(page.errors,[]);
   });
 });

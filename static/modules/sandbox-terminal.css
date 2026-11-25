@@ -42,3 +42,6 @@
 }
 /* EasyMDE's full-screen side-by-side mode is position:fixed; keep it above the drawer. */
 .term-drawer-open .CodeMirror-fullscreen,.term-drawer-open .editor-preview-side.editor-preview-active-side{bottom:var(--term-drawer-space,0px)}
+.term-reason{display:inline-block;margin:0 var(--space-2) 0 0;font-size:var(--text-sm)}
+.term-reason[hidden]{display:none}
+.term-toggle:disabled{cursor:not-allowed}

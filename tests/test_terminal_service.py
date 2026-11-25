@@ -150,7 +150,7 @@ class ServiceTests(unittest.TestCase):
     # -- checks ----------------------------------------------------------------
     def test_checks_roundtrip(self):
         key = tc.block_keys(['echo service-check'])[0]
-        sel = fx.selector('solo/notes.md')
+        sel = fx.selector(fx.SECOND)
         status, _, payload = self.request('POST', '/terminal/api/checks', {**sel, 'key': key, 'checked': True})
         self.assertEqual((status, list(payload['checks'])), (200, [key]))
         status, _, payload = self.request('GET', '/terminal/api/checks?' + urlencode(sel))
@@ -195,10 +195,30 @@ class ServiceTests(unittest.TestCase):
         a.close()
         b.close()
 
+    def test_mount_endpoint_reports_the_folder_or_why_not(self):
+        def mount(path):
+            status, _, payload = self.request('GET', '/terminal/api/mount?' + urlencode(fx.selector(path)))
+            self.assertEqual(status, 200)
+            return payload
+        self.assertEqual(mount(fx.PRIMARY), {'ok': True, 'folder': 'reports/D1-sqli-login', 'fid': 'D1', 'rule': 'packet',
+                                             'reason': 'finding folder'})
+        legacy = mount(fx.LEGACY)
+        self.assertEqual((legacy['folder'], legacy['rule']), ('reports/D10-xss', 'ledger'))
+        nav = mount(fx.NAVIGATION)
+        self.assertEqual(nav, {'ok': False, 'code': 'not_in_packet',
+                               'message': 'This report is not inside a finding folder (reports/<FID>-…/).'})
+        self.assertEqual(self.request('GET', '/terminal/api/mount?' + urlencode(fx.selector('../x.md')))[0], 400)
+        self.assertEqual(self.request('GET', '/terminal/api/mount?' + urlencode(fx.selector(fx.PRIMARY)), tailnet=False)[0], 401)
+        client = self.ws(fx.selector(fx.NAVIGATION))
+        client.pump_until(lambda c: any(m['type'] == 'error' for m in c.controls))
+        self.assertEqual(client.controls[-1]['code'], 'not_in_packet')
+        client.close()
+        self.assertEqual(self.request('POST', '/terminal/api/evidence', fx.selector(fx.NAVIGATION))[0], 409)
+
     def test_evidence_without_session_and_bad_selector(self):
-        self.assertEqual(self.request('POST', '/terminal/api/evidence', fx.selector('bucket/two.md'))[0], 409)
+        self.assertEqual(self.request('POST', '/terminal/api/evidence', fx.selector('D7-open-redirect/EVIDENCE.md'))[0], 409)
         self.assertEqual(self.request('POST', '/terminal/api/evidence', fx.selector('../x.md'))[0], 400)
-        client = self.ws(fx.selector('missing/REPORT.md'))
+        client = self.ws(fx.selector('D99-missing/x.md'))
         client.pump_until(lambda c: any(m['type'] == 'error' for m in c.controls))
         self.assertEqual(client.controls[-1]['code'], 'report_not_found')
         client.close()

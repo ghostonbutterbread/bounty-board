@@ -22,6 +22,10 @@
   let drawer = null, term = null, fit = null, ws = null, wsKey = '', xtermLoad = null;
   let status = 'idle', info = null, connectTimer = null, retry = 0, pending = [];
   let checks = {}, checksKey = '', checksOk = false, pollTimer = null, resetArmed = null;
+  // Result of /api/mount for this report: null while unknown (then the button stays usable),
+  // {ok: false, message} for navigation pages and files outside a finding folder.
+  let mount = null;
+  const blocked = () => mount?.ok === false;
   // Phones get a taller sheet by default; a saved height always wins.
   const defaultHeight = window.innerWidth <= 700 ? Math.round(window.innerHeight * 0.6) : 320;
   const prefs = (() => { try { return {open: false, height: defaultHeight, ...JSON.parse(localStorage.getItem(STORE) || '{}')}; } catch { return {open: false, height: defaultHeight}; } })();
@@ -152,6 +156,7 @@
         const notes = [];
         if (message.event === 'recreated_idle') notes.push(`This sandbox was removed after ${span(info.remove_after)} idle; started a fresh one.`);
         if (message.event === 'recreated_vanished') notes.push('The previous sandbox was gone; started a fresh one.');
+        if (info?.mount_rule === 'ledger') notes.push(`Opened the finding folder ${info.folder}/ (${info.fid}, from the ledger).`);
         if (info?.notes?.includes('folder_moved')) notes.push('The report folder moved or was renamed. Reset sandbox to open the new location.');
         if (message.event !== 'reset') note(notes.join(' '));
         if (message.event === 'resumed') window.BoardUI?.toast?.('Resumed', 'success', {timeout: 4000});
@@ -250,7 +255,7 @@
     document.querySelectorAll('[data-term-toggle]').forEach(b => b.setAttribute('aria-expanded', String(visible)));
   }
   function toggle(force) {
-    if (!sel) return;
+    if (!sel || (blocked() && force !== false)) return;
     prefs.open = force === undefined ? !prefs.open : force;
     savePrefs();
     showDrawer(prefs.open);
@@ -309,6 +314,7 @@
 
   // -- play buttons and check marks ------------------------------------------
   function typeText(text, run) {
+    if (blocked()) return;
     if (!prefs.open) toggle(true);
     const action = () => { term.paste(text); if (run) send({t: 'in', d: '\r'}); term.focus(); };
     if (ws && ws.readyState === 1 && status === 'connected') action();
@@ -334,6 +340,10 @@
           bar.contentEditable = 'false';
           bar.innerHTML = `<span class="term-lang">${esc(lang || 'text')}</span><button type="button" class="button sm term-play" data-term-type aria-label="Type into terminal" title="Type into terminal. Shift+click to run it."><i class="fa fa-play" aria-hidden="true"></i></button>${SHELLISH.has(lang) ? '<button type="button" class="button sm subtle" data-term-run title="Type and press Enter">Run</button>' : ''}<label class="term-check"><input type="checkbox" data-term-check> Checked</label>`;
           pre.before(bar);
+        }
+        for (const button of bar.querySelectorAll('[data-term-type],[data-term-run]')) {
+          button.disabled = blocked();
+          if (blocked()) button.title = mount.message; else button.title = button.matches('[data-term-run]') ? 'Type and press Enter' : 'Type into terminal. Shift+click to run it.';
         }
         bar.dataset.key = keys[i];
         bar.dataset.lang = lang;
@@ -411,7 +421,7 @@
     event.preventDefault();
   });
   window.addEventListener('keydown', event => {
-    if (event.ctrlKey && !event.altKey && !event.metaKey && (event.code === 'Backquote' || event.key === '`') && sel && base) { event.preventDefault(); toggle(); }
+    if (event.ctrlKey && !event.altKey && !event.metaKey && (event.code === 'Backquote' || event.key === '`') && sel && base) { event.preventDefault(); if (!blocked()) toggle(); }
   }, true);
   window.addEventListener('focus', () => { if (sel) loadChecks(); });
 
@@ -431,7 +441,35 @@
     button.title = 'Sandbox terminal (Ctrl+`)';
     button.innerHTML = '<i class="fa fa-terminal" aria-hidden="true"></i><span>Terminal</span>';
     button.addEventListener('click', () => toggle());
-    if (holder.tagName === 'H2') holder.after(button); else holder.prepend(button);
+    const reason = document.createElement('span');
+    reason.className = 'hint term-reason';
+    reason.dataset.termReason = '';
+    reason.id = `term-reason-${Date.now().toString(36)}`;
+    reason.hidden = true;
+    button.setAttribute('aria-describedby', reason.id);
+    if (holder.tagName === 'H2') holder.after(button, reason); else holder.prepend(button, reason);
+    applyMount();
+  }
+
+  // Disable the Terminal button (with the reason next to it) when the report has no finding folder.
+  function applyMount() {
+    const message = blocked() ? mount.message : '';
+    document.querySelectorAll('[data-term-toggle]').forEach(button => {
+      button.disabled = !!message;
+      button.title = message || 'Sandbox terminal (Ctrl+`)';
+    });
+    document.querySelectorAll('[data-term-reason]').forEach(el => { el.textContent = message; el.hidden = !message; });
+    if (message && drawer && !drawer.hidden) showDrawer(false);
+    else if (!message && prefs.open && drawer?.hidden && sel) showDrawer(true);
+  }
+  async function loadMount() {
+    const key = selKey;
+    let result = null;
+    try { result = await api(`api/mount?${query(sel)}`); } catch { result = null; }
+    if (key !== selKey) return;
+    mount = result;
+    applyMount();
+    schedule();
   }
 
   window.registerBoardModule?.({
@@ -442,7 +480,7 @@
       const host = document.getElementById('live-report-host') || document.getElementById('report-artifacts-host');
       const next = base && host?.dataset.path ? {family: host.dataset.family, program: host.dataset.program, lane: host.dataset.lane, path: host.dataset.path} : null;
       if (!next) {
-        document.querySelectorAll('[data-term-toggle],[data-term-controls]').forEach(el => el.remove());
+        document.querySelectorAll('[data-term-toggle],[data-term-reason],[data-term-controls]').forEach(el => el.remove());
         if (sel) { sel = null; selKey = ''; clearInterval(pollTimer); pollTimer = null; if (drawer) { drawer.hidden = true; document.documentElement.classList.remove('term-drawer-open'); disconnect(); setHeight(prefs.height); } }
         return;
       }
@@ -450,10 +488,11 @@
       if (!observer) { observer = new MutationObserver(schedule); observer.observe(context.app, {childList: true, subtree: true, attributes: true, attributeFilter: ['class']}); }
       const key = keyOf(next);
       if (key !== selKey) {
-        sel = next; selKey = key; checks = {}; checksOk = false; info = null; pending = [];
+        sel = next; selKey = key; checks = {}; checksOk = false; info = null; pending = []; mount = null;
         disconnect(); retry = 0;
         if (term) term.reset();
         loadChecks();
+        loadMount();
         clearInterval(pollTimer);
         pollTimer = setInterval(() => { if (!document.hidden) loadChecks(); }, 5000);
         showDrawer(!!prefs.open);

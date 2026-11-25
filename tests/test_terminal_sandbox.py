@@ -4,6 +4,7 @@ Uses the test-only LocalBackend (plain bash in the folder); the real Docker
 sandbox is exercised in test_terminal_docker.py.
 """
 import email.message
+import json
 import os
 import shutil
 import stat
@@ -127,7 +128,7 @@ class CheckTests(unittest.TestCase):
     def test_store_persists_and_validates(self):
         base = fx.tmp_base('checks')
         store = tc.CheckStore(base / 'c.sqlite3')
-        sel, other = fx.selector(), fx.selector('flat.md')
+        sel, other = fx.selector(), fx.selector(fx.THIRD)
         key = tc.block_keys(['echo hi'])[0]
         self.assertTrue(store.set(sel, key, True))
         with self.assertRaises(ValueError):
@@ -162,39 +163,79 @@ class MountTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.base, ignore_errors=True)
 
-    def test_dedicated_folder(self):
+    def refused(self, path, code='not_in_packet'):
+        with self.assertRaises(sb.SandboxError) as caught:
+            sb.resolve_mount(self.root, fx.selector(path))
+        self.assertEqual(caught.exception.code, code, path)
+        return caught.exception
+
+    def test_packet_fid_rule(self):
+        fids = ['D1', 'D10', 'AC', 'AC-1']
+        self.assertEqual(sb.packet_fid('D1', fids), 'D1')
+        self.assertEqual(sb.packet_fid('D1-sqli-login', fids), 'D1')
+        self.assertEqual(sb.packet_fid('D10-xss', fids), 'D10')        # never D1
+        self.assertEqual(sb.packet_fid('D1-0day', fids), 'D1')         # digits in the slug are fine
+        self.assertEqual(sb.packet_fid('AC-1-idor', fids), 'AC-1')     # longest FID wins
+        self.assertEqual(sb.packet_fid('AC-idor', fids), 'AC')
+        for name in ('D100-x', 'D1-Bad-Slug', 'D1_odd', 'D1-', 'D1--double', 'd1-lower', 'D1-x_y', 'D1-x.y', 'D1 x', 'xD1'):
+            self.assertIsNone(sb.packet_fid(name, fids), name)
+
+    def test_rule1_report_inside_packet_mounts_packet_root(self):
         mount = sb.resolve_mount(self.root, fx.selector())
-        self.assertEqual(mount.folder, 'reports/finding-a')
-        self.assertEqual(mount.path, str(self.lane / 'reports/finding-a'))
+        self.assertEqual((mount.folder, mount.fid, mount.rule), ('reports/D1-sqli-login', 'D1', 'packet'))
+        self.assertEqual(mount.path, str(self.lane / 'reports/D1-sqli-login'))
         self.assertTrue(mount.still_valid())
+        self.assertEqual(sb.resolve_mount(self.root, fx.selector(fx.SECOND)).fid, 'D10')
+        self.assertEqual(sb.resolve_mount(self.root, fx.selector(fx.THIRD)).folder, 'reports/AC-1')  # legacy <FID>/
+        # Any file in the packet (EVIDENCE.md, _meta) opens the packet root.
+        self.assertEqual(sb.resolve_mount(self.root, fx.selector('D1-sqli-login/EVIDENCE.md')).folder, 'reports/D1-sqli-login')
 
-    def test_single_report_folder_uses_its_folder(self):
-        self.assertEqual(sb.resolve_mount(self.root, fx.selector('solo/notes.md')).folder, 'reports/solo')
+    def test_rule2_legacy_report_mounts_ledger_packet(self):
+        by_name = sb.resolve_mount(self.root, fx.selector(fx.LEGACY))
+        self.assertEqual((by_name.folder, by_name.fid, by_name.rule), ('reports/D10-xss', 'D10', 'ledger'))
+        self.assertIn('D10', by_name.reason)
+        by_path = sb.resolve_mount(self.root, fx.selector(fx.LEGACY_LEDGER))
+        self.assertEqual((by_path.folder, by_path.fid), ('reports/D7-open-redirect', 'D7'))
+        # A file directly in reports/ that the ledger names maps too.
+        (self.lane / 'reports/D10.md').write_text('# x\n')
+        self.assertEqual(sb.resolve_mount(self.root, fx.selector('D10.md')).folder, 'reports/D10-xss')
 
-    def test_reports_root_and_bucket_get_per_report_folder(self):
-        mount = sb.resolve_mount(self.root, fx.selector('flat.md'))
-        self.assertEqual(mount.folder, 'reports/flat')
-        self.assertTrue((self.lane / 'reports/flat').is_dir())
-        self.assertEqual(sb.resolve_mount(self.root, fx.selector('bucket/one.md')).folder, 'reports/bucket/one')
-        with self.assertRaises(sb.SandboxError):  # create=False never makes the folder
-            sb.resolve_mount(self.root, fx.selector('other.md'), create=False)
-        self.assertFalse((self.lane / 'reports/other').exists())
+    def test_rule3_navigation_and_unmapped_are_refused_without_creating_anything(self):
+        before = sorted(p.name for p in (self.lane / 'reports').iterdir())
+        for path in (fx.NAVIGATION, 'index/all.md', 'findings/confirmed/Z9 - unknown.md',
+                     'findings/confirmed/D5 - no packet.md',  # ledger finding whose packet folder is missing
+                     'D1-Bad-Slug/x.md', 'D1_odd/x.md', 'D1-/x.md', 'D100-x/x.md', 'd1-lower/x.md', 'D1--double/x.md'):
+            error = self.refused(path)
+        self.assertEqual(error.message, 'This report is not inside a finding folder (reports/<FID>-…/).')
+        self.assertEqual(sorted(p.name for p in (self.lane / 'reports').iterdir()), before, 'no folder was created')
 
-    def test_refuses_symlinked_components(self):
+    def test_ledger_report_dir_must_be_a_packet_for_that_fid(self):
+        ledger = self.lane / 'ledgers/ledger.json'
+        data = json.loads(ledger.read_text())
+        data['findings'].append({'fid': 'D20', 'report_dir': 'reports'})                       # reports/ itself
+        data['findings'].append({'fid': 'D21', 'report_dir': 'reports/D10-xss'})               # another FID's packet
+        data['findings'].append({'fid': 'D22', 'report_dir': 'reports/findings/D22-x'})        # not directly under reports/
+        ledger.write_text(json.dumps(data))
+        (self.lane / 'reports/findings/D22-x').mkdir()
+        for fid in ('D20', 'D21', 'D22'):
+            (self.lane / f'reports/findings/confirmed/{fid} - x.md').write_text('# x\n')
+            self.refused(f'findings/confirmed/{fid} - x.md')
+
+    def test_refuses_symlinked_packets_and_lanes(self):
         target = self.base / 'elsewhere'
         target.mkdir()
-        (target / 'REPORT.md').write_text('# x\n')
-        (self.lane / 'reports' / 'linked').symlink_to(target)
-        with self.assertRaises(sb.SandboxError):
-            sb.resolve_mount(self.root, fx.selector('linked/REPORT.md'))
-        # A symlinked lane is refused too.
+        (target / 'x.md').write_text('# x\n')
+        add = json.loads((self.lane / 'ledgers/ledger.json').read_text())
+        add['findings'] += [{'fid': 'D30'}, {'fid': 'D31', 'report_dir': 'reports/D31-linked'}]
+        (self.lane / 'ledgers/ledger.json').write_text(json.dumps(add))
+        (self.lane / 'reports/D30').symlink_to(target)                  # symlinked packet (rule 1)
+        self.refused('D30/x.md', 'report_not_found')                    # the report path itself crosses the symlink
+        (self.lane / 'reports/D31-linked').symlink_to(target)           # symlinked ledger packet (rule 2)
+        (self.lane / 'reports/findings/confirmed/D31 - x.md').write_text('# x\n')
+        self.refused('findings/confirmed/D31 - x.md')
         (self.root / fx.FAMILY / fx.PROGRAM / 'lane2').symlink_to(self.lane)
         with self.assertRaises(sb.SandboxError):
             sb.resolve_mount(self.root, {**fx.selector(), 'lane': 'lane2'})
-        # A per-report folder that is a symlink is refused.
-        (self.lane / 'reports' / 'other').symlink_to(target)
-        with self.assertRaises(sb.SandboxError):
-            sb.resolve_mount(self.root, fx.selector('other.md'))
 
     def test_refuses_bad_selectors(self):
         for path in ('../x.md', '/etc/passwd.md', 'a/../../b.md', 'x.txt', '', 'a//b.md'):
@@ -203,23 +244,21 @@ class MountTests(unittest.TestCase):
         for bad in ({**fx.selector(), 'lane': '..'}, {**fx.selector(), 'program': 'a/b'}, {'family': 'x'}):
             with self.assertRaises(sb.SandboxError):
                 sb.clean_selector(bad)
-        with self.assertRaises(sb.SandboxError):
-            sb.resolve_mount(self.root, fx.selector('missing/REPORT.md'))
+        self.refused('D99-missing/x.md', 'report_not_found')
 
     def test_refuses_mount_option_injection(self):
-        folder = self.lane / 'reports' / 'x,target=etc'
-        folder.mkdir()
-        (folder / 'REPORT.md').write_text('# x\n')
-        with self.assertRaises(sb.SandboxError) as caught:
-            sb.resolve_mount(self.root, fx.selector('x,target=etc/REPORT.md'))
-        self.assertEqual(caught.exception.code, 'unsafe_folder')
+        data = json.loads((self.lane / 'ledgers/ledger.json').read_text())
+        data['findings'].append({'fid': 'Q,1'})
+        (self.lane / 'ledgers/ledger.json').write_text(json.dumps(data))
+        (self.lane / 'reports/Q,1').mkdir()
+        (self.lane / 'reports/Q,1/EVIDENCE.md').write_text('# x\n')
+        self.refused('Q,1/EVIDENCE.md', 'unsafe_folder')
 
     def test_moved_folder_invalidates_mount(self):
         mount = sb.resolve_mount(self.root, fx.selector())
-        (self.lane / 'reports/finding-a').rename(self.lane / 'reports/finding-b')
+        (self.lane / 'reports/D1-sqli-login').rename(self.lane / 'reports/D1-renamed')
         self.assertFalse(mount.still_valid())
-        with self.assertRaises(sb.SandboxError):
-            sb.resolve_mount(self.root, fx.selector())
+        self.refused(fx.PRIMARY, 'report_not_found')
 
 
 class EvidenceTests(unittest.TestCase):
@@ -255,7 +294,7 @@ class EvidenceTests(unittest.TestCase):
     def test_writes_new_file_in_validation(self):
         first = sb.save_evidence(self.root, fx.selector(), 'one\n', now=1700000000)
         second = sb.save_evidence(self.root, fx.selector(), 'two\n', now=1700000000)
-        self.assertTrue(first.startswith('reports/finding-a/validation/terminal-'))
+        self.assertTrue(first.startswith('reports/D1-sqli-login/validation/terminal-'))
         self.assertNotEqual(first, second)
         self.assertEqual((self.lane / first).read_text(), 'one\n')
         self.assertEqual((self.lane / second).read_text(), 'two\n')
@@ -263,13 +302,13 @@ class EvidenceTests(unittest.TestCase):
     def test_refuses_symlinked_validation_and_existing_symlink_target(self):
         outside = self.base / 'outside'
         outside.mkdir()
-        (self.lane / 'reports/finding-a/validation').symlink_to(outside)
+        (self.lane / 'reports/D1-sqli-login/validation').symlink_to(outside)
         with self.assertRaises(sb.SandboxError):
             sb.save_evidence(self.root, fx.selector(), 'x\n', now=1700000000)
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_never_overwrites_planted_symlink(self):
-        validation = self.lane / 'reports/finding-a/validation'
+        validation = self.lane / 'reports/D1-sqli-login/validation'
         validation.mkdir()
         victim = self.base / 'victim.txt'
         victim.write_text('keep')
@@ -289,7 +328,7 @@ class EvidenceTests(unittest.TestCase):
             os.chmod(self.root, 0o755)
 
     def test_refuses_read_only_folder(self):
-        folder = self.lane / 'reports/finding-a'
+        folder = self.lane / 'reports/D1-sqli-login'
         os.chmod(folder, 0o555)
         try:
             with self.assertRaises(sb.SandboxError) as caught:
@@ -342,12 +381,12 @@ class SessionTests(unittest.TestCase):
         viewer = FakeViewer()
         session = self.manager.attach(fx.selector(), viewer)
         self.assertEqual(viewer.controls[0]['type'], 'hello')
-        self.assertEqual(viewer.controls[0]['session']['folder'], 'reports/finding-a')
+        self.assertEqual(viewer.controls[0]['session']['folder'], 'reports/D1-sqli-login')
         session.write(b'pwd; python3 poc.py\n')
-        viewer.wait_for('reports/finding-a')
+        viewer.wait_for('reports/D1-sqli-login')
         viewer.wait_for('poc-ran-ok')
         # An agent edits the PoC on the host: the next run uses it, no recopy.
-        (self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / 'reports/finding-a/poc.py').write_text('print("edited-on-host")\n')
+        (self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / 'reports/D1-sqli-login/poc.py').write_text('print("edited-on-host")\n')
         session.write(b'python3 poc.py\n')
         viewer.wait_for('edited-on-host')
 
@@ -396,14 +435,14 @@ class SessionTests(unittest.TestCase):
     def test_max_sessions_evicts_idle_then_refuses(self):
         a, b, c = FakeViewer(), FakeViewer(), FakeViewer()
         first = self.manager.attach(fx.selector(), a)
-        self.manager.attach(fx.selector('solo/notes.md'), b)
+        self.manager.attach(fx.selector(fx.SECOND), b)
         with self.assertRaises(sb.SandboxError) as caught:
-            self.manager.attach(fx.selector('flat.md'), c)
+            self.manager.attach(fx.selector(fx.THIRD), c)
         self.assertEqual(caught.exception.code, 'too_many_sessions')
         self.manager.detach(first, a)
-        third = self.manager.attach(fx.selector('flat.md'), c)  # removes the viewerless one
+        third = self.manager.attach(fx.selector(fx.THIRD), c)  # removes the viewerless one
         self.assertTrue(first.closed)
-        self.assertEqual(third.folder, 'reports/flat')
+        self.assertEqual(third.folder, 'reports/AC-1')
 
     def test_reset_restarts_shell_and_keeps_viewers(self):
         viewer = FakeViewer()
@@ -444,9 +483,9 @@ class SessionTests(unittest.TestCase):
     def test_folder_move_is_reported_to_new_viewers(self):
         session = self.manager.attach(fx.selector(), FakeViewer())
         lane = self.root / fx.FAMILY / fx.PROGRAM / fx.LANE
-        (lane / 'reports/finding-a').rename(lane / 'reports/finding-z')
-        (lane / 'reports/finding-a').mkdir()
-        (lane / 'reports/finding-a/REPORT.md').write_text('# new\n')
+        (lane / 'reports/D1-sqli-login').rename(lane / 'reports/finding-z')
+        (lane / 'reports/D1-sqli-login').mkdir()
+        (lane / 'reports' / fx.PRIMARY).write_text('# new\n')
         late = FakeViewer()
         self.manager.attach(fx.selector(), late)
         self.assertIn('folder_moved', late.controls[0]['session']['notes'])
@@ -523,10 +562,7 @@ class LifecycleTests(unittest.TestCase):
     def setUp(self):
         self.base = fx.tmp_base('lifecycle')
         self.root = fx.make_root(self.base)
-        for i in range(4):
-            folder = self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / 'reports' / f'r{i}'
-            folder.mkdir()
-            (folder / 'REPORT.md').write_text('# r\n')
+        fx.add_findings(self.root, [f'L{i}' for i in range(4)])
         self.now = [0.0]
         self.free = [8 * 1024 ** 3]
         self.docker = FakeDocker()
@@ -545,7 +581,7 @@ class LifecycleTests(unittest.TestCase):
 
     def open(self, i):
         viewer = FakeViewer()
-        return self.manager.attach(fx.selector(f'r{i}/REPORT.md'), viewer), viewer
+        return self.manager.attach(fx.selector(f'L{i}/EVIDENCE.md'), viewer), viewer
 
     def test_defaults_and_restart_cleanup(self):
         manager = sb.SessionManager(self.root, FakeDocker(), reap_interval=0)
@@ -643,7 +679,7 @@ class LifecycleTests(unittest.TestCase):
         del self.docker.containers[session.id]
         self.now[0] += 301
         self.assertEqual(self.manager.reap_idle(), ([], [session]))
-        self.assertIsNone(self.manager.get(fx.selector('r0/REPORT.md')))
+        self.assertIsNone(self.manager.get(fx.selector('L0/EVIDENCE.md')))
 
     def test_capacity_prefers_paused_then_running_never_attached(self):
         s0, v0 = self.open(0)
@@ -678,7 +714,7 @@ class LifecycleTests(unittest.TestCase):
             self.open(1)
         self.assertEqual(caught.exception.code, 'low_memory')
         self.assertEqual(caught.exception.message, 'Hoster is low on memory (1.5 GB free); close a terminal or try later.')
-        self.assertIsNone(self.manager.get(fx.selector('r1/REPORT.md')))
+        self.assertIsNone(self.manager.get(fx.selector('L1/EVIDENCE.md')))
         same, viewer2 = self.open(0)
         self.assertEqual(viewer2.controls[0]['event'], 'resumed')
         self.free[0] = None  # unknown (no /proc/meminfo): allowed

@@ -87,24 +87,50 @@ def session_key(sel):
     return json.dumps([sel['family'], sel['program'], sel['lane'], sel['path']])
 
 
-def resolve_mount(root, sel, create=True):
-    """Return a Mount for the report's folder, validated for bind-mounting.
+PACKET_SLUG = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
+NOT_IN_PACKET = 'This report is not inside a finding folder (reports/<FID>-…/).'
 
-    Choice of folder:
-    1. the dedicated folder report_artifacts resolves (REPORT.md/EVIDENCE.md
-       folder convention or the owning finding's report_dir);
-    2. otherwise the report file's own directory, when that directory is
-       below reports/ and holds no other report (no other top-level ``.md``
-       and not shared with another finding);
-    3. otherwise (report directly in reports/, or in a bucket folder shared by
-       several reports) a per-report subfolder next to the report, named after
-       the report file without ``.md`` (``reports/x.md`` -> ``reports/x/``),
-       created on first use. Mounting the bucket would expose every report in
-       it to commands run in the terminal.
 
-    Every component from the lane down is opened with O_NOFOLLOW, so no part
-    of the path may be a symlink. The lane root and reports/ itself are never
-    mounted.
+def packet_fid(name, fids):
+    """The ledger FID whose packet folder ``name`` is, or None.
+
+    Exact-FID rule (BBH report packets): the folder name is the FID itself or
+    the FID, '-', and a lowercase slug ([a-z0-9]+ joined by single '-'). FIDs
+    are compared verbatim (case and punctuation). When several FIDs match (an
+    FID that itself contains '-', for example AC and AC-1), the longest wins.
+    ``D10-xss`` never belongs to D1, and ``D1-Bad`` or ``d1-x`` match nothing.
+    """
+    matches = [fid for fid in fids if name == fid or (name.startswith(fid + '-') and PACKET_SLUG.fullmatch(name[len(fid) + 1:]))]
+    return max(matches, key=len) if matches else None
+
+
+def _ledger_findings(lane_fd):
+    try:
+        ledger = json.loads(ra._read_small(lane_fd, 'ledgers/ledger.json'))
+    except (ra.ArtifactError, ValueError, UnicodeError):
+        return []
+    if not isinstance(ledger, dict) or not isinstance(ledger.get('findings'), list):
+        return []
+    return [f for f in ledger['findings'] if isinstance(f, dict) and isinstance(f.get('fid'), str)
+            and f['fid'] and '/' not in f['fid'] and f['fid'] not in ('.', '..')]
+
+
+def resolve_mount(root, sel):
+    """Return the Mount for the report's finding packet folder, or raise.
+
+    1. A report inside a packet folder ``reports/<FID>[-slug]/...`` (FID from
+       the lane ledger, exact-FID rule above) mounts that packet folder.
+    2. A report elsewhere (legacy ``reports/findings/<bucket>/<FID> - title.md``,
+       a file directly in ``reports/``) that maps to a ledger finding, by its
+       ``report_path``/``evidence_path`` or by an exact ``<FID> - `` /
+       ``<FID>.md`` file name, mounts that finding's packet: the ledger
+       ``report_dir`` when it is a packet folder for that FID directly under
+       ``reports/``, else the legacy ``reports/<FID>/``, if it exists.
+    3. Anything else (generated navigation, unmapped files) is refused with
+       ``not_in_packet``. Folders are never created; ``reports/`` and the lane
+       are never mounted.
+
+    Every component from the data root down is opened with O_NOFOLLOW.
     """
     root = str(root)
     try:
@@ -112,58 +138,64 @@ def resolve_mount(root, sel, create=True):
     except OSError:
         raise SandboxError('report_not_found', 'Report not found. It may have been moved or renamed.') from None
     try:
+        report_rel = 'reports/' + '/'.join(ra._clean_parts(sel['path']))
         try:
-            result = ra.associate(lane_fd, sel['family'], sel['program'], sel['lane'], sel['path'])
+            fd, _ = ra.open_file(lane_fd, report_rel)
+            os.close(fd)
         except ra.ArtifactError:
             raise SandboxError('report_not_found', 'Report not found. It may have been moved or renamed.') from None
-        report_rel = result['report']
-        report_dir, report_name = report_rel.rsplit('/', 1)
-        folder, reason = result['folder'], 'report folder'
+        findings = _ledger_findings(lane_fd)
+        fids = [f['fid'] for f in findings]
+        parts = report_rel.split('/')
+        folder = fid = rule = None
+        if len(parts) >= 3:
+            fid = packet_fid(parts[1], fids)
+            if fid:
+                folder, rule = f'reports/{parts[1]}', 'packet'
         if folder is None:
-            others = [n for n in ra._list_names(lane_fd, report_dir)
-                      if n.lower().endswith('.md') and n != report_name]
-            if report_dir != 'reports' and 'folder_shared' not in result['notes'] and not others:
-                folder, reason = report_dir, "report file's folder"
-            else:
-                stem = re.sub(r'\.md$', '', report_name, flags=re.I)
-                if not stem or stem.startswith(('.', '_')):
-                    raise SandboxError('unsafe_folder', 'This report has no safe folder to open.')
-                folder, reason = f'{report_dir}/{stem}', 'per-report folder next to a shared folder'
-                if create:
-                    parent = ra._open_dir(lane_fd, report_dir.split('/'))
-                    try:
-                        os.mkdir(stem, 0o755, dir_fd=parent)
-                    except FileExistsError:
-                        pass
-                    except OSError:
-                        raise SandboxError('unsafe_folder', 'The per-report folder could not be created.') from None
-                    finally:
-                        os.close(parent)
-        parts = folder.split('/')
-        if len(parts) < 2 or parts[0] != 'reports' or any(p in ('', '.', '..') or p.startswith('.') for p in parts):
-            raise SandboxError('unsafe_folder', 'The report folder is not inside the reports folder.')
+            rel = lambda value: ra.recorded_relative(value, sel['family'], sel['program'], sel['lane'])
+            owners = [f for f in findings if report_rel in (rel(f.get('report_path')), rel(f.get('evidence_path')))]
+            if not owners:
+                name = parts[-1]
+                named = [f for f in findings if name == f'{f["fid"]}.md' or name.startswith(f'{f["fid"]} - ')]
+                owners = sorted(named, key=lambda f: len(f['fid']), reverse=True)[:1]
+            for finding in owners:
+                report_dir = rel(finding.get('report_dir'))
+                if report_dir:
+                    pieces = report_dir.split('/')
+                    candidate = report_dir if (len(pieces) == 2 and pieces[0] == 'reports'
+                                               and packet_fid(pieces[1], [finding['fid']])) else None
+                else:
+                    candidate = f'reports/{finding["fid"]}'
+                if candidate and ra._kind_at(lane_fd, candidate) == 'dir':
+                    folder, fid, rule = candidate, finding['fid'], 'ledger'
+                    break
+        if folder is None:
+            raise SandboxError('not_in_packet', NOT_IN_PACKET)
+        if re.search(r'[,"\x00-\x1f]', folder) or folder.split('/')[1].startswith(('.', '_')):
+            raise SandboxError('unsafe_folder', 'The finding folder name cannot be mounted (comma, quote or control character).')
         try:
-            fd = ra._open_dir(lane_fd, parts)
+            dir_fd = ra._open_dir(lane_fd, folder.split('/'))
         except OSError:
-            raise SandboxError('unsafe_folder', 'The report folder is missing or a symlink.') from None
+            raise SandboxError('unsafe_folder', 'The finding folder is missing or a symlink.') from None
         try:
-            info = os.fstat(fd)
+            info = os.fstat(dir_fd)
         finally:
-            os.close(fd)
-        if not stat.S_ISDIR(info.st_mode):
-            raise SandboxError('unsafe_folder', 'The report folder is not a directory.')
+            os.close(dir_fd)
     finally:
         os.close(lane_fd)
-    path = os.path.join(root, sel['family'], sel['program'], sel['lane'], *parts)
+    path = os.path.join(root, sel['family'], sel['program'], sel['lane'], *folder.split('/'))
     if re.search(r'[,"\x00-\x1f]', path):
-        # Docker's --mount value is comma separated; never let a folder name add options.
-        raise SandboxError('unsafe_folder', 'The report folder path contains a comma or control character, which the sandbox cannot mount.')
-    return Mount(folder, path, (info.st_dev, info.st_ino), reason)
+        # Docker's --mount value is comma separated; never let a path add options.
+        raise SandboxError('unsafe_folder', 'The finding folder path contains a comma or control character, which the sandbox cannot mount.')
+    reason = 'finding folder' if rule == 'packet' else f'finding folder of {fid} (from the ledger)'
+    return Mount(folder, path, (info.st_dev, info.st_ino), reason, fid=fid, rule=rule)
 
 
 class Mount:
-    def __init__(self, folder, path, identity, reason):
+    def __init__(self, folder, path, identity, reason, fid=None, rule=None):
         self.folder, self.path, self.identity, self.reason = folder, path, identity, reason
+        self.fid, self.rule = fid, rule
 
     def still_valid(self):
         """The path still names the same directory, reached without symlinks."""
@@ -527,6 +559,7 @@ class Session:
                 'pause_after': self.manager.pause_after, 'remove_after': self.manager.remove_after,
                 'folder': self.folder, 'workdir': MOUNT_TARGET if isinstance(self.manager.backend, DockerBackend) else self.folder,
                 'mount_reason': self.mount.reason if self.mount else None,
+                'mount_rule': self.mount.rule if self.mount else None, 'fid': self.mount.fid if self.mount else None,
                 'viewers': len(self.viewers), 'notes': list(self.notes), 'running': self.proc is not None,
                 'paused': self.paused}
 
@@ -630,7 +663,7 @@ class Session:
         if self.mount is None:
             return None
         try:
-            current = resolve_mount(self.manager.root, self.sel, create=False)
+            current = resolve_mount(self.manager.root, self.sel)
         except SandboxError:
             return 'folder_moved'
         if current.folder != self.mount.folder or not self.mount.still_valid():
