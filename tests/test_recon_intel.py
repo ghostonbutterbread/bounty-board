@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -20,6 +21,36 @@ def service(root, artifact_root=None, **kw):
     svc = ri.ReconIntel(snap, lambda r: app.discover(r, inventory_only=True), app.read_file, app.ledger, app.coverage,
                         app.map_entries, artifact_root=artifact_root, **kw)
     return svc
+
+
+def tree_snapshot(top):
+    """Every entry under top: (type, size, mtime_ns). Directory mtimes catch files created and removed again."""
+    out = {}
+    for directory, dirs, files in os.walk(top):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            info = os.lstat(path)
+            out[os.path.relpath(path, top)] = (stat.S_IFMT(info.st_mode), info.st_size if not stat.S_ISDIR(info.st_mode) else None, info.st_mtime_ns)
+    info = os.lstat(top)
+    out['.'] = (stat.S_IFMT(info.st_mode), None, info.st_mtime_ns)
+    return out
+
+
+def to_wal(path):
+    """Switch a synthetic database to WAL and close cleanly: no -wal or -shm left."""
+    db = sqlite3.connect(path)
+    db.execute('PRAGMA journal_mode=WAL')
+    db.close()
+    assert not os.path.exists(str(path) + '-wal') and not os.path.exists(str(path) + '-shm')
+
+
+def full_read(test, svc):
+    svc.overview()
+    test.assertTrue(svc.wait_idle(60))
+    svc.overview()
+    svc.program('web_bounty', 'acme-demo', 'web')
+    test.assertTrue(svc.wait_idle(60))
+    return svc.program('web_bounty', 'acme-demo', 'web')
 
 
 class Base(unittest.TestCase):
@@ -363,6 +394,97 @@ class ServiceTests(Base):
         out = svc.program('web_bounty', 'acme-demo', 'web')
         self.assertEqual(out['sources']['url_index']['state'], 'missing')
         self.assertTrue(out['sources']['url_index']['expected'].endswith('acme-demo/web/recon/url_index/url_index.sqlite'))
+
+
+class ReadLeavesNoTraceTests(Base):
+    """Review 9 blocker 1: a read never creates, modifies or leaves files next to a database."""
+
+    def setUp(self):
+        super().setUp()
+        self.lane = make_lane(self.root)
+        self.index = self.lane / 'recon/url_index/url_index.sqlite'
+
+    def read_unchanged(self, artifact_root=None):
+        before = tree_snapshot(self.base)
+        time.sleep(0.02)
+        svc = service(self.root, artifact_root=artifact_root)
+        try:
+            out = full_read(self, svc)
+        finally:
+            svc.close()
+        self.assertEqual(tree_snapshot(self.base), before)
+        return out
+
+    def test_clean_wal_index_leaves_no_files(self):
+        to_wal(self.index)
+        out = self.read_unchanged()
+        url = out['sources']['url_index']
+        self.assertEqual(url['state'], 'ready')
+        self.assertEqual(url['result']['open_mode'], 'immutable')
+        self.assertEqual(url['result']['urls']['value'], 98)
+
+    def test_empty_wal_file_reads_immutable(self):
+        to_wal(self.index)
+        Path(str(self.index) + '-wal').write_bytes(b'')
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['result']['open_mode'], 'immutable')
+        Path(str(self.index) + '-shm').write_bytes(b'')  # empty -wal beside a -shm: still nothing to miss
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['result']['open_mode'], 'immutable')
+
+    def test_active_writer_wal_creates_nothing(self):
+        writer = sqlite3.connect(self.index)
+        self.addCleanup(writer.close)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('PRAGMA wal_autocheckpoint=0')
+        writer.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, first_seen, last_seen) "
+                       "VALUES ('https://w.example.test/', 'hw', 'r', 'p', 'w.example.test', '/', '[]', 'a', 'b')")
+        writer.commit()
+        self.assertGreater(os.path.getsize(str(self.index) + '-wal'), 0)
+        out = self.read_unchanged()
+        url = out['sources']['url_index']['result']
+        self.assertEqual(url['open_mode'], 'ro')
+        self.assertEqual(url['urls']['value'], 99)  # committed rows in the WAL are visible
+
+    def test_rollback_journal_index_unchanged(self):
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['result']['open_mode'], 'ro')
+
+    def test_read_only_directory(self):
+        to_wal(self.index)
+        folder = self.index.parent
+        os.chmod(folder, 0o555)
+        self.addCleanup(os.chmod, folder, 0o755)
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['state'], 'ready')
+        self.assertEqual(out['sources']['url_index']['result']['urls']['value'], 98)
+
+    def test_wal_without_shm_is_not_opened(self):
+        other = self.base / 'writer'
+        other.mkdir()
+        source = make_url_index(other / 'u.sqlite')
+        writer = sqlite3.connect(source)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('PRAGMA wal_autocheckpoint=0')
+        writer.execute("UPDATE urls SET source = 'changed'")
+        writer.commit()
+        import shutil
+        shutil.copyfile(source, self.index)
+        shutil.copyfile(str(source) + '-wal', str(self.index) + '-wal')
+        writer.close()
+        out = self.read_unchanged()
+        self.assertEqual(out['sources']['url_index']['error'], {'code': 'unavailable', 'detail': 'writer state unclear'})
+
+    def test_artifact_js_library_same_rule(self):
+        artifacts = self.base / 'artifacts'
+        library = make_js_library(artifacts / 'acme-demo/web/recon/js/_library/js_info.sqlite')
+        to_wal(library)
+        to_wal(self.index)
+        out = self.read_unchanged(artifact_root=artifacts)
+        js = out['sources']['js']
+        self.assertEqual(js['origin'], 'artifact')
+        self.assertEqual(js['result']['open_mode'], 'immutable')
+        self.assertEqual(js['result']['files']['value'], 15)
 
 
 class HttpTests(Base):

@@ -162,6 +162,52 @@ def checked_path(base, parts, allow_first_symlink_within=None):
     return current
 
 
+def _lstat(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise SourceError('unavailable', 'database side files unreadable')
+
+
+def open_plan(path):
+    """How to open a database without creating, modifying or leaving any file.
+
+    Returns 'immutable' or 'ro'; raises SourceError('unavailable', reason) when
+    the writer state is unclear. The journal mode comes from the header (bytes
+    18-19: 1 rollback, 2 WAL), read without following symlinks.
+      WAL, no -wal and no -shm, or an empty -wal: immutable=1 (the main file
+        holds every committed page; nothing to miss, nothing created).
+      WAL, non-empty -wal and an existing -shm (a writer is active): plain
+        mode=ro, which opens the existing files and creates nothing.
+      WAL, anything else (-wal without -shm, -shm without -wal): not opened.
+      Rollback journal: plain mode=ro (a reader never creates a journal and
+        still honours a writer's lock)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise SourceError('missing')
+    except OSError:
+        raise SourceError('unavailable', 'database unreadable')
+    try:
+        header = os.read(fd, 100)
+    finally:
+        os.close(fd)
+    if len(header) < 100 or not header.startswith(b'SQLite format 3\x00'):
+        raise SourceError('invalid', 'not a readable SQLite database')
+    wal, shm = _lstat(str(path) + '-wal'), _lstat(str(path) + '-shm')
+    if header[18] == 2 or header[19] == 2:
+        if (wal is None and shm is None) or (wal is not None and wal.st_size == 0):
+            return 'immutable'
+        if wal is not None and shm is not None:
+            if not os.access(str(path) + '-shm', os.R_OK):
+                raise SourceError('unavailable', 'the -shm file of an active writer is not readable')
+            return 'ro'
+        raise SourceError('unavailable', 'writer state unclear')
+    return 'ro'
+
+
 class ReadOnlyDB:
     """A read-only SQLite connection whose statements are bounded in time.
 
@@ -174,9 +220,10 @@ class ReadOnlyDB:
         self.deadline = None
         self.timeouts = 0
         self.closed = threading.Event()
+        self.mode = open_plan(path)
         try:
-            self.conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True,
-                                        timeout=busy_timeout, check_same_thread=False)
+            self.conn = sqlite3.connect(Path(path).resolve().as_uri() + ('?mode=ro&immutable=1' if self.mode == 'immutable' else '?mode=ro'),
+                                        uri=True, timeout=busy_timeout, check_same_thread=False)
         except sqlite3.Error as error:
             raise classify(error)
         try:
@@ -236,6 +283,8 @@ def classify(error):
         return SourceError('schema_mismatch', 'missing table or column')
     if 'not a database' in message or 'malformed' in message or 'file is encrypted' in message:
         return SourceError('invalid', 'not a readable SQLite database')
+    if 'readonly' in message or 'read-only' in message:
+        return SourceError('unavailable', 'cannot read the WAL state without writing (directory or -shm not writable)')
     if 'unable to open' in message:
         return SourceError('unavailable', 'cannot open')
     return SourceError('invalid', 'sqlite error')
@@ -400,6 +449,7 @@ def url_index_summary(path, budget=QUERY_BUDGET, detail=True, exact_limit=EXACT_
         result['errors'] = c.errors
         result['approximate'] = c.approximate
         result['timeouts'] = db.timeouts
+        result['open_mode'] = db.mode
         result['elapsed'] = round(time.monotonic() - started, 3)
         return result
     finally:
@@ -660,6 +710,7 @@ def js_library_summary(path, budget=QUERY_BUDGET, detail=True, exact_limit=EXACT
         result['errors'] = c.errors
         result['approximate'] = c.approximate
         result['timeouts'] = db.timeouts
+        result['open_mode'] = db.mode
         result['elapsed'] = round(time.monotonic() - started, 3)
         return result
     finally:
