@@ -255,6 +255,10 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
         def reply(self, status, payload, headers=()):
             data = json.dumps(payload).encode()
             self.send_response(status)
+            # One request per connection (admission is per request): say so, or a
+            # keep-alive proxy such as Tailscale Serve reuses a closed socket and
+            # non-retried POSTs fail with 502 (security review 2, N4).
+            self.send_header('Connection', 'close')
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(data)))
             self.send_header('Cache-Control', 'no-store')
@@ -266,6 +270,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
 
         def static(self, data, content_type, csp=None):
             self.send_response(200)
+            self.send_header('Connection', 'close')
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(data)))
             self.send_header('Cache-Control', 'no-store')
