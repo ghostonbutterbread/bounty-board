@@ -2273,7 +2273,8 @@ def main():
                 **({} if args.retention_min_free_bytes == DEFAULT_MIN_FREE_BYTES else {'retention_min_free_bytes': args.retention_min_free_bytes}),
                 **({'report_autosave': True} if args.report_autosave else {}),
                 **({'live_edit_dir': args.live_edit_dir} if args.live_edit else {}),
-                state_dir=args.state_dir, artifact_root=args.artifact_root,
+                state_dir=args.state_dir,
+                **({} if args.artifact_root is None else {'artifact_root': args.artifact_root}),
                 **({} if args.recon_query_budget is None else {'recon_query_budget': args.recon_query_budget}),
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
