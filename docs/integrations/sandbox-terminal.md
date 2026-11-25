@@ -74,6 +74,25 @@ Not covered:
 - Docker resolves the mount path itself; the post-start identity check narrows but does not remove a race where a local process swaps a path component for a symlink at that instant.
 - An authenticated user can open a sandbox for any report (one researcher; no per-report permissions).
 
+## Security review (9235727): findings and fixes
+
+An independent review of `9235727` returned BLOCK. Every item is fixed with a regression test. Each test was run against an export of `9235727` and failed there; on the old code, tests that pass options it lacks were run in a scratch copy with only those options removed. All pass on the fixed code.
+
+| # | Finding | Fix | Regression test (old code → new code) |
+| --- | --- | --- | --- |
+| 1 | Parallel logins exhausted memory: each scrypt verify allocates about 32 MiB and nothing bounded concurrent verifications or request threads (100 parallel logins reached 1.48 GiB). | At most 2 scrypt verifications at once behind a non-blocking semaphore (`429 {error: busy}` otherwise). A failure slot is reserved under the lock before hashing, so parallel attempts cannot overrun the 5-failure lockout. The service accepts at most 64 connections at once and answers the rest `503` at accept time instead of starting a thread. | `test_terminal_sandbox.AuthTests.test_parallel_logins_are_bounded_and_respect_lockout` (50 concurrent verifies → max 2, ≤ 5 failed guesses, then locked); `test_terminal_service.HardeningTests.test_parallel_logins_run_at_most_two_scrypt_verifications` (33 concurrent → ≤ 2); `HardeningTests.test_connection_cap_refuses_floods` (no 503, hang → 503 at the cap, slots released) |
+| 2 | The type-only play button could run hidden commands: xterm's `paste()` wraps text in `ESC[200~ … ESC[201~` without escaping, so a block containing `ESC[201~` ended bracketed paste and the following lines ran. Reproduced on the old code: clicking ▶ on such a block created a marker file. | Before any typing path (▶, Run, Shift+click) the module refuses text containing ESC, any C0 control other than tab and newline, DEL, or C1 controls (U+0080 to U+009F). The block shows "This block contains control characters and cannot be typed; copy it manually after review.", its buttons are disabled, and the guard also holds if a button is forced on. Typing strips trailing newlines. A multi-line block is typed without Run only when the shell has bracketed paste on. | `static/tests/sandbox-terminal-filter.test.cjs` (unit test of the filter; old: missing); browser `blocks with control characters cannot be typed…` (warning shown, buttons disabled, forced clicks send nothing, no marker file; the safe block types without Enter and Run runs it) |
+| 3 | A client that stops reading was never dropped: the sender blocked in `sendall` holding the WebSocket send lock, and the pinger's `close()` waited on the same lock. | The socket gets a send/receive timeout (`PEER_TIMEOUT`) after the upgrade; `WebSocket.abort()` shuts the socket down without the send lock; the pinger and viewer-overflow paths call it. | `test_terminal_ws.FrameTests.test_abort_releases_a_sender_blocked_on_a_stalled_peer`; `HardeningTests.test_stalled_viewer_is_dropped` (old: 2 viewers after 25 s → new: the stalled one is detached, the reading one stays) |
+| 4 | One sandbox could use every slot of the shared 64-connection egress proxy. | A per-session cap of 24 connections, on top of the global 64. | `test_terminal_proxy.ProxyTests.test_per_listener_cap_leaves_room_for_other_sandboxes` |
+| 5 | The proxy had no deadline for the request head or SOCKS handshake (a slow trickle reset the per-recv timeout). | A total 20 s handshake deadline, separate from the idle timeout. | `ProxyTests.test_handshake_has_a_total_deadline` |
+| 6 | Open redirect after sign-in: `next=/%09/evil.example` passed the regex (the tab is stripped by the URL parser, leaving `//evil.example`). | `next` is parsed with `new URL(value, location.origin)`; only this origin's `/` or `/terminal/…` are allowed, otherwise `/`. | browser test, second half (sign-in with that `next` stays on the Board origin at `/`) |
+| 7 | Logout or session expiry did not end an open WebSocket. | The pinger re-checks password sessions every ping and closes with 1008 ("Signed out. Sign in again to use the terminal."). | `HardeningTests.test_logout_ends_the_open_websocket` |
+| 8 | The attach-error path waited forever in `ws.recv()`. | 5 s for the client's close, then the socket is dropped. | `HardeningTests.test_attach_error_does_not_wait_forever` (old: still open after 10 s) |
+| 9 | Zero-length continuation frames grew memory without limit. | At most 1024 frames per message, then close 1009. | `test_terminal_ws.FrameTests.test_zero_length_continuations_are_capped` (+ `test_fragment_cap_allows_normal_fragmentation`) |
+| 10 | Deprecated IPv6 forms were not blocked, and the host's own addresses (its public IP) were reachable. | `::/96` (IPv4-compatible), `::ffff:0:0:0/96` (SIIT) and `fec0::/10` (site-local) are refused; the proxy also refuses every address assigned to the host, read from `/proc/net/fib_trie` (IPv4 LOCAL) and `/proc/net/if_inet6`, refreshed every minute (stdlib only). | `AddressAllowedTests.test_table` (6 new refused addresses); `ProxyTests.test_host_own_addresses_are_refused`; `ProxyTests.test_local_addresses_reads_proc` |
+| 11 | The post-start mount check (host side) could not see a symlink swap that was undone in time. | After `docker run`, `docker exec <c> stat -c %d:%i /report` must equal the device and inode recorded when the host path was opened without symlinks; otherwise the sandbox is removed. | `test_terminal_docker.test_095_mount_identity_checked_inside_container` (real container; a wrong identity is refused and the container is gone) |
+| 12 | Proxy socket mode 0666. | 0600: the container runs as the service's UID, so it can still connect. | `ProxyTests.test_listen_unix_mode`; `test_095` checks the live socket is 0600 and `test_06_network_policy` shows the container still gets out through it |
+
 ## Contract
 
 | Route (also without the `/terminal` prefix) | Auth | Purpose |
@@ -152,6 +171,10 @@ Run on Ghost, same TMPDIR. The fixture now uses the packet layout: `reports/D1-s
 - `tests.test_terminal_docker`: 11 OK in 2 of 2 runs (19 to 32 s) with the packet layout (the mount is `reports/D1-sqli-login`; a sibling packet and the navigation pages are not visible). Measured again on this run: idle sandbox 18.3 MiB (same while paused), pause median 52 ms, unpause median 82 ms.
 - `static/tests/sandbox-terminal.synthetic.test.cjs`: 7 pass. New: `active.md` shows a disabled Terminal button with the reason as its title and visible text, Ctrl+` does nothing, no `reports/active` folder appears; the legacy D10 report enables the button, opens D10's packet root (`basename $PWD` = `D10-xss`, EVIDENCE.md listed) and shows "Opened the finding folder reports/D10-xss/ (D10, from the ledger)."; switching to `index/all.md` hides the drawer and disables the button again. Screenshot: `$TMPDIR/screens/not-in-packet-light.png`.
 
+### Security fix round evidence
+
+Run on Ghost, same TMPDIR: `tests.test_terminal_ws` 38 OK, `tests.test_terminal_proxy` 34 OK, `tests.test_terminal_sandbox` 47 OK, `tests.test_terminal_service` 23 OK, `tests.test_terminal_docker` (`BBTERM_DOCKER_TESTS=1`, rebuilt test image) 12 OK, `static/tests/sandbox-terminal-filter.test.cjs` 2 pass, `static/tests/sandbox-terminal.synthetic.test.cjs` 8 pass. No `bbterm-test-*` container remained.
+
 ## Gaps
 
 - `sandbox/Dockerfile` (apt packages) was not built here: there is no network in this environment. The real-container tests use `sandbox/Dockerfile.test` (python:3.12-slim, same user, forwarder, bashrc and layout, no curl/jq/node). Build and verify the real image on Hoster (steps below).
@@ -160,6 +183,8 @@ Run on Ghost, same TMPDIR. The fixture now uses the packet layout: `reports/D1-s
 - The transcript is what the PTY printed (echoed input included); full-screen programs (vim, less) leave noise even after ANSI stripping.
 - A packet folder whose FID is not in the lane ledger is not recognised (the exact-FID rule needs the ledger); such reports get the disabled button.
 - No disk quota on the mounted folder.
+- Password sign-in is limited to 2 concurrent scrypt checks and the service to 64 concurrent connections; a flood from the tailnet can make sign-in answer "busy" or refuse new connections until it stops (allowlisted tailnet users with open terminals keep theirs).
+- Blocks containing control characters cannot be typed at all; copy them by hand after review.
 - A service restart drops paused sessions (containers are cleaned up at start); there is no state file to adopt them.
 - A paused sandbox keeps its memory; the 2 GiB floor only guards creation. Twelve idle sandboxes measured about 16 MB each here, but one with a big process paused inside keeps all of it until removal or eviction.
 - Paused time still counts toward removal (4 h from when the last viewer left).
