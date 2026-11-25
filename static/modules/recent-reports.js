@@ -123,9 +123,10 @@
     const row = entryFor(item)?.row; if (!row) return '';
     const writable = WRITABLE_FID.test(String(row.id));
     const attrs = `data-recent-pick="${kind}" data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-fid="${esc(row.id)}" aria-haspopup="menu" aria-expanded="false"${writable ? '' : ` disabled title="${esc(`${row.id} is not a standard finding ID, so it cannot be edited from the Board`)}"`}`;
-    if (kind === 'sev') return `<button type="button" class="pick-trigger" ${attrs} aria-label="Severity ${esc(row.severity || 'not recorded')}. Change severity of ${esc(row.id)}">${ui().severityBadge(row.severity)}</button>`;
+    const readOnly = writable ? '' : ' (read-only: non-standard finding ID)';
+    if (kind === 'sev') return `<button type="button" class="pick-trigger" ${attrs} aria-label="Severity ${esc(row.severity || 'not recorded')}${writable ? `. Change severity of ${esc(row.id)}` : esc(readOnly)}">${ui().severityBadge(row.severity)}</button>`;
     const label = ui().submissionLabel ? ui().submissionLabel(row) : '';
-    return `<button type="button" class="pick-trigger" ${attrs} aria-label="Submission: ${esc(label)}. Change submission of ${esc(row.id)}">${ui().submissionBadge ? ui().submissionBadge(row) : esc(label)}</button>`;
+    return `<button type="button" class="pick-trigger" ${attrs} aria-label="Submission: ${esc(label)}${writable ? `. Change submission of ${esc(row.id)}` : esc(readOnly)}">${ui().submissionBadge ? ui().submissionBadge(row) : esc(label)}</button>`;
   };
   const naHtml = item => NA() ? NA().toggleHtml({program: item.program, lane: item.lane, path: item.path, na: item.na === true, label: item.title || item.name, disabled: item.naAvailable === false ? true : null}) : '';
   const findingCell = item => item.finding

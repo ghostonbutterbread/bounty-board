@@ -119,6 +119,8 @@ test('a finding with a non-standard ID maps through its owner path but its Recen
   await until(async()=>{await page.goto(url);await row.waitFor();return await sev.getAttribute('data-fid')==='AC-3';},'re-mapped AC-3',30000);
   assert.equal(await sev.isDisabled(),true);assert.equal(await sub.isDisabled(),true);
   assert.match(await sev.getAttribute('title'),/AC-3 is not a standard finding ID/);
+  assert.match(await sev.getAttribute('aria-label'),/read-only: non-standard finding ID/);
+  assert.match(await sub.getAttribute('aria-label'),/read-only: non-standard finding ID/);
   await sev.click({force:true});
   assert.equal(await page.getByRole('menu',{name:'Change severity'}).count(),0,'no picker opens');
   const standard=panelRow(page,REPORT).locator('[data-recent-pick="sev"]');

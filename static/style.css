@@ -651,6 +651,5 @@ a.row-icon:hover{background:var(--surface-3);color:var(--accent-text)}
 .row-icon.report-missing{color:var(--text-3);border:0;opacity:.7;cursor:help}
 .row-icon.is-na-link{opacity:.45}
 @media (max-width:650px){.drill{padding-left:var(--space-3)}}
-}
 .frow-sub .possible-report{text-decoration:none}
 .frow-sub .possible-report:hover{text-decoration:underline}
