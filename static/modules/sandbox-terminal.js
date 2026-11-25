@@ -80,7 +80,11 @@
   // Text that must never be typed into a terminal: ESC (it can end bracketed
   // paste with ESC[201~ and run what follows), any other C0 control except tab
   // and newline, DEL, and C1 controls (U+0080-U+009F, e.g. the 8-bit CSI).
-  const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+  // Also bidi and invisible characters, which can make the preview show a
+  // different command from the one Run sends: soft hyphen, Arabic letter mark,
+  // zero-width and directional marks, embeddings/overrides, isolates and word
+  // joiners, BOM, and the Unicode line and paragraph separators.
+  const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\u2028\u2029]/;
   const unsafeText = text => UNSAFE.test(String(text));
   const UNSAFE_MESSAGE = 'This block contains control characters and cannot be typed; copy it manually after review.';
 

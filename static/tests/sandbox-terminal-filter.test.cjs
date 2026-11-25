@@ -25,6 +25,20 @@ test('control characters make a block untypeable',()=>{
   }
 });
 
+test('bidi and invisible characters make a block untypeable (review N3)',()=>{
+  const {unsafeText,commandText}=loadModule();
+  // Reviewer repro bidi.cjs: isolates make the preview read "echo hi#..." as a comment while Run executes touch.
+  const RLI='\u2067',LRI='\u2066',PDI='\u2069';
+  const trojan=`echo hi${RLI}${LRI}; touch BIDI-PWNED; ${PDI}${LRI}#${PDI}${PDI}`;
+  assert.equal(unsafeText(commandText(trojan,'bash')),true);
+  for(const [name,ch] of [['LS','\u2028'],['PS','\u2029'],['ZWSP','\u200b'],['ZWNJ','\u200c'],['ZWJ','\u200d'],['LRM','\u200e'],['RLM','\u200f'],
+    ['LRE','\u202a'],['RLE','\u202b'],['PDF','\u202c'],['LRO','\u202d'],['RLO','\u202e'],['WJ','\u2060'],['LRI','\u2066'],['RLI','\u2067'],
+    ['FSI','\u2068'],['PDI','\u2069'],['ALM','\u061c'],['BOM','\ufeff'],['SHY','\u00ad']]){
+    assert.equal(unsafeText('a'+ch+'b'),true,name);
+  }
+  for(const ok of ['echo "naïve café"','grep -P "\\u202e" file','echo שלום','echo مرحبا']) assert.equal(unsafeText(ok),false,ok);
+});
+
 test('typed text never ends with a newline and console prompts are stripped',()=>{
   const {commandText}=loadModule();
   assert.equal(commandText('echo a\n\n',''),'echo a');
