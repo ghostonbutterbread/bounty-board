@@ -218,9 +218,9 @@ test('Recent reports view: newest first across programs, filters, sort, links; d
   await page.locator('[data-recent-order]').click();
   await rowsSettled(['Globex old draft', 'Acme working notes', 'API token report', 'Invoice IDOR report', 'Initech APK notes', 'Stored XSS report', 'Globex SQLi report']);
   await page.locator('[data-recent-order]').click();
-  await page.getByLabel('Include generated navigation').check();
+  await page.getByLabel('Include generated and _meta files').check();
   await page.waitForFunction(() => document.querySelector('.recent-table tr[data-recent-row]')?.dataset.path === 'index/xss.md');
-  await page.getByLabel('Include generated navigation').uncheck();
+  await page.getByLabel('Include generated and _meta files').uncheck();
   await rowsSettled(['Globex SQLi report', 'Stored XSS report', 'Initech APK notes', 'Invoice IDOR report', 'API token report', 'Acme working notes', 'Globex old draft']);
   // Links: modified click opens a new tab; plain click navigates in-app and Back returns here.
   const fromView = await openedInNewTab(context, () => page.locator('.recent-table a.recent-link', {hasText: 'Initech APK notes'}).click({button: 'middle'}), 'apk-notes.md');
@@ -273,7 +273,7 @@ test('Recent view: 7-day default, every filter round-trips through the URL with 
   await page.locator('#recent-lane').selectOption('web');
   await page.getByLabel('Filter recent reports by title or path').pressSequentially('report', {delay: 30});
   await page.locator('[data-recent-order]').click();
-  await page.getByLabel('Include generated navigation').check();
+  await page.getByLabel('Include generated and _meta files').check();
   await recentSettled(page, FULL_ROWS);
   await page.waitForFunction(want => location.hash === want, FULL);
   assert.equal(await historyLength(page), before, 'filters and typing use replaceState');

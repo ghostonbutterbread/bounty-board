@@ -32,6 +32,8 @@
   const view = {window: DEFAULT_WINDOW, programs: [], lane: '', q: '', order: 'newest', nav: false, hideNa: true, offset: 0,
     data: null, at: 0, source: null, loading: false, error: '', seq: 0, controller: null, retry: 0, timer: 0, qTimer: 0};
   const panel = {data: null, at: 0, source: null, loading: false, error: '', seq: 0, waitTimer: 0, waited: 0, retry: 0, showNa: false};
+  const PANEL_NA = 'bounty-board-recent-panel-show-na'; // per browser, like the view's filters
+  try { panel.showNa = localStorage.getItem(PANEL_NA) === '1'; } catch {}
   // Rows for mapped findings that are not in the loaded workspace data yet
   // (cold start): one shared object per finding, so the view and the panel
   // show the same values after a save.
@@ -185,7 +187,7 @@
       <select id="recent-lane" class="recent-lane" aria-label="Lane"><option value="">All lanes</option>${lanes.map(l => `<option value="${esc(l)}"${l === view.lane ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
       <div class="input-icon recent-filter">${icon('search')}<input id="recent-filter" type="search" aria-label="Filter recent reports by title or path" placeholder="Filter by title or path" value="${esc(view.q)}" autocomplete="off"></div>
       <button type="button" class="button sm" data-recent-order aria-label="Sort: ${view.order === 'oldest' ? 'oldest first' : 'newest first'}">${icon(view.order === 'oldest' ? 'sort-amount-asc' : 'sort-amount-desc')}<span>${view.order === 'oldest' ? 'Oldest first' : 'Newest first'}</span></button>
-      <label class="recent-nav"><input type="checkbox" id="recent-nav"${view.nav ? ' checked' : ''}> Include generated navigation</label>
+      <label class="recent-nav"><input type="checkbox" id="recent-nav"${view.nav ? ' checked' : ''}> Include generated and _meta files</label>
       <label class="recent-nav na-hide-toggle"><input type="checkbox" id="recent-hide-na"${view.hideNa ? ' checked' : ''}> Hide N/A</label>
       <button type="button" class="button sm" data-recent-refresh>${icon('refresh')}<span>Refresh list</span></button>
     </div>${chips || filtered ? `<div class="chips">${chips}${filtered ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>` : ''}`;
@@ -352,6 +354,7 @@
     if (t.dataset.recentPick) return openPick(t);
     if (t.dataset.recentPanelNa) {
       panel.showNa = t.dataset.recentPanelNa === 'show'; panel.retry = 0;
+      try { localStorage.setItem(PANEL_NA, panel.showNa ? '1' : '0'); } catch {}
       loadPanel().then(() => ctx.app.querySelector('#dashboard-recent-host [data-recent-panel-na]')?.focus());
     }
   }
