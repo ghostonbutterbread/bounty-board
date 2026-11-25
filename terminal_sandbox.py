@@ -48,6 +48,10 @@ TRAMPOLINE = ('import fcntl, os, sys, termios\n'
               'os.execvp(sys.argv[1], sys.argv[1:])\n')
 
 
+class SandboxVanished(Exception):
+    """The container no longer exists (removed outside the service)."""
+
+
 class SandboxError(Exception):
     """Reported to the user; ``code`` is a short machine string."""
 
@@ -414,6 +418,32 @@ class DockerBackend:
                 os.close(entry[1])
         shutil.rmtree(self.sock_root / session.id, ignore_errors=True)
 
+    def _lifecycle(self, verb, session, done_marker):
+        result = self.run(verb, self.name(session), check=False, timeout=30)
+        if result.returncode == 0:
+            return
+        err = result.stderr.decode('utf-8', 'replace')
+        if done_marker in err:
+            return  # already in the wanted state: idempotent
+        if 'No such container' in err or 'is not running' in err:
+            raise SandboxVanished(err.strip()[-200:])
+        raise SandboxError(f'{verb}_failed', err.strip()[-300:])
+
+    def pause(self, session):
+        self._lifecycle('pause', session, 'is already paused')
+
+    def unpause(self, session):
+        self._lifecycle('unpause', session, 'is not paused')
+
+    def state(self, session):
+        """'running', 'paused', another Docker status, or None when the container is gone."""
+        result = self.run('inspect', '--format', '{{.State.Status}}', self.name(session), check=False, timeout=30)
+        if result.returncode != 0:
+            if b'No such' in result.stderr:
+                return None
+            raise SandboxError('inspect_failed', result.stderr.decode('utf-8', 'replace').strip()[-300:])
+        return result.stdout.decode().strip()
+
     def reap_stale(self):
         """Remove containers left by an earlier run: name prefix AND label must match."""
         result = self.run('ps', '-a', '--filter', f'label={LABEL}=1', '--filter', f'label={LABEL}.prefix={self.prefix}',
@@ -449,6 +479,18 @@ class LocalBackend:
     def destroy(self, session):
         pass
 
+    # Pause stands in for docker pause: stop/continue the shell's process group.
+    def pause(self, session):
+        if session.proc is not None:
+            os.killpg(session.proc.pid, 19)  # SIGSTOP
+
+    def unpause(self, session):
+        if session.proc is not None:
+            os.killpg(session.proc.pid, 18)  # SIGCONT
+
+    def state(self, session):
+        return 'paused' if session.paused else 'running'
+
     def reap_stale(self):
         return []
 
@@ -472,6 +514,7 @@ class Session:
         self.master = None
         self.started = False
         self.closed = False
+        self.paused = False
         self.size = (100, 30)
         self.scrollback = bytearray()
         self.transcript = collections.deque()
@@ -480,10 +523,12 @@ class Session:
         self.generation = 0
 
     def info(self):
-        return {'id': self.id, 'created': int(self.created), 'idle_timeout': self.manager.idle_timeout,
+        return {'id': self.id, 'created': int(self.created), 'idle_timeout': self.manager.remove_after,
+                'pause_after': self.manager.pause_after, 'remove_after': self.manager.remove_after,
                 'folder': self.folder, 'workdir': MOUNT_TARGET if isinstance(self.manager.backend, DockerBackend) else self.folder,
                 'mount_reason': self.mount.reason if self.mount else None,
-                'viewers': len(self.viewers), 'notes': list(self.notes), 'running': self.proc is not None}
+                'viewers': len(self.viewers), 'notes': list(self.notes), 'running': self.proc is not None,
+                'paused': self.paused}
 
     # Container lifecycle -- caller holds self.lock.
     def _start(self):
@@ -592,6 +637,12 @@ class Session:
             return 'folder_moved'
         return None
 
+    def clear_output(self):
+        self.scrollback = bytearray()
+        self.transcript.clear()
+        self.transcript_bytes = 0
+        self.transcript_dropped = False
+
     def transcript_text(self):
         with self.lock:
             chunks = list(self.transcript)
@@ -601,16 +652,37 @@ class Session:
 
 
 class SessionManager:
-    def __init__(self, root, backend, *, max_sessions=4, idle_timeout=1800, scrollback_bytes=SCROLLBACK_BYTES,
-                 transcript_bytes=TRANSCRIPT_BYTES, clock=time.monotonic, reap_interval=10):
+    """Owns every report sandbox and its lifecycle.
+
+    running  -- at least one viewer, or no viewer for less than ``pause_after``
+    paused   -- ``docker pause`` (processes frozen, memory kept) once no viewer
+                has been attached for ``pause_after`` seconds
+    removed  -- ``docker rm -f`` once no viewer has been attached for
+                ``remove_after`` seconds (measured from when the last one left)
+
+    Opening a paused report unpauses it and reattaches to the same shell and
+    scrollback. Lock order is always session.lock, then manager.lock; the
+    reaper re-checks every condition under session.lock, so a viewer that
+    attaches while a pause is in flight waits for it and then unpauses.
+    """
+
+    def __init__(self, root, backend, *, max_sessions=12, pause_after=300, remove_after=4 * 3600,
+                 min_free_memory=2 * 1024 ** 3, idle_timeout=None, scrollback_bytes=SCROLLBACK_BYTES,
+                 transcript_bytes=TRANSCRIPT_BYTES, clock=time.monotonic, reap_interval=10,
+                 mem_available=None, log=None):
         self.root = Path(root)
         self.backend = backend
         self.max_sessions = max_sessions
-        self.idle_timeout = idle_timeout
+        self.remove_after = idle_timeout if idle_timeout is not None else remove_after
+        self.pause_after = min(pause_after, self.remove_after)
+        self.min_free_memory = min_free_memory
+        self.mem_available = mem_available or read_mem_available
+        self.log = log or (lambda message: print(f'bbterm: {message}', file=sys.stderr, flush=True))
         self.scrollback_bytes = scrollback_bytes
         self.transcript_bytes = transcript_bytes
         self.clock = clock
         self.sessions = {}
+        self.removed_idle = collections.OrderedDict()  # key -> True, for the "removed after idle" notice
         self.lock = threading.Lock()
         self.closed = False
         self.stop_event = threading.Event()
@@ -618,59 +690,120 @@ class SessionManager:
         if reap_interval:
             threading.Thread(target=self._reaper, args=(reap_interval,), name='bbterm-reaper', daemon=True).start()
 
+    @property
+    def idle_timeout(self):  # backward-compatible name for remove_after
+        return self.remove_after
+
     def get(self, sel):
         with self.lock:
             return self.sessions.get(session_key(sel))
 
-    def _evict_one_locked(self):
-        idle = [s for s in self.sessions.values() if not s.viewers and s.started]
+    # -- capacity and memory -----------------------------------------------------
+    def _check_memory(self):
+        if not self.min_free_memory:
+            return
+        free = self.mem_available()
+        if free is not None and free < self.min_free_memory:
+            raise SandboxError('low_memory', f'Hoster is low on memory ({free / 1024 ** 3:.1f} GB free); '
+                               'close a terminal or try later.')
+
+    def _pick_victim_locked(self):
+        """Paused sandbox idle longest first, then a running viewerless one; never one with a viewer."""
+        idle = [s for s in self.sessions.values() if not s.viewers]
         if not idle:
             return None
-        victim = min(idle, key=lambda s: s.left_at)
-        del self.sessions[victim.key]
-        return victim
+        return min(idle, key=lambda s: (not s.paused, s.left_at))
 
+    # -- attach / detach -----------------------------------------------------------
     def attach(self, sel, viewer):
-        """Attach a viewer, creating and starting the session if needed."""
+        """Attach a viewer: unpause, reuse, or create the report's sandbox."""
         sel = clean_selector(sel)
-        victim = None
-        with self.lock:
-            if self.closed:
-                raise SandboxError('shutting_down', 'The terminal service is stopping.')
-            session = self.sessions.get(session_key(sel))
-            if session is None:
-                if len(self.sessions) >= self.max_sessions:
-                    victim = self._evict_one_locked()
-                    if victim is None:
-                        raise SandboxError('too_many_sessions', f'{self.max_sessions} sandboxes are already in use. '
-                                           'Close the terminal on another report and try again.')
-                session = Session(self, sel)
-                self.sessions[session.key] = session
-        if victim is not None:
-            self._close_session(victim, 'Closed to make room for another report.')
-        with session.lock:
-            if not session.started and not session.closed:
-                try:
-                    session._start()
-                except BaseException:
-                    session.closed = True
+        key = session_key(sel)
+        for _ in range(5):
+            victim = None
+            created = False
+            with self.lock:
+                if self.closed:
+                    raise SandboxError('shutting_down', 'The terminal service is stopping.')
+                session = self.sessions.get(key)
+                if session is None:
+                    self._check_memory()
+                    if len(self.sessions) >= self.max_sessions:
+                        victim = self._pick_victim_locked()
+                        if victim is None:
+                            raise SandboxError('too_many_sessions', f'All {self.max_sessions} sandboxes have someone '
+                                               'attached. Close the terminal on another report and try again.')
+                        del self.sessions[victim.key]
+                    session = Session(self, sel)
+                    self.sessions[key] = session
+                    created = True
+            if victim is not None:
+                self._close_session(victim, 'Closed to make room for another report.')
+            with session.lock:
+                if session.closed:
+                    continue  # removed between lookup and lock; look again
+                event = 'attached'
+                if created:
                     with self.lock:
-                        if self.sessions.get(session.key) is session:
-                            del self.sessions[session.key]
-                    session._destroy()
-                    raise
-            if session.closed:
-                raise SandboxError('sandbox_closed', 'The sandbox closed. Reconnect to start a new one.')
-            moved = session.folder_moved()
-            if moved and moved not in session.notes:
-                session.notes.append(moved)
-            session.viewers.add(viewer)
-            viewer.send_control({'type': 'hello', 'session': session.info()})
-            if session.scrollback:
-                viewer.send_output(bytes(session.scrollback))
-            if session.proc is None:
-                viewer.send_output(b'\r\n[Shell exited. Press Enter to start a new shell.]\r\n')
-            session._broadcast({'type': 'viewers', 'count': len(session.viewers)})
+                        event = 'recreated_idle' if self.removed_idle.pop(key, None) else 'started'
+                    self._start_locked(session)
+                elif session.paused:
+                    event = self._resume_locked(session)
+                elif not session.started:
+                    self._start_locked(session)
+                    event = 'started'
+                elif not self._alive_locked(session):
+                    event = self._recreate_locked(session, 'recreated_vanished')
+                return self._join_locked(session, viewer, event)
+        raise SandboxError('sandbox_busy', 'The sandbox is changing state. Try again.')
+
+    def _start_locked(self, session):
+        try:
+            session._start()
+        except BaseException:
+            session.closed = True
+            with self.lock:
+                if self.sessions.get(session.key) is session:
+                    del self.sessions[session.key]
+            session._destroy()
+            raise
+
+    def _alive_locked(self, session):
+        try:
+            return self.backend.state(session) in ('running', 'paused')
+        except Exception:
+            return True  # unknown: do not destroy a session on a failed probe
+
+    def _resume_locked(self, session):
+        try:
+            self.backend.unpause(session)
+        except SandboxVanished:
+            return self._recreate_locked(session, 'recreated_vanished')
+        session.paused = False
+        return 'resumed'
+
+    def _recreate_locked(self, session, event):
+        """The container is gone (removed outside the service): start a fresh one in place."""
+        self._check_memory()
+        session._destroy()
+        session.paused = False
+        session.clear_output()
+        session.id = secrets.token_hex(6)
+        session.created = time.time()
+        self._start_locked(session)
+        return event
+
+    def _join_locked(self, session, viewer, event):
+        moved = session.folder_moved()
+        if moved and moved not in session.notes:
+            session.notes.append(moved)
+        session.viewers.add(viewer)
+        viewer.send_control({'type': 'hello', 'event': event, 'session': session.info()})
+        if session.scrollback:
+            viewer.send_output(bytes(session.scrollback))
+        if session.proc is None:
+            viewer.send_output(b'\r\n[Shell exited. Press Enter to start a new shell.]\r\n')
+        session._broadcast({'type': 'viewers', 'count': len(session.viewers)})
         return session
 
     def detach(self, session, viewer):
@@ -682,22 +815,17 @@ class SessionManager:
                 session._broadcast({'type': 'viewers', 'count': len(session.viewers)})
 
     def reset(self, sel):
-        """Recreate the sandbox for a report (fresh container and folder copy)."""
+        """Recreate the sandbox for a report (fresh container, same mounted folder)."""
         sel = clean_selector(sel)
         session = self.get(sel)
         if session is None:
             return None
         with session.lock:
+            if session.closed:
+                return None
             session._broadcast({'type': 'reset'})
-            session._destroy()
-            session.scrollback = bytearray()
-            session.transcript.clear()
-            session.transcript_bytes = 0
-            session.transcript_dropped = False
-            session.created = time.time()
-            session.id = secrets.token_hex(6)
             try:
-                session._start()
+                self._recreate_locked(session, 'reset')
             except BaseException:
                 session.closed = True
                 with self.lock:
@@ -707,7 +835,7 @@ class SessionManager:
                     viewer.send_control({'type': 'error', 'code': 'sandbox_failed', 'message': 'The sandbox could not be recreated.'})
                     viewer.close()
                 raise
-            session._broadcast({'type': 'hello', 'session': session.info()})
+            session._broadcast({'type': 'hello', 'event': 'reset', 'session': session.info()})
         return session
 
     def _close_session(self, session, message):
@@ -719,22 +847,51 @@ class SessionManager:
             session.viewers.clear()
             session._destroy()
 
+    # -- timers ------------------------------------------------------------------------
     def reap_idle(self):
-        now = self.clock()
+        """One reaper pass: pause and remove idle sandboxes. Returns (paused, removed)."""
         with self.lock:
-            idle = [s for s in self.sessions.values() if not s.viewers and now - s.left_at >= self.idle_timeout]
-            for session in idle:
-                del self.sessions[session.key]
-        for session in idle:
-            self._close_session(session, 'Closed after being idle.')
-        return idle
+            candidates = [s for s in self.sessions.values() if not s.viewers]
+        paused, removed = [], []
+        for session in candidates:
+            with session.lock:
+                if session.closed or session.viewers:
+                    continue
+                idle = self.clock() - session.left_at
+                if idle >= self.remove_after:
+                    session.closed = True
+                    with self.lock:
+                        if self.sessions.get(session.key) is session:
+                            del self.sessions[session.key]
+                        self.removed_idle[session.key] = True
+                        while len(self.removed_idle) > 500:
+                            self.removed_idle.popitem(last=False)
+                    session._destroy()
+                    removed.append(session)
+                elif idle >= self.pause_after and not session.paused and session.started:
+                    try:
+                        self.backend.pause(session)
+                    except SandboxVanished:
+                        session.closed = True
+                        with self.lock:
+                            if self.sessions.get(session.key) is session:
+                                del self.sessions[session.key]
+                        session._destroy()
+                        removed.append(session)
+                        continue
+                    except Exception as error:
+                        self.log(f'pause failed, will retry: {error}')
+                        continue
+                    session.paused = True
+                    paused.append(session)
+        return paused, removed
 
     def _reaper(self, interval):
         while not self.stop_event.wait(interval):
             try:
                 self.reap_idle()
-            except Exception:
-                pass
+            except Exception as error:
+                self.log(f'reaper pass failed: {error}')
 
     def close(self):
         self.stop_event.set()
@@ -744,3 +901,15 @@ class SessionManager:
             self.sessions.clear()
         for session in sessions:
             self._close_session(session, 'The terminal service stopped.')
+
+
+def read_mem_available(path='/proc/meminfo'):
+    """MemAvailable in bytes, or None when unknown."""
+    try:
+        with open(path) as stream:
+            for line in stream:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None

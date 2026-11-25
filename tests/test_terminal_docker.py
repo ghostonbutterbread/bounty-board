@@ -121,7 +121,7 @@ class DockerSandboxTests(unittest.TestCase):
         cls.now = [0.0]
         cls.backend = sb.DockerBackend(image=IMAGE, state_dir=cls.base / 'state', proxy=cls.proxy, prefix=PREFIX,
                                        memory='256m', cpus='0.5', pids=128)
-        cls.manager = sb.SessionManager(cls.root, cls.backend, max_sessions=3, idle_timeout=60,
+        cls.manager = sb.SessionManager(cls.root, cls.backend, max_sessions=3, pause_after=30, remove_after=60, min_free_memory=0,
                                         clock=lambda: cls.now[0], reap_interval=0)
         cls.viewer = FakeViewer()
         cls.session = cls.manager.attach(fx.selector(), cls.viewer)
@@ -242,6 +242,44 @@ class DockerSandboxTests(unittest.TestCase):
         self.assertTrue(all('Proxy-Connection' not in hit[2] for hit in Recorder.hits))
         print('\nNETWORK EVIDENCE ' + json.dumps(got, sort_keys=True))
 
+    def test_065_pause_freezes_and_resume_keeps_shell(self):
+        session = self.session
+        self.viewer.output.clear()
+        session.write(b'mkdir -p sub; cd sub; (while true; do echo t >> /tmp/ticks; sleep 0.2; done) & echo bg-$((1+1))\n')
+        self.viewer.wait_for('bg-2')
+        time.sleep(1)
+        ticks = lambda: int(self.exec('sh', '-c', 'wc -l < /tmp/ticks').stdout.split()[0])
+        c0, t0 = ticks(), time.monotonic()
+        self.manager.detach(session, self.viewer)
+        self.now[0] += 31
+        paused, removed = self.manager.reap_idle()
+        self.assertEqual((paused, removed), ([session], []))
+        state = json.loads(docker('inspect', self.name).stdout)[0]['State']
+        self.assertTrue(state['Paused'])
+        self.assertEqual(self.backend.state(session), 'paused')
+        self.backend.pause(session)  # idempotent
+        time.sleep(2)  # frozen: no ticks while paused
+        viewer = FakeViewer()
+        same = self.manager.attach(fx.selector(), viewer)
+        self.assertIs(same, session)
+        self.assertEqual(viewer.controls[0]['event'], 'resumed')
+        self.assertIn(b'bg-2', bytes(viewer.output), 'scrollback kept')
+        type(self).viewer = viewer
+        c1, elapsed = ticks(), time.monotonic() - t0
+        # Running, the job writes 5 ticks a second; frozen for >= 2 s it must fall well short.
+        self.assertLess(c1 - c0, elapsed * 5 / 2, f'job kept running while paused: {c1 - c0} ticks in {elapsed:.1f} s')
+        counts = []
+        for _ in range(2):
+            out = self.exec('sh', '-c', 'wc -l < /tmp/ticks; cat /proc/loadavg >/dev/null').stdout.split()
+            counts.append(int(out[0]))
+            time.sleep(1.2)
+        self.assertGreater(counts[1], counts[0], 'background job runs again after unpause')
+        # While paused the job made no progress: ticks written ~= running time only.
+        session.write(b'echo "cwd=$PWD alive=$(kill -0 $! && echo yes)"\n')
+        viewer.wait_for('cwd=/report/sub alive=yes')
+        session.write(b'kill %1; cd /report\n')
+        print(f'\nPAUSE EVIDENCE {c1 - c0} ticks across {elapsed:.1f} s including a 2 s pause; after resume {counts}')
+
     def test_07_idle_reap_and_stale_reap(self):
         viewer = FakeViewer()
         other = self.manager.attach(fx.selector('solo/notes.md'), viewer)
@@ -249,8 +287,8 @@ class DockerSandboxTests(unittest.TestCase):
         self.assertIn(name, our_containers())
         self.manager.detach(other, viewer)
         self.now[0] += 61
-        reaped = self.manager.reap_idle()
-        self.assertIn(other, reaped)
+        paused, removed = self.manager.reap_idle()
+        self.assertIn(other, removed)
         self.assertNotIn(name, our_containers())
         # A container left over from an earlier run (prefix AND label) is reaped on start;
         # one with the prefix but without the label is left alone.
@@ -277,6 +315,24 @@ class DockerSandboxTests(unittest.TestCase):
         self.assertIn('evidence-line-42', (self.lane / rel).read_text())
         self.assertEqual(self.exec('ls', '/report/validation').returncode, 0)  # visible in the sandbox too
 
+    def test_09_measure_memory_and_pause_latency(self):
+        stats = docker('stats', '--no-stream', '--format', '{{.MemUsage}}', self.name).stdout.strip()
+        pauses, unpauses = [], []
+        for _ in range(10):
+            t = time.perf_counter(); self.backend.pause(self.session); pauses.append(time.perf_counter() - t)
+            t = time.perf_counter(); self.backend.unpause(self.session); unpauses.append(time.perf_counter() - t)
+        paused_stats = None
+        self.backend.pause(self.session)
+        paused_stats = docker('stats', '--no-stream', '--format', '{{.MemUsage}}', self.name).stdout.strip()
+        self.backend.unpause(self.session)
+        med = lambda xs: sorted(xs)[len(xs) // 2]
+        print(f'\nMEASURE idle sandbox memory {stats}; while paused {paused_stats}; '
+              f'docker pause median {med(pauses)*1000:.0f} ms (max {max(pauses)*1000:.0f}); '
+              f'unpause median {med(unpauses)*1000:.0f} ms (max {max(unpauses)*1000:.0f}); n=10')
+        session = self.session
+        session.write(b'echo after-measure-$((2+5))\n')
+        self.viewer.wait_for('after-measure-7')
+
     def test_99_cleanup_on_stop(self):
         manager = sb.SessionManager(self.root, sb.DockerBackend(image=IMAGE, state_dir=self.base / 'state3', proxy=self.proxy,
                                                                 prefix='bbterm-test-stop-'), reap_interval=0)
@@ -284,6 +340,8 @@ class DockerSandboxTests(unittest.TestCase):
         session = manager.attach(fx.selector('flat.md'), viewer)
         name = manager.backend.name(session)
         self.assertIn(name, our_containers())
+        manager.backend.pause(session)  # a paused sandbox is removed too
+        session.paused = True
         manager.close()
         self.assertNotIn(name, our_containers())
         self.assertEqual(list((self.base / 'state3/proxy').iterdir()), [])

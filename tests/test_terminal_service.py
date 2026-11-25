@@ -29,7 +29,8 @@ class ServiceTests(unittest.TestCase):
         record = ta.hash_password(PASSWORD, n=2 ** 14)
         cls.server = ts.make_service(cls.root, port=0, allowed_origins=[ORIGIN], allowed_users=['ryu@example.test'],
                                      hash_record=record, state_dir=cls.base / 'state',
-                                     backend=sb.LocalBackend(cls.base / 'local'), reap_interval=0)
+                                     backend=sb.LocalBackend(cls.base / 'local'), reap_interval=0,
+                                     min_free_memory=0)  # the memory guard has its own unit tests
         cls.port = cls.server.server_address[1]
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -243,6 +244,30 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.make_server(base, port=0, terminal_url='http://x/')
         shutil.rmtree(base, ignore_errors=True)
+
+    def test_lifecycle_flags_are_validated(self):
+        import contextlib
+        import io
+        base = ['--allowed-origin', 'https://node.tail1.ts.net:9001', '--root', '/nonexistent']
+        for bad in (['--max-sessions', '33'], ['--max-sessions', '0'], ['--pause-after', '600', '--remove-after', '300'],
+                    ['--pause-after', '5'], ['--remove-after', '30'], ['--idle-timeout', '100', '--remove-after', '200'],
+                    ['--min-free-memory', 'lots']):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                ts.main(base + bad)
+        self.assertEqual(ts.parse_size('2G'), 2 * 1024 ** 3)
+        self.assertEqual(ts.parse_size('512MiB'), 512 * 1024 ** 2)
+        self.assertEqual(ts.parse_size('0'), 0)
+
+    def test_status_reports_lifecycle(self):
+        base = fx.tmp_base('lifecycle-cfg')
+        server = ts.make_service(base, port=0, allowed_origins=[ORIGIN], allowed_users=['ryu@example.test'], state_dir=base / 's',
+                                 backend=sb.LocalBackend(base / 'l'), reap_interval=0, idle_timeout=900)
+        try:
+            self.assertEqual((server.manager.max_sessions, server.manager.pause_after, server.manager.remove_after,
+                              server.manager.min_free_memory), (12, 300, 900, 2 * 1024 ** 3))
+        finally:
+            server.server_close()
+            shutil.rmtree(base, ignore_errors=True)
 
     def test_hash_password_cli_reads_stdin(self):
         import io

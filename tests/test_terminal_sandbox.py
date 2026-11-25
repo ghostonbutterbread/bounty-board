@@ -331,8 +331,8 @@ class SessionTests(unittest.TestCase):
         self.base = fx.tmp_base('sessions')
         self.root = fx.make_root(self.base)
         self.now = [0.0]
-        self.manager = sb.SessionManager(self.root, sb.LocalBackend(self.base / 'local'), max_sessions=2, idle_timeout=60,
-                                         clock=lambda: self.now[0], reap_interval=0)
+        self.manager = sb.SessionManager(self.root, sb.LocalBackend(self.base / 'local'), max_sessions=2, pause_after=30,
+                                         remove_after=60, min_free_memory=0, clock=lambda: self.now[0], reap_interval=0)
 
     def tearDown(self):
         self.manager.close()
@@ -364,23 +364,34 @@ class SessionTests(unittest.TestCase):
         b.wait_for('from-b-2')
         self.assertEqual(b.controls[-1], {'type': 'viewers', 'count': 2})
 
-    def test_detach_keeps_shell_until_idle_timeout(self):
+    def test_pause_resume_keeps_shell_then_removal_starts_fresh(self):
         viewer = FakeViewer()
         session = self.manager.attach(fx.selector(), viewer)
-        session.write(b'export KEEP=still-here\n')
+        self.assertEqual(viewer.controls[0]['event'], 'started')
+        session.write(b'export KEEP=still-here; cd poc-sub 2>/dev/null || mkdir -p sub && cd sub\n')
         self.manager.detach(session, viewer)
-        self.now[0] += 30
-        self.assertEqual(self.manager.reap_idle(), [])
+        self.now[0] += 29
+        self.assertEqual(self.manager.reap_idle(), ([], []))
+        self.now[0] += 2
+        self.assertEqual(self.manager.reap_idle(), ([session], []))
+        self.assertTrue(session.paused)
+        self.assertEqual(self.manager.reap_idle(), ([], []))  # idempotent: already paused
         again = FakeViewer()
         self.assertIs(self.manager.attach(fx.selector(), again), session)
-        session.write(b'echo $KEEP\n')
-        again.wait_for('still-here')
+        self.assertEqual(again.controls[0]['event'], 'resumed')
+        self.assertFalse(session.paused)
+        session.write(b'echo "$KEEP in $(basename $PWD)"\n')
+        again.wait_for('still-here in sub')
         self.manager.detach(session, again)
         self.now[0] += 61
-        self.assertEqual(self.manager.reap_idle(), [session])
+        self.assertEqual(self.manager.reap_idle(), ([], [session]))
         self.assertTrue(session.closed)
         self.assertIsNone(session.proc)
         self.assertIsNone(self.manager.get(fx.selector()))
+        fresh_viewer = FakeViewer()
+        fresh = self.manager.attach(fx.selector(), fresh_viewer)
+        self.assertIsNot(fresh, session)
+        self.assertEqual(fresh_viewer.controls[0]['event'], 'recreated_idle')
 
     def test_max_sessions_evicts_idle_then_refuses(self):
         a, b, c = FakeViewer(), FakeViewer(), FakeViewer()
@@ -390,7 +401,7 @@ class SessionTests(unittest.TestCase):
             self.manager.attach(fx.selector('flat.md'), c)
         self.assertEqual(caught.exception.code, 'too_many_sessions')
         self.manager.detach(first, a)
-        third = self.manager.attach(fx.selector('flat.md'), c)  # evicts the viewerless one
+        third = self.manager.attach(fx.selector('flat.md'), c)  # removes the viewerless one
         self.assertTrue(first.closed)
         self.assertEqual(third.folder, 'reports/flat')
 
@@ -450,6 +461,245 @@ class SessionTests(unittest.TestCase):
         text = (self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / rel).read_text()
         self.assertIn('red-evidence', text)
         self.assertNotIn('\x1b', text)
+
+
+class FakeDocker:
+    """Backend double: real PTY running `sleep`, scripted container state."""
+
+    def __init__(self):
+        self.containers = {}  # session id -> 'running' | 'paused'
+        self.calls = []
+        self.pause_gate = None  # threading.Event: pause blocks until set
+        self.pause_started = threading.Event()
+        self.fail_pause = 0
+        self.stale = ['bbterm-old1']
+
+    def create(self, session):
+        self.calls.append(('create', session.id))
+        self.containers[session.id] = 'running'
+
+    def shell_argv(self, session):
+        return ['sleep', '600']
+
+    def shell_cwd(self, session):
+        return session.mount.path
+
+    def shell_env(self):
+        return None
+
+    def _need(self, session):
+        if session.id not in self.containers:
+            raise sb.SandboxVanished('No such container')
+
+    def pause(self, session):
+        self.calls.append(('pause', session.id))
+        self.pause_started.set()
+        if self.pause_gate is not None:
+            self.pause_gate.wait(5)
+        if self.fail_pause:
+            self.fail_pause -= 1
+            raise sb.SandboxError('pause_failed', 'daemon busy')
+        self._need(session)
+        self.containers[session.id] = 'paused'
+
+    def unpause(self, session):
+        self.calls.append(('unpause', session.id))
+        self._need(session)
+        self.containers[session.id] = 'running'
+
+    def state(self, session):
+        return self.containers.get(session.id)
+
+    def destroy(self, session):
+        self.calls.append(('destroy', session.id))
+        self.containers.pop(session.id, None)
+
+    def reap_stale(self):
+        names, self.stale = self.stale, []
+        return names
+
+
+class LifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.base = fx.tmp_base('lifecycle')
+        self.root = fx.make_root(self.base)
+        for i in range(4):
+            folder = self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / 'reports' / f'r{i}'
+            folder.mkdir()
+            (folder / 'REPORT.md').write_text('# r\n')
+        self.now = [0.0]
+        self.free = [8 * 1024 ** 3]
+        self.docker = FakeDocker()
+        self.logs = []
+        self.manager = self.make()
+
+    def make(self, **kw):
+        options = dict(max_sessions=3, pause_after=300, remove_after=4 * 3600, min_free_memory=2 * 1024 ** 3,
+                       clock=lambda: self.now[0], reap_interval=0, mem_available=lambda: self.free[0], log=self.logs.append)
+        options.update(kw)
+        return sb.SessionManager(self.root, self.docker, **options)
+
+    def tearDown(self):
+        self.manager.close()
+        shutil.rmtree(self.base, ignore_errors=True)
+
+    def open(self, i):
+        viewer = FakeViewer()
+        return self.manager.attach(fx.selector(f'r{i}/REPORT.md'), viewer), viewer
+
+    def test_defaults_and_restart_cleanup(self):
+        manager = sb.SessionManager(self.root, FakeDocker(), reap_interval=0)
+        self.assertEqual((manager.max_sessions, manager.pause_after, manager.remove_after, manager.min_free_memory),
+                         (12, 300, 14400, 2 * 1024 ** 3))
+        self.assertEqual(manager.reaped_on_start, ['bbterm-old1'])  # leftovers from the previous run
+        manager.close()
+        self.assertEqual(sb.SessionManager(self.root, FakeDocker(), idle_timeout=900, reap_interval=0).remove_after, 900)
+
+    def test_grace_pause_resume_remove(self):
+        session, viewer = self.open(0)
+        self.now[0] += 1000
+        self.assertEqual(self.manager.reap_idle(), ([], []), 'never paused while a viewer is attached')
+        self.manager.detach(session, viewer)
+        self.now[0] += 299
+        self.assertEqual(self.manager.reap_idle(), ([], []), 'grace period')
+        self.now[0] += 1
+        self.assertEqual(self.manager.reap_idle(), ([session], []))
+        self.assertEqual(self.docker.containers[session.id], 'paused')
+        proc = session.proc
+        same, viewer2 = self.open(0)
+        self.assertIs(same, session)
+        self.assertIs(session.proc, proc, 'same shell process')
+        self.assertEqual(viewer2.controls[0]['event'], 'resumed')
+        self.assertEqual(self.docker.containers[session.id], 'running')
+        self.manager.detach(session, viewer2)
+        self.now[0] += 300
+        self.manager.reap_idle()
+        self.now[0] += 4 * 3600 - 300
+        self.assertEqual(self.manager.reap_idle(), ([], [session]), 'removed 4 h after the last viewer left, even paused')
+        self.assertNotIn(session.id, self.docker.containers)
+        fresh, viewer3 = self.open(0)
+        self.assertIsNot(fresh, session)
+        self.assertEqual(viewer3.controls[0]['event'], 'recreated_idle')
+        self.assertEqual(self.manager.reap_idle(), ([], []))
+
+    def test_attach_during_pause_ends_running(self):
+        session, viewer = self.open(0)
+        self.manager.detach(session, viewer)
+        self.now[0] += 301
+        self.docker.pause_gate = threading.Event()
+        reaper = threading.Thread(target=self.manager.reap_idle)
+        reaper.start()
+        self.assertTrue(self.docker.pause_started.wait(5))
+        result = {}
+        attacher = threading.Thread(target=lambda: result.update(s=self.open(0)))
+        attacher.start()
+        time.sleep(0.2)
+        self.assertTrue(attacher.is_alive(), 'attach waits for the in-flight pause')
+        self.docker.pause_gate.set()
+        reaper.join(5)
+        attacher.join(5)
+        same, viewer2 = result['s']
+        self.assertIs(same, session)
+        self.assertFalse(session.paused)
+        self.assertEqual(self.docker.containers[session.id], 'running')
+        self.assertEqual(viewer2.controls[0]['event'], 'resumed')
+        self.assertEqual(self.manager.reap_idle(), ([], []), 'a viewer is attached now')
+
+    def test_failed_pause_is_logged_and_retried(self):
+        session, viewer = self.open(0)
+        self.manager.detach(session, viewer)
+        self.now[0] += 301
+        self.docker.fail_pause = 1
+        self.assertEqual(self.manager.reap_idle(), ([], []))
+        self.assertFalse(session.paused)
+        self.assertTrue(any('pause failed' in line for line in self.logs))
+        self.assertEqual(self.manager.reap_idle(), ([session], []))
+
+    def test_unpause_after_vanish_recreates(self):
+        session, viewer = self.open(0)
+        session._output(b'old-output')
+        self.manager.detach(session, viewer)
+        self.now[0] += 301
+        self.manager.reap_idle()
+        old_id = session.id
+        del self.docker.containers[old_id]  # removed outside the service
+        same, viewer2 = self.open(0)
+        self.assertEqual(viewer2.controls[0]['event'], 'recreated_vanished')
+        self.assertNotEqual(same.id, old_id)
+        self.assertEqual(self.docker.containers[same.id], 'running')
+        self.assertNotIn(b'old-output', bytes(same.scrollback))
+
+    def test_running_container_vanished_is_recreated_on_attach(self):
+        session, viewer = self.open(0)
+        self.manager.detach(session, viewer)
+        del self.docker.containers[session.id]
+        same, viewer2 = self.open(0)
+        self.assertEqual(viewer2.controls[0]['event'], 'recreated_vanished')
+        self.assertIn(same.id, self.docker.containers)
+
+    def test_pause_of_vanished_container_counts_as_removed(self):
+        session, viewer = self.open(0)
+        self.manager.detach(session, viewer)
+        del self.docker.containers[session.id]
+        self.now[0] += 301
+        self.assertEqual(self.manager.reap_idle(), ([], [session]))
+        self.assertIsNone(self.manager.get(fx.selector('r0/REPORT.md')))
+
+    def test_capacity_prefers_paused_then_running_never_attached(self):
+        s0, v0 = self.open(0)
+        s1, v1 = self.open(1)
+        s2, v2 = self.open(2)
+        self.manager.detach(s0, v0)       # left first, running
+        self.now[0] += 10
+        self.manager.detach(s1, v1)       # left later, will be paused
+        self.now[0] += 400
+        self.manager.reap_idle()
+        self.assertTrue(s0.paused and s1.paused)
+        self.docker.containers[s0.id] = 'running'; s0.paused = False  # make s0 a running viewerless one
+        s3, _ = self.open(3)
+        self.assertTrue(s1.closed, 'the paused one goes first even though s0 left earlier')
+        self.assertFalse(s0.closed)
+        self.assertFalse(s2.closed)
+        s4, _ = self.open(1)
+        self.assertTrue(s0.closed, 'then the running viewerless one')
+        with self.assertRaises(sb.SandboxError) as caught:
+            self.open(0)
+        self.assertEqual(caught.exception.code, 'too_many_sessions')
+        self.assertIn('All 3 sandboxes', caught.exception.message)
+        self.assertFalse(s2.closed or s3.closed or s4.closed)
+
+    def test_memory_guard_refuses_new_but_allows_resume(self):
+        session, viewer = self.open(0)
+        self.manager.detach(session, viewer)
+        self.now[0] += 301
+        self.manager.reap_idle()
+        self.free[0] = int(1.5 * 1024 ** 3)
+        with self.assertRaises(sb.SandboxError) as caught:
+            self.open(1)
+        self.assertEqual(caught.exception.code, 'low_memory')
+        self.assertEqual(caught.exception.message, 'Hoster is low on memory (1.5 GB free); close a terminal or try later.')
+        self.assertIsNone(self.manager.get(fx.selector('r1/REPORT.md')))
+        same, viewer2 = self.open(0)
+        self.assertEqual(viewer2.controls[0]['event'], 'resumed')
+        self.free[0] = None  # unknown (no /proc/meminfo): allowed
+        self.open(1)
+
+    def test_mem_available_parser(self):
+        meminfo = self.base / 'meminfo'
+        meminfo.write_text('MemTotal:       16000000 kB\nMemAvailable:    2048000 kB\n')
+        self.assertEqual(sb.read_mem_available(str(meminfo)), 2048000 * 1024)
+        self.assertIsNone(sb.read_mem_available(str(self.base / 'missing')))
+
+    def test_detached_viewer_and_removal_race_reopens_cleanly(self):
+        session, viewer = self.open(0)
+        self.manager.detach(session, viewer)
+        self.now[0] += 4 * 3600
+        self.manager.reap_idle()
+        again, viewer2 = self.open(0)
+        self.assertFalse(again.closed)
+        self.assertEqual(viewer2.controls[0]['event'], 'recreated_idle')
+        self.manager.detach(again, viewer2)
+        self.manager.detach(again, viewer2)  # double detach is harmless
 
 
 if __name__ == '__main__':

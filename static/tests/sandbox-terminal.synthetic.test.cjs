@@ -68,7 +68,9 @@ test('drawer connects; play, Run and checks work; nothing reaches the Markdown o
     assert.equal(await toggle.count(),1);
     await toggle.click();
     await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
-    assert.match(await page.locator('[data-term-meta]').textContent(),/Closes 30 min after the last viewer leaves.*Folder reports\/finding-a/);
+    assert.match(await page.locator('[data-term-meta]').textContent(),/Folder reports\/finding-a/);
+    assert.doesNotMatch(await page.locator('[data-term-meta]').textContent(),/Pauses|removed/,'lifecycle timing stays out of the header');
+    assert.equal(await page.locator('[data-term-status]').getAttribute('title'),'Pauses 5 min after the last viewer leaves and is removed after 4 hours. Files in the report folder are kept.');
     await waitScreen(page,l=>l.some(x=>x.includes('sandbox$')),'a prompt');
     await sideBySide(page);
     const bars=page.locator('#live-report-host .editor-preview-side [data-term-controls]');
@@ -265,6 +267,33 @@ test('no terminal UI when the service is not configured; graceful when it is dow
     await sideBySide(page);
     assert.equal(await page.locator('#live-report-host .editor-preview-side [data-term-check]:disabled').count(),6);
     assert.equal(await page.locator('[data-live-status]').filter({hasText:/^Saved$/}).count(),1,'the editor keeps working');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+test('a paused sandbox resumes with the same shell and a Resumed toast',{timeout:120000},async()=>{
+  await withFixture('tailnet,fastpause',async({base,newPage})=>{
+    const page=await newPage();
+    await openReport(page,base);
+    await page.locator('[data-term-toggle]').click();
+    await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
+    await page.locator('[data-term-screen] textarea').focus();
+    await page.keyboard.type('export KEPT=still-here; mkdir -p sub; cd sub; sleep 600 & echo bg-started\n');
+    await waitScreen(page,l=>l.some(x=>x.trim()==='bg-started'),'background job started');
+    await page.locator('[data-term-close]').click();
+    const query=new URLSearchParams({family:'web_bounty',program:'synthetic-term',lane:'web',path:REPORT}).toString();
+    let paused=false;
+    for(let i=0;i<80&&!paused;i++){paused=await page.evaluate(async q=>{const r=await fetch(`/terminal/api/session?${q}`);const d=await r.json();return !!(d.session&&d.session.paused);},query);if(!paused)await page.waitForTimeout(500);}
+    assert.ok(paused,'sandbox paused after the last viewer left');
+    await page.evaluate(()=>{window.__toasts=[];new MutationObserver(ms=>ms.forEach(m=>m.addedNodes.forEach(n=>n.classList?.contains('toast')&&window.__toasts.push(n.textContent.trim())))).observe(document.querySelector('#toasts'),{childList:true});});
+    await page.locator('[data-term-toggle]').click();
+    await page.waitForFunction(()=>window.__toasts.includes('Resumed'),null,{timeout:20000});
+    await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
+    await waitScreen(page,l=>l.some(x=>x.trim()==='bg-started'),'scrollback after resume');
+    await page.locator('[data-term-screen] textarea').focus();
+    await page.keyboard.type('echo "$KEPT in $(basename $PWD), jobs=$(jobs -r | wc -l)"\n');
+    await waitScreen(page,l=>l.some(x=>x.trim()==='still-here in sub, jobs=1'),'same shell, cwd and background job');
+    assert.equal(await page.locator('[data-term-note]').isHidden(),true,'no restart notice');
     assert.deepEqual(page.errors,[]);
   });
 });

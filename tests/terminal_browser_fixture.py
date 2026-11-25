@@ -10,6 +10,7 @@ MODE is a comma list:
   noterm     the Board runs without --terminal-url
   nolive     the Board runs without live editing
   down       --terminal-url is set but no terminal service runs
+  fastpause  sandboxes pause after 10 s without a viewer (reaper every second)
 
 Prints one JSON line {port, password, keys, lane}. Uses the TEST-ONLY local
 backend (plain bash in the report folder); the Docker sandbox is covered by
@@ -138,7 +139,9 @@ def main():
         proc = subprocess.Popen([sys.executable, str(ROOT / 'terminal_service.py'), '--root', str(root), '--port', str(term_port),
                                  '--allowed-origin', f'http://127.0.0.1:{front}', '--allow-tailnet-user', 'ryu@example.test',
                                  '--password-hash-file', str(hash_file), '--state-dir', str(target / 'term-state'),
-                                 '--backend', 'local-test-only'], env=env, stdout=subprocess.DEVNULL)
+                                 '--backend', 'local-test-only', '--min-free-memory', '0',
+                                 *(['--pause-after', '10', '--reap-interval', '1'] if 'fastpause' in modes else [])],
+                                env=env, stdout=subprocess.DEVNULL)
         for _ in range(200):
             try:
                 socket.create_connection(('127.0.0.1', term_port), timeout=0.2).close()

@@ -149,7 +149,12 @@
       let message; try { message = JSON.parse(event.data); } catch { return; }
       if (message.type === 'hello') {
         term.reset(); info = message.session; retry = 0; setStatus('connected');
-        note(info?.notes?.includes('folder_moved') ? 'The report folder moved or was renamed. Reset sandbox to open the new location.' : '');
+        const notes = [];
+        if (message.event === 'recreated_idle') notes.push(`This sandbox was removed after ${span(info.remove_after)} idle; started a fresh one.`);
+        if (message.event === 'recreated_vanished') notes.push('The previous sandbox was gone; started a fresh one.');
+        if (info?.notes?.includes('folder_moved')) notes.push('The report folder moved or was renamed. Reset sandbox to open the new location.');
+        if (message.event !== 'reset') note(notes.join(' '));
+        if (message.event === 'resumed') window.BoardUI?.toast?.('Resumed', 'success', {timeout: 4000});
         send({t: 'resize', cols: term.cols, rows: term.rows});
         const queued = pending; pending = [];
         queued.forEach(fn => fn());
@@ -176,6 +181,7 @@
     signin: 'Sign-in needed', unavailable: 'Service unavailable', error: 'Error'};
   function setStatus(next) { status = next; paint(); }
   function note(text) { const el = drawer?.querySelector('[data-term-note]'); if (el) { el.textContent = text || ''; el.hidden = !text; } }
+  const span = s => (s % 3600 === 0 ? `${s / 3600} ${s === 3600 ? 'hour' : 'hours'}` : s % 60 === 0 ? `${s / 60} min` : `${s} s`);
   const minutes = s => (s < 60 ? 'under a minute' : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`);
 
   function buildDrawer() {
@@ -255,10 +261,11 @@
     if (!drawer) return;
     const pill = drawer.querySelector('[data-term-status]');
     pill.textContent = LABELS[status] || status; pill.dataset.state = status;
+    // Lifecycle timing only matters once nobody is watching, so it stays in a tooltip.
+    pill.title = info?.pause_after ? `Pauses ${span(info.pause_after)} after the last viewer leaves and is removed after ${span(info.remove_after)}. Files in the report folder are kept.` : '';
     const meta = [];
     if (info && status === 'connected') {
       meta.push(`Session ${minutes(Math.max(0, Date.now() / 1000 - info.created))}`);
-      meta.push(`Closes ${minutes(info.idle_timeout)} after the last viewer leaves`);
       if (info.viewers > 1) meta.push(`${info.viewers} viewers`);
       if (info.folder) meta.push(`Folder ${info.folder}`);
     }

@@ -123,7 +123,8 @@ class Viewer:
 
 
 def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_record=None, state_dir,
-                 backend=None, max_sessions=4, idle_timeout=1800, reap_interval=10, clock=time.time):
+                 backend=None, max_sessions=12, pause_after=300, remove_after=4 * 3600, min_free_memory=2 * 1024 ** 3,
+                 idle_timeout=None, reap_interval=10, clock=time.time, mem_available=None):
     root = Path(root).absolute()
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -139,8 +140,9 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
         raise ValueError('at least one --allowed-origin is required')
     auth = terminal_auth.Auth(allowed_users=allowed_users, trusted_hosts=hosts, hash_record=hash_record, clock=clock)
     checks = terminal_checks.CheckStore(state_dir / 'checks.sqlite3')
-    manager = sb.SessionManager(root, backend, max_sessions=max_sessions, idle_timeout=idle_timeout,
-                                reap_interval=reap_interval)
+    manager = sb.SessionManager(root, backend, max_sessions=max_sessions, pause_after=pause_after,
+                                remove_after=idle_timeout if idle_timeout is not None else remove_after,
+                                min_free_memory=min_free_memory, reap_interval=reap_interval, mem_available=mem_available)
     login_html = (STATIC / 'login.html').read_bytes()
     login_js = (STATIC / 'login.js').read_bytes()
     login_css = (STATIC / 'login.css').read_bytes()
@@ -248,7 +250,8 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 if not user:
                     return self.reply(401, {'error': 'login_required', 'login_url': f'{PREFIX}/login',
                                             'password_login': auth.password_enabled})
-                return self.reply(200, {'user': user, 'method': method, 'idle_timeout': manager.idle_timeout,
+                return self.reply(200, {'user': user, 'method': method, 'idle_timeout': manager.remove_after,
+                                        'pause_after': manager.pause_after, 'remove_after': manager.remove_after,
                                         'max_sessions': manager.max_sessions})
             if not user:
                 return self.reply(401, {'error': 'login_required', 'login_url': f'{PREFIX}/login'})
@@ -408,6 +411,16 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
     return server
 
 
+def parse_size(value):
+    """Bytes from '2147483648', '2G', '512M' or '0'."""
+    import re
+    match = re.fullmatch(r'(\d+)\s*([KMG]i?B?)?', value.strip(), re.I)
+    if not match:
+        raise argparse.ArgumentTypeError('expected a size such as 2G or 512M')
+    unit = (match.group(2) or '').upper()[:1]
+    return int(match.group(1)) * {'': 1, 'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}[unit]
+
+
 def hash_password_cli(argv):
     parser = argparse.ArgumentParser(prog='terminal_service.py hash-password',
                                      description='Create the password hash file from stdin (no echo).')
@@ -448,15 +461,27 @@ def main(argv=None):
     parser.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/bounty-board/terminal')
     parser.add_argument('--image', default='bbterm-sandbox:latest')
     parser.add_argument('--container-prefix', default='bbterm-')
-    parser.add_argument('--max-sessions', type=int, default=4)
-    parser.add_argument('--idle-timeout', type=int, default=1800, help='seconds after the last viewer leaves')
+    parser.add_argument('--max-sessions', type=int, default=12, help='sandboxes kept at once, 1-32 (default 12)')
+    parser.add_argument('--pause-after', type=int, default=300,
+                        help='seconds without a viewer before a sandbox is paused (default 300)')
+    parser.add_argument('--remove-after', type=int, default=None,
+                        help='seconds without a viewer before a sandbox is removed (default 14400)')
+    parser.add_argument('--idle-timeout', type=int, default=None, help='old name for --remove-after')
+    parser.add_argument('--reap-interval', type=int, default=10, help=argparse.SUPPRESS)  # tests only
+    parser.add_argument('--min-free-memory', type=parse_size, default=2 * 1024 ** 3,
+                        help='refuse new sandboxes below this MemAvailable, e.g. 2G (default 2G; 0 disables)')
     parser.add_argument('--memory', default='1g')
     parser.add_argument('--cpus', default='1.0')
     parser.add_argument('--pids', type=int, default=256)
     parser.add_argument('--backend', choices=('docker', 'local-test-only'), default='docker')
     args = parser.parse_args(argv)
-    if not 1 <= args.port <= 65535 or not 1 <= args.max_sessions <= 32 or args.idle_timeout < 60:
-        parser.error('invalid port, max sessions or idle timeout')
+    if args.remove_after is not None and args.idle_timeout is not None and args.remove_after != args.idle_timeout:
+        parser.error('--idle-timeout is the old name of --remove-after; give only one')
+    args.remove_after = args.remove_after if args.remove_after is not None else (args.idle_timeout or 4 * 3600)
+    if not 1 <= args.port <= 65535 or not 1 <= args.max_sessions <= 32:
+        parser.error('port must be 1-65535 and --max-sessions 1-32')
+    if args.pause_after < 10 or args.remove_after < 60 or args.pause_after > args.remove_after:
+        parser.error('need --pause-after >= 10 s, --remove-after >= 60 s and pause before removal')
     hash_record = None
     if args.password_hash_file:
         try:
@@ -475,7 +500,9 @@ def main(argv=None):
     try:
         server = make_service(args.root, port=args.port, allowed_origins=args.allowed_origin,
                               allowed_users=args.allow_tailnet_user, hash_record=hash_record, state_dir=args.state_dir,
-                              backend=backend, max_sessions=args.max_sessions, idle_timeout=args.idle_timeout)
+                              backend=backend, max_sessions=args.max_sessions, pause_after=args.pause_after,
+                              remove_after=args.remove_after, min_free_memory=args.min_free_memory,
+                              reap_interval=max(1, args.reap_interval))
     except ValueError as error:
         parser.error(str(error))
     import signal
