@@ -100,6 +100,64 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(self.store.path.is_dir())
 
 
+class PruneTests(unittest.TestCase):
+    """Marks for reports that no longer exist are dropped when a lane is listed."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='report-na-prune-')
+        self.addCleanup(self.tmp.cleanup)
+        self.store = app.ReportNaState(Path(self.tmp.name) / 'state')
+        for path in ('a.md', 'b.md', 'c.md'):
+            self.store.set('web_bounty', 'p', 'web', path, True)
+        self.store.set('web_bounty', 'other', 'web', 'a.md', True)
+
+    def test_drops_only_confirmed_missing_in_listed_lanes(self):
+        asked = []
+        def missing(family, program, lane, path):
+            asked.append(path)
+            return path == 'b.md'
+        self.assertEqual(self.store.prune([('web_bounty', 'p', 'web', {'a.md'})], missing), 1)
+        self.assertEqual(sorted(asked), ['b.md', 'c.md'], 'only unlisted marks of the listed lane are checked')
+        self.assertEqual(self.store.keys(), {'web_bounty/p/web/a.md', 'web_bounty/p/web/c.md', 'web_bounty/other/web/a.md'})
+
+    def test_nothing_to_do_writes_nothing(self):
+        before = self.store.path.stat().st_mtime_ns
+        with mock.patch.object(self.store, 'write') as write:
+            self.assertEqual(self.store.prune([('web_bounty', 'p', 'web', {'a.md', 'b.md', 'c.md'})], lambda *a: True), 0)
+            self.assertEqual(self.store.prune([('web_bounty', 'p', 'web', {'a.md'})], lambda *a: False), 0)
+            write.assert_not_called()
+        self.assertEqual(self.store.path.stat().st_mtime_ns, before)
+
+    def test_bounded_per_call(self):
+        with mock.patch.object(app.ReportNaState, 'MAX_PRUNE', 1):
+            self.assertEqual(self.store.prune([('web_bounty', 'p', 'web', set())], lambda *a: True), 1)
+        self.assertEqual(len(self.store.keys()), 3)
+
+    def test_never_on_a_read_error(self):
+        self.store.path.write_text('{not json')
+        self.assertEqual(self.store.prune([('web_bounty', 'p', 'web', set())], lambda *a: True), 0)
+        self.assertEqual(self.store.path.read_text(), '{not json', 'a corrupt store is not set aside or replaced by pruning')
+        with mock.patch.object(Path, 'read_text', side_effect=PermissionError('denied')):
+            self.assertEqual(self.store.prune([('web_bounty', 'p', 'web', set())], lambda *a: True), 0)
+
+    def test_update_read_error_keeps_the_file(self):
+        real = app.ReportNaState.read
+        def flaky(store, for_update=False):
+            if for_update:
+                raise OSError('transient')
+            return real(store, for_update)
+        before = self.store.path.read_text()
+        with mock.patch.object(app.ReportNaState, 'read', flaky):
+            self.assertEqual(self.store.prune([('web_bounty', 'p', 'web', set())], lambda *a: True), 0)
+        self.assertEqual(self.store.path.read_text(), before)
+
+    def test_incomplete_listings_are_skipped(self):
+        listings = app.report_na_listings([
+            ('web_bounty', 'p', 'web', [{'path': 'a.md'}], []),
+            ('web_bounty', 'q', 'web', [{'path': 'a.md'}], ['reports_unavailable_or_invalid']),
+            ('web_bounty', 'r', 'web', None, ['reports_missing'])])
+        self.assertEqual(listings, [('web_bounty', 'p', 'web', {'a.md'})])
+
+
 class EndpointTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='report-na-api-')
@@ -180,6 +238,37 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(self.mark(na=False)[0], 200)
         self.assertEqual(self.server.report_na.keys(), set())
         self.assertEqual(self.mark('../x.md', na=False)[0], 400, 'syntax is still validated')
+
+    def test_listing_drops_marks_of_moved_or_deleted_reports(self):
+        self.start()
+        for path in ('notes.md', 'F012-xss/EVIDENCE.md', 'plain.txt.md'):
+            self.assertEqual(self.mark(path)[0], 200)
+        (self.lane / 'reports/notes.md').unlink()
+        (self.lane / 'reports/plain.txt.md').rename(self.lane / 'reports/renamed.md')
+        _, summary = self.request('GET', '/api/data')
+        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/EVIDENCE.md'}, '/api/data listing pruned')
+        self.assertEqual(self.mark('plain.txt.md', False)[0], 200)
+        (self.lane / 'reports/renamed.md').rename(self.lane / 'reports/plain.txt.md')
+        self.assertEqual(self.mark('plain.txt.md')[0], 200)
+        (self.lane / 'reports/plain.txt.md').rename(self.lane / 'reports/renamed.md')
+        status, body = self.request('GET', f"/api/lane-reports?root_instance={self.request('GET', '/api/data?phase=identity')[1]['root_instance']}&family=web_bounty&program=acme&lane=web")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/EVIDENCE.md'}, 'lane listing pruned')
+        self.assertEqual([r['path'] for r in body['reports'] if r['na']], ['F012-xss/EVIDENCE.md'])
+        self.assertFalse(next(r for r in body['reports'] if r['path'] == 'renamed.md')['na'], 'a renamed report loses its mark')
+        (self.lane / 'reports/F012-xss/EVIDENCE.md').unlink()
+        self.request('GET', '/api/data')
+        self.assertEqual(self.server.report_na.keys(), set())
+
+    def test_missing_check_keeps_marks_on_doubt(self):
+        self.start()
+        handler = self.server.RequestHandlerClass.__new__(self.server.RequestHandlerClass)
+        self.assertFalse(handler.report_missing('web_bounty', 'acme', 'web', 'notes.md'))
+        self.assertTrue(handler.report_missing('web_bounty', 'acme', 'web', 'gone.md'))
+        self.assertTrue(handler.report_missing('web_bounty', 'acme', 'web', 'link.md'), 'a symlink is not a report')
+        self.assertTrue(handler.report_missing('web_bounty', 'acme', 'web', 'dir.md'), 'a directory is not a report')
+        with mock.patch('os.open', side_effect=PermissionError(13, 'denied')):
+            self.assertFalse(handler.report_missing('web_bounty', 'acme', 'web', 'gone.md'), 'permission errors keep the mark')
 
     def test_store_unavailable(self):
         self.start(state=False)

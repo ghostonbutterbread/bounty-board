@@ -585,6 +585,52 @@ class ReportNaState:
             return marked_at
 
 
+    MAX_PRUNE = 200
+
+    def prune(self, listings, missing):
+        """Drop marks for reports that no longer exist; returns how many were dropped.
+
+        `listings` is [(family, program, lane, paths)] from complete lane report
+        walks; a mark in one of those lanes whose path is not listed is a
+        candidate, and `missing(family, program, lane, path)` must confirm the
+        file is gone (it returns False on any doubt, e.g. a permission error).
+        Bounded to MAX_PRUNE candidates per call. Never runs on a read error: a
+        store that cannot be read for display is left alone, and the update
+        follows the normal write rules (atomic replace under the lock)."""
+        current = self.read()
+        if not current or not listings:
+            return 0
+        by_lane = {}
+        for key, value in current.items():
+            by_lane.setdefault((value['family'], value['program'], value['lane']), []).append((key, value['path']))
+        stale = []
+        for family, program, lane, paths in listings:
+            for key, path in by_lane.get((family, program, lane), ()):
+                if path not in paths:
+                    stale.append((key, family, program, lane, path))
+            if len(stale) >= self.MAX_PRUNE:
+                break
+        stale = stale[:self.MAX_PRUNE]
+        gone = {key for key, family, program, lane, path in stale if missing(family, program, lane, path)}
+        if not gone:
+            return 0
+        with self.lock:
+            try:
+                data = self.read(for_update=True)
+                dropped = [key for key in gone if data.pop(key, None) is not None]
+                if dropped:
+                    self.write(data)
+                return len(dropped)
+            except OSError:
+                return 0
+
+
+def report_na_listings(entries):
+    """(family, program, lane, paths) for lanes whose report walk completed."""
+    return [(family, program, lane, {r['path'] for r in items}) for family, program, lane, items, warnings in entries
+            if isinstance(items, list) and 'reports_unavailable_or_invalid' not in (warnings or [])]
+
+
 def report_na_flags(store):
     """One read of the N/A marks for a response: (keys or None, available)."""
     keys = store.keys() if store is not None else None
@@ -1533,6 +1579,11 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'report_autosave': report_autosave,
                                           'live_edit': live is not None,
                                           'fixture_publish': experimental_fixture_publish}
+                if self.server.report_na is not None:
+                    # Forget marks of reports that were moved or deleted (confirmed per file, bounded).
+                    self.server.report_na.prune(report_na_listings(
+                        [(p['family'], p['name'], l['name'], l.get('reports'), l.get('warnings')) for p in result.get('programs', [])
+                         for l in p['lanes']]), self.report_missing)
                 na_keys, na_available = report_na_flags(self.server.report_na)
                 result['capabilities']['report_na'] = {'enabled': na_available}
                 for program_entry in result.get('programs', []):
@@ -1571,6 +1622,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                         items = reports(lane_dir, warnings, findings, report_autosave)
                         if root_snapshot() != before:
                             self.reply(409, {'error': 'root_changed'}); return
+                        if self.server.report_na is not None:
+                            self.server.report_na.prune(report_na_listings([(family, program, name, items, warnings)]), self.report_missing)
                         na_keys, na_available = report_na_flags(self.server.report_na)
                         prefix = f'{family}/{program}/{name}/'
                         for report in items or []:
@@ -2264,6 +2317,34 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             except OSError:
                 return self.reply(503, {'error': 'report_na_unavailable'})
             return self.reply(200, {'path': path, 'na': na, 'marked_at': marked_at})
+
+        def report_missing(self, family, program, lane, path):
+            """True only when the report is certainly gone: a path component or
+            the file does not exist, a component is not a directory or is a
+            symlink, or the file is not a regular file. Any other error keeps
+            the mark."""
+            import errno
+            import os
+            import stat
+            parts = [family, program, lane, 'reports', *path.split('/')]
+            try:
+                fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            except OSError:
+                return False
+            try:
+                for part in parts[:-1]:
+                    next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    os.close(fd)
+                    fd = next_fd
+                file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    return not stat.S_ISREG(os.fstat(file_fd).st_mode)
+                finally:
+                    os.close(file_fd)
+            except OSError as error:
+                return error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+            finally:
+                os.close(fd)
 
         def regular_report(self, family, program, lane, path):
             """True when root/family/program/lane/reports/<path> is a regular file, never following a symlink."""
