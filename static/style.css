@@ -594,44 +594,63 @@ a.link-button:hover{text-decoration:underline}
    aligned cluster on the right in fixed columns so rows line up and nothing
    wraps: severity pill, submission pill, then icon links (finding rows) or
    time and the N/A toggle (report rows). */
-:root{--col-sev:96px;--col-subm:156px;--col-links:54px;--col-when:76px;--col-na:52px}
+:root{--col-sev:96px;--col-subm:156px;--col-links:58px;--col-when:76px;--col-na:52px}
 .page:has(.dashboard-grid){max-width:1960px}
 /* Drill-downs sit in half-width panels. Each row sizes its own pill cluster,
    so a title only gives up the room its own pills need; the cluster is
    right-aligned against a fixed icon column, so right edges line up. */
-.drill li.frow{display:grid;grid-template-columns:auto minmax(0,1fr) auto var(--col-links);column-gap:var(--space-3);align-items:center;padding:7px 6px;border-bottom:1px solid var(--border);border-radius:0}
+.drill-group>ul{container:frows / inline-size}
+/* One grid per row; .frow-main and .frow-pills are display:contents so the
+   title, subline and pills are placed directly. The title column is the only
+   flexible one, so the pills are pinned to the right edge, and the icon
+   column has room for both icons, so every row's pills end at the same x. */
+.drill li.frow{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto var(--col-links);grid-template-rows:auto auto;column-gap:6px;row-gap:1px;align-items:center;padding:7px 6px;border-bottom:1px solid var(--border);border-radius:0}
 .drill li.frow:last-child{border-bottom:0}
 .drill li.frow:hover{background:color-mix(in srgb,var(--surface) 55%,transparent)}
-.frow>.row-select{grid-column:1;grid-row:1;margin:0}
-.frow-main{grid-column:2;grid-row:1;min-width:0;display:flex;flex-direction:column;gap:1px}
-.drill li .frow-title,.frow-title{display:block;font-weight:600;color:var(--text);text-decoration:none}
+.frow-main,.frow-pills{display:contents}
+.frow>.row-select{grid-column:1;grid-row:1/span 2;margin:0 6px 0 0}
+.drill li .frow-title,.frow-title{grid-column:2;grid-row:1;display:block;min-width:0;padding-right:6px;font-weight:600;color:var(--text);text-decoration:none}
 .frow-title:hover{color:var(--accent-text);text-decoration:underline;text-underline-offset:2px}
-.drill li .meta.frow-sub,.frow-sub{margin:0;display:flex;align-items:center;gap:0;min-width:0;overflow:hidden;white-space:nowrap;color:var(--text-3);font-size:var(--text-xs)}
+.drill li .meta.frow-sub,.frow-sub{grid-column:2;grid-row:2;margin:0;padding-right:6px;display:flex;align-items:center;gap:0;min-width:0;overflow:hidden;white-space:nowrap;color:var(--text-3);font-size:var(--text-xs)}
 .frow-sub>*{flex:none}
 .frow-sub>*+*::before{content:"·";display:inline-block;margin:0 6px;color:var(--text-3);text-decoration:none}
 .frow-sub .badge{line-height:15px;padding:0 6px}
 .frow-sub .possible-report{color:var(--warning)}
-/* Severity and submission sit together with a fixed 6 px gap; the cluster is
-   right-aligned so its edge lines up across rows, and an odd raw severity is
-   capped (ellipsis, full value in the label) instead of widening every row. */
-.frow-pills{grid-column:3;grid-row:1;justify-self:end;display:flex;align-items:center;gap:6px;min-width:0}
-.frow-sev,.frow-subm{min-width:0;display:inline-flex}
+/* An odd raw severity is capped (ellipsis; the full value is in the picker's label). */
+.frow-sev,.frow-subm{min-width:0;display:inline-flex;align-items:center}
+.frow-pills>.frow-sev{grid-column:3;grid-row:1/span 2;justify-self:end}
+.frow-pills>.frow-subm{grid-column:4;grid-row:1/span 2;justify-self:end}
 .frow-pills .frow-sev .sev{display:inline-block;max-width:132px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
-.row-links{grid-column:4;grid-row:1;display:flex;align-items:center;gap:4px;justify-self:start;min-width:24px}
+.row-links{grid-column:5;grid-row:1/span 2;display:flex;align-items:center;gap:4px;justify-content:flex-start;padding-left:6px}
+/* Narrow panels (half-width dashboard, phone): the submission pill moves into
+   the subline after "ID · status", the right side keeps only the severity pill
+   and icons, and the title may use two lines. */
+@container frows (max-width:560px){
+  .drill li.frow{grid-template-columns:auto minmax(0,auto) minmax(min-content,1fr) auto var(--col-links);row-gap:3px}
+  .drill li a.frow-title,.frow-title{grid-column:2/span 2;white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;text-overflow:clip;overflow-wrap:anywhere}
+  .drill li .meta.frow-sub,.frow-sub{padding-right:0}
+  .frow-pills>.frow-subm{grid-column:3;grid-row:2;justify-self:start}
+  .frow-pills>.frow-subm::before{content:"·";margin:0 6px;color:var(--text-3);font-size:var(--text-xs)}
+  .frow-pills>.frow-sev{grid-column:4;grid-row:1/span 2;padding-left:6px}
+  .frow-subm .badge{line-height:15px;padding:0 6px}
+}
+/* Phone-sized lists: severity and submission share a third line under the
+   subline and may run under the icons, which stay top-right beside the title. */
+@container frows (max-width:420px){
+  .drill li.frow{grid-template-columns:auto auto minmax(0,1fr) var(--col-links)}
+  .drill li a.frow-title,.frow-title,.drill li .meta.frow-sub,.frow-sub{grid-column:2/span 2}
+  .frow-pills>.frow-sev{grid-column:2;grid-row:3;padding-left:0;margin-top:2px}
+  .frow-pills>.frow-subm{grid-column:3/span 2;grid-row:3;justify-self:start;margin-top:2px;padding-left:6px}
+  .frow-pills>.frow-subm::before{content:none}
+  .frow>.row-select{grid-row:1/span 3}
+  .row-links{grid-column:4;grid-row:1/span 2}
+}
 .row-icon{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:var(--radius-sm);color:var(--text-2);text-decoration:none;font-size:13px}
 a.row-icon:hover{background:var(--surface-3);color:var(--accent-text)}
 .row-icon:focus-visible{outline:none;box-shadow:var(--focus-ring)}
 .row-icon.report-missing{color:var(--text-3);border:0;opacity:.7;cursor:help}
 .row-icon.is-na-link{opacity:.45}
-@media (max-width:650px){
-  .drill{padding-left:var(--space-3)}
-  .drill li.frow{grid-template-columns:auto auto minmax(0,1fr);row-gap:4px;column-gap:var(--space-2)}
-  .frow-main{grid-column:2/-1}
-  .frow-pills{grid-column:2;grid-row:2;justify-self:start}
-  .row-links{grid-column:3;grid-row:2}
-  .frow:not(:has(.row-select)) .frow-main{grid-column:1/-1}
-  .frow:not(:has(.row-select)) .frow-pills{grid-column:1}
-  .frow:not(:has(.row-select)) .row-links{grid-column:2}
+@media (max-width:650px){.drill{padding-left:var(--space-3)}}
 }
 .frow-sub .possible-report{text-decoration:none}
 .frow-sub .possible-report:hover{text-decoration:underline}

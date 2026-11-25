@@ -286,7 +286,7 @@
   let tipTimer=0, tipEl=null;
   function hideTip(){clearTimeout(tipTimer);tipEl?.remove();tipEl=null;}
   function showTip(target){
-    const text=target.dataset.tip || (target.classList.contains('truncate') && target.scrollWidth>target.clientWidth ? target.textContent : '');
+    const text=target.dataset.tip || (target.classList.contains('truncate') && (target.scrollWidth>target.clientWidth || target.scrollHeight>target.clientHeight+1) ? target.textContent : '');
     if(!text?.trim())return;
     hideTip();tipTimer=setTimeout(()=>{
       if(!target.isConnected)return;
