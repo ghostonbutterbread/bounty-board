@@ -36,6 +36,7 @@ import ipaddress
 import json
 import os
 import queue
+import socket
 import sys
 import threading
 import time
@@ -53,7 +54,11 @@ MAX_BODY = 64 * 1024
 MAX_INPUT = 64 * 1024
 VIEWER_QUEUE_BYTES = 4 * 1024 * 1024
 PING_INTERVAL = 20
-MAX_CONNECTIONS = 64  # concurrent connections (each WebSocket viewer holds one)
+MAX_CONNECTIONS = 64   # identified requests and WebSockets in progress (each viewer holds one)
+MAX_ANONYMOUS = 8      # requests without an allowlisted tailnet header or valid session cookie
+MAX_PENDING = 128      # connections still sending their request head (oldest evicted first)
+REQUEST_DEADLINE = 10  # seconds for the whole request head and body
+REQUEST_TIMEOUT = 10   # seconds per socket read or write before the WebSocket upgrade
 PEER_TIMEOUT = 75
 STATIC = Path(__file__).parent / 'terminal_static'
 
@@ -130,7 +135,8 @@ class Viewer:
 def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_record=None, state_dir,
                  backend=None, max_sessions=12, pause_after=300, remove_after=4 * 3600, min_free_memory=2 * 1024 ** 3,
                  idle_timeout=None, reap_interval=10, clock=time.time, mem_available=None,
-                 max_connections=MAX_CONNECTIONS, ping_interval=PING_INTERVAL, peer_timeout=PEER_TIMEOUT):
+                 max_connections=MAX_CONNECTIONS, ping_interval=PING_INTERVAL, peer_timeout=PEER_TIMEOUT,
+                 max_anonymous=MAX_ANONYMOUS, max_pending=MAX_PENDING, request_deadline=REQUEST_DEADLINE):
     root = Path(root).absolute()
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -154,9 +160,67 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
     login_css = (STATIC / 'login.css').read_bytes()
 
     class Handler(BaseHTTPRequestHandler):
+        """One request per connection. Admission (review N1):
+
+        - until its head is parsed a connection is *pending*; the server evicts
+          the oldest pending connection when MAX_PENDING are waiting, so slow
+          heads cannot pile up;
+        - the head and body together must arrive within REQUEST_DEADLINE
+          (a watchdog shuts the socket), and every read or write times out
+          after REQUEST_TIMEOUT until a WebSocket upgrade raises it;
+        - after the head is parsed, requests with an allowlisted tailnet header
+          or a valid session cookie take one of MAX_CONNECTIONS slots, all
+          others one of MAX_ANONYMOUS, so anonymous traffic can never take the
+          slots identified users and WebSockets need.
+        """
         server_version = 'bbterm'
         sys_version = ''
         protocol_version = 'HTTP/1.1'
+        timeout = REQUEST_TIMEOUT
+
+        def setup(self):
+            super().setup()
+            self._slot = None
+            self._watchdog = threading.Timer(request_deadline, self._expire)
+            self._watchdog.daemon = True
+            self._watchdog.start()
+
+        def _expire(self):
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def request_ready(self):
+            """Head and body are in: the request deadline no longer applies."""
+            self._watchdog.cancel()
+
+        def handle(self):
+            self.close_connection = True
+            self.handle_one_request()
+
+        def parse_request(self):
+            if not super().parse_request():
+                return False
+            self.server.leave_pending(self.connection)
+            user, _ = auth.identify(self.headers)
+            slots = self.server.identified_slots if user else self.server.anonymous_slots
+            if not slots.acquire(blocking=False):
+                self.close_connection = True
+                self.reply(503, {'error': 'busy', 'message': 'The terminal service is busy. Try again in a moment.'})
+                return False
+            self._slot = slots
+            return True
+
+        def finish(self):
+            try:
+                super().finish()
+            finally:
+                self._watchdog.cancel()
+                self.server.leave_pending(self.connection)
+                if self._slot is not None:
+                    self._slot.release()
+                    self._slot = None
 
         def log_message(self, format, *args):
             pass  # never log URLs (selectors) or headers
@@ -238,6 +302,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
 
         # -- GET -----------------------------------------------------------
         def do_GET(self):
+            self.request_ready()
             path = self.route()
             if path == '/healthz':
                 return self.reply(200, {'ok': True})
@@ -290,6 +355,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             if not self.host_ok() or not self.origin_ok(required=True):
                 return self.reply(403, {'error': 'forbidden'})
             body, problem = self.read_json()
+            self.request_ready()
             if problem:
                 return self.reply(400 if problem != 'csrf' else 403, {'error': problem})
             if path == '/api/login':
@@ -333,11 +399,13 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             return self.reply(404, {'error': 'not_found'})
 
         def do_PUT(self):
+            self.request_ready()
             self.reply(405, {'error': 'method_not_allowed'})
 
         do_DELETE = do_PATCH = do_PUT
 
         def do_OPTIONS(self):
+            self.request_ready()
             self.reply(405, {'error': 'method_not_allowed'})  # no CORS, ever
 
         # -- WebSocket -----------------------------------------------------
@@ -419,29 +487,24 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 viewer.close()
 
     class Server(ThreadingHTTPServer):
-        """Thread per connection, but never more than MAX_CONNECTIONS at once:
-        a flood is refused at accept time instead of creating unbounded threads."""
+        """Thread per connection with bounded admission (see Handler)."""
         daemon_threads = True
 
         def process_request(self, request, client_address):
-            if not self.slots.acquire(blocking=False):
-                try:
-                    request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
-                except OSError:
-                    pass
-                self.shutdown_request(request)
-                return
-            try:
-                super().process_request(request, client_address)
-            except BaseException:
-                self.slots.release()
-                raise
+            with self.pending_lock:
+                self.pending[request] = time.monotonic()
+                while len(self.pending) > self.max_pending:
+                    oldest = next(iter(self.pending))
+                    del self.pending[oldest]
+                    try:
+                        oldest.shutdown(socket.SHUT_RDWR)  # still sending its head: anonymous by definition
+                    except OSError:
+                        pass
+            super().process_request(request, client_address)
 
-        def process_request_thread(self, request, client_address):
-            try:
-                super().process_request_thread(request, client_address)
-            finally:
-                self.slots.release()
+        def leave_pending(self, connection):
+            with self.pending_lock:
+                self.pending.pop(connection, None)
 
         def handle_error(self, request, client_address):
             if not isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
@@ -455,7 +518,9 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 super().server_close()
 
     server = Server(('127.0.0.1', port), Handler)
-    server.slots = threading.BoundedSemaphore(max_connections)
+    server.identified_slots = threading.BoundedSemaphore(max_connections)
+    server.anonymous_slots = threading.BoundedSemaphore(max_anonymous)
+    server.pending, server.pending_lock, server.max_pending = {}, threading.Lock(), max_pending
     server.manager, server.auth, server.checks = manager, auth, checks
     return server
 

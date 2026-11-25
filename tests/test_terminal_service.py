@@ -235,7 +235,8 @@ class HardeningTests(unittest.TestCase):
         cls.server = ts.make_service(cls.root, port=0, allowed_origins=[ORIGIN], allowed_users=['ryu@example.test'],
                                      hash_record=ta.hash_password(PASSWORD, n=2 ** 14), state_dir=cls.base / 'state',
                                      backend=sb.LocalBackend(cls.base / 'local'), reap_interval=0, min_free_memory=0,
-                                     max_connections=12, ping_interval=0.3, peer_timeout=2)
+                                     max_connections=12, ping_interval=0.3, peer_timeout=2,
+                                     max_anonymous=4, max_pending=20, request_deadline=1.5)
         cls.port = cls.server.server_address[1]
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -292,23 +293,88 @@ class HardeningTests(unittest.TestCase):
         self.assertLessEqual(statuses.count(401), ta.MAX_FAILURES, 'never more failed guesses than the lockout budget')
         self.assertTrue(429 in statuses or 'refused' in statuses)
 
-    def test_connection_cap_refuses_floods(self):
+    def tailnet_status(self):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        try:
+            conn.request('GET', '/terminal/api/status', headers={'Host': BOARD, 'Tailscale-User-Login': 'ryu@example.test'})
+            return conn.getresponse().status
+        except Exception as error:
+            return type(error).__name__
+        finally:
+            conn.close()
+
+    def held_post(self, identified=False):
+        import socket as socket_mod
+        sock = socket_mod.create_connection(('127.0.0.1', self.port), timeout=10)
+        who = 'Tailscale-User-Login: ryu@example.test\r\n' if identified else ''
+        sock.sendall((f'POST /terminal/api/login HTTP/1.1\r\nHost: {BOARD}\r\nOrigin: {ORIGIN}\r\n{who}'
+                      'Sec-Fetch-Site: same-origin\r\nX-Requested-With: Bounty-Board\r\nContent-Type: application/json\r\n'
+                      'Content-Length: 65536\r\n\r\n{').encode())
+        return sock
+
+    def test_stalled_anonymous_posts_cannot_lock_out_the_tailnet_user(self):
+        # Review N1 (reviewer repro conn_cap_lockout.py): 64 slow-body POSTs held every
+        # slot and the allowlisted user got 503 indefinitely.
+        self.assertEqual(self.tailnet_status(), 200)
+        held = [self.held_post() for _ in range(64)]
+        try:
+            time.sleep(0.5)
+            self.assertEqual(self.tailnet_status(), 200, 'identified user still served')
+            refused = 0
+            for sock in held:
+                sock.settimeout(0.2)
+                try:
+                    data = sock.recv(100)
+                    if data == b'' or data.startswith(b'HTTP/1.1 503'):
+                        refused += 1  # 503 from the anonymous sub-cap, or evicted while pending
+                except OSError:
+                    pass
+            self.assertGreaterEqual(refused, 64 - 4, 'only the anonymous sub-cap stays held')
+            time.sleep(2.0)  # request deadline 1.5 s: the held ones are cut
+            still_open = 0
+            for sock in held:
+                sock.settimeout(3)
+                try:
+                    while sock.recv(65536):
+                        pass  # drain any 503 body until the server closes
+                except TimeoutError:
+                    still_open += 1
+                except OSError:
+                    pass
+            self.assertEqual(still_open, 0, 'every held request was closed by the deadline')
+            self.assertEqual(self.tailnet_status(), 200)
+        finally:
+            for sock in held:
+                sock.close()
+
+    def test_slow_request_heads_are_evicted_not_hoarded(self):
+        # Review N1: connections that never finish their head cannot fill the service.
         import socket as socket_mod
         idle = []
         try:
-            for _ in range(12):
-                idle.append(socket_mod.create_connection(('127.0.0.1', self.port), timeout=5))
-            time.sleep(0.3)
-            extra = socket_mod.create_connection(('127.0.0.1', self.port), timeout=5)
-            self.assertTrue(extra.recv(100).startswith(b'HTTP/1.1 503'))
-            extra.close()
+            for _ in range(60):  # three times max_pending
+                sock = socket_mod.create_connection(('127.0.0.1', self.port), timeout=5)
+                sock.sendall(b'GET /terminal/api/status HTTP/1.1\r\nHost: ')  # never finished
+                idle.append(sock)
+            self.assertEqual(self.tailnet_status(), 200)
+            self.assertLess(threading.active_count(), 120)
         finally:
             for sock in idle:
                 sock.close()
-        deadline = time.time() + 10
-        while time.time() < deadline and self.request('GET', '/healthz', origin=False)[0] != 200:
-            time.sleep(0.2)
-        self.assertEqual(self.request('GET', '/terminal/api/status')[0], 200, 'slots are released')
+
+    def test_identified_cap_still_applies(self):
+        held = [self.held_post(identified=True) for _ in range(12)]
+        try:
+            time.sleep(0.3)
+            extra = self.held_post(identified=True)
+            extra.settimeout(5)
+            self.assertTrue(extra.recv(100).startswith(b'HTTP/1.1 503'))
+            extra.close()
+        finally:
+            for sock in held:
+                sock.close()
+        time.sleep(2)
+        self.assertEqual(self.tailnet_status(), 200, 'slots are released')
 
     def test_stalled_viewer_is_dropped(self):
         # Review item 3: a client that stops reading used to pin its thread (and its
