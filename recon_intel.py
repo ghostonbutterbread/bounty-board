@@ -44,6 +44,8 @@ REFRESH_INTERVAL = 120.0    # a changed source is recomputed at most this often
 LINE_COUNT_CAP = 64 << 20   # bytes read per aggregate file before estimating
 CACHE_ENTRIES = 512
 LIST_LIMIT = 50
+GROUP_LIMIT = 500           # grouped breakdowns and per-host joins; section marked truncated past it
+TESTED_PAIRS_LIMIT = 5000   # (lane, param) pairs used to decide "untested"; larger because it affects correctness
 HOST_LIMIT = 300
 TEXT_LIMIT = 240
 DONE_STATUSES = frozenset({'done', 'closed', 'resolved', 'dismissed', 'rejected', 'complete', 'completed',
@@ -387,6 +389,14 @@ class Collector:
         self.errors = {}
         self.approximate = False
         self.unsafe_hosts = set()
+        self.truncated = {}
+
+    def capped(self, section, rows, limit):
+        """rows fetched with LIMIT limit + 1: the first limit, marking the section truncated past it."""
+        if len(rows) > limit:
+            self.truncated[section] = True
+            return rows[:limit]
+        return rows
 
     def host(self, raw):
         """Display-safe host key; remembers hosts whose raw value had unsafe characters."""
@@ -478,6 +488,7 @@ def url_index_summary(path, budget=QUERY_BUDGET, detail=True, exact_limit=EXACT_
         if detail:
             result['detail'] = url_detail(db, cols, c, per_host, keys, tests, budget)
         result['errors'] = c.errors
+        result['truncated'] = c.truncated
         result['approximate'] = c.approximate
         result['timeouts'] = db.timeouts
         result['open_mode'] = db.mode
@@ -563,18 +574,23 @@ def test_summary(db, cols, c):
         cut1, cut7 = now_iso(86400), now_iso(7 * 86400)
         rows = db.query('SELECT lane, skill, test_family, status, COUNT(*), MAX(completed_at), '
                         'SUM(CASE WHEN completed_at >= ? THEN 1 ELSE 0 END), SUM(CASE WHEN completed_at >= ? THEN 1 ELSE 0 END), '
-                        'COUNT(DISTINCT url_id) FROM test_runs GROUP BY lane, skill, test_family, status', (cut1, cut7))
+                        'COUNT(DISTINCT url_id) FROM test_runs GROUP BY lane, skill, test_family, status ORDER BY 5 DESC LIMIT ?',
+                        (cut1, cut7, GROUP_LIMIT + 1))
+        rows = c.capped('coverage_matrix', rows, GROUP_LIMIT)
         out['groups'] = [{'lane': text(r[0], 80), 'skill': text(r[1], 80), 'test_family': text(r[2], 80), 'status': text(r[3], 40),
                           'runs': r[4], 'last_run': text(r[5], 40), 'last_24h': r[6] or 0, 'last_7d': r[7] or 0, 'urls': r[8]}
                          for r in rows]
-        out['headline']['tests_recent'] = {'last_24h': sum(g['last_24h'] for g in out['groups']),
-                                           'last_7d': sum(g['last_7d'] for g in out['groups']), 'all': total}
+        # Exact recency even when the breakdown above is truncated.
+        recent = db.query('SELECT SUM(CASE WHEN completed_at >= ? THEN 1 ELSE 0 END), SUM(CASE WHEN completed_at >= ? THEN 1 ELSE 0 END) '
+                          'FROM test_runs', (cut1, cut7))[0]
+        out['headline']['tests_recent'] = {'last_24h': recent[0] or 0, 'last_7d': recent[1] or 0, 'all': total}
         out['last_test'] = db.one('SELECT MAX(completed_at) FROM test_runs')
         out['tested_lane_params'] = set()
         if has_param:
-            for lane, key in db.query("SELECT DISTINCT lane, param_key FROM test_runs WHERE param_key != ''"):
+            pairs = db.query("SELECT DISTINCT lane, param_key FROM test_runs WHERE param_key != '' LIMIT ?", (TESTED_PAIRS_LIMIT + 1,))
+            for lane, key in c.capped('tested_pairs', pairs, TESTED_PAIRS_LIMIT):
                 out['tested_lane_params'].add((str(lane), str(key)))
-        out['tested_lanes'] = {str(r[0]) for r in db.query('SELECT DISTINCT lane FROM test_runs')}
+        out['tested_lanes'] = {str(r[0]) for r in c.capped('tested_lanes', db.query('SELECT DISTINCT lane FROM test_runs LIMIT ?', (GROUP_LIMIT + 1,)), GROUP_LIMIT)}
     except QueryTimeout:
         c.fail('tests', 'timeout')
         out.setdefault('groups', [])
@@ -584,10 +600,10 @@ def test_summary(db, cols, c):
     if {'lane', 'status', 'url_id'} <= oc:
         try:
             out['observation_groups'] = [{'lane': text(r[0], 80), 'status': text(r[1], 40), 'count': r[2], 'last': text(r[3], 40)}
-                                         for r in db.query('SELECT lane, status, COUNT(*), MAX(created_at) FROM observations GROUP BY lane, status'
-                                                           if 'created_at' in oc else
-                                                           'SELECT lane, status, COUNT(*), NULL FROM observations GROUP BY lane, status')]
-            out['headline']['observations'] = number(sum(g['count'] for g in out['observation_groups']))
+                                         for r in c.capped('observation_groups', db.query(
+                                             f'SELECT lane, status, COUNT(*), {"MAX(created_at)" if "created_at" in oc else "NULL"} '
+                                             'FROM observations GROUP BY lane, status ORDER BY 3 DESC LIMIT ?', (GROUP_LIMIT + 1,)), GROUP_LIMIT)]
+            out['headline']['observations'] = number(db.one('SELECT COUNT(*) FROM observations'))
             out['last_observation'] = db.one('SELECT MAX(created_at) FROM observations') if 'created_at' in oc else None
         except QueryTimeout:
             c.fail('observations', 'timeout')
@@ -602,11 +618,14 @@ def url_detail(db, cols, c, per_host, keys, tests, budget):
     # loop; otherwise SQLite may walk the huge urls host index to avoid a sort.
     host_tests = {}
     try:
-        for host, runs, urls, last in db.query('SELECT u.host, COUNT(*), COUNT(DISTINCT t.url_id), MAX(t.completed_at) '
-                                               'FROM test_runs t CROSS JOIN urls u ON u.id = t.url_id GROUP BY u.host'):
+        rows = db.query('SELECT u.host, COUNT(*), COUNT(DISTINCT t.url_id), MAX(t.completed_at) '
+                        'FROM test_runs t CROSS JOIN urls u ON u.id = t.url_id GROUP BY u.host ORDER BY 2 DESC LIMIT ?', (GROUP_LIMIT + 1,))
+        for host, runs, urls, last in c.capped('host_tests', rows, GROUP_LIMIT):
             host_tests[c.host(host)] = {'test_runs': runs, 'tested_urls': urls, 'last_test': text(last, 40)}
         if {'url_id'} <= cols['observations']:
-            for host, n in db.query('SELECT u.host, COUNT(*) FROM observations o CROSS JOIN urls u ON u.id = o.url_id GROUP BY u.host'):
+            rows = db.query('SELECT u.host, COUNT(*) FROM observations o CROSS JOIN urls u ON u.id = o.url_id '
+                            'GROUP BY u.host ORDER BY 2 DESC LIMIT ?', (GROUP_LIMIT + 1,))
+            for host, n in c.capped('host_observations', rows, GROUP_LIMIT):
                 host_tests.setdefault(c.host(host), {})['observations'] = n
     except QueryTimeout:
         c.fail('host_tests', 'timeout')

@@ -253,6 +253,7 @@
     const r = src.result;
     if (r?.approximate) bits.push('<span class="ri-approx">≈ approximate values: sampled or estimated on a large store</span>');
     if (r?.errors && Object.keys(r.errors).length) bits.push(`<span class="ri-err">partial: ${esc(Object.keys(r.errors).join(', '))}</span>`);
+    if (r?.truncated && Object.keys(r.truncated).length) bits.push(`<span class="ri-approx" data-ri-truncated>truncated to the largest groups: ${esc(Object.keys(r.truncated).join(', ').replace(/_/g, ' '))}</span>`);
     return bits.length ? `<p class="hint ri-source-note" data-ri-source="${esc(key)}">${bits.join(' · ')}</p>` : '';
   }
   function stat(label, value, opts = {}) {

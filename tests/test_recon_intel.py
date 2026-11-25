@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -90,6 +91,29 @@ class UrlIndexTests(Base):
         untested = {p['param_key']: p['untested_lanes'] for p in d['untested_params']}
         self.assertEqual(untested, {'url': ['ssrf'], 'next': ['open-redirect'], 'file': ['lfi']})
         self.assertTrue(all(p['example_url'].startswith('https://') for p in d['untested_params']))
+
+    def test_grouped_lists_are_capped_and_marked_truncated(self):
+        """Review 9 minor 3: grouped breakdowns, tested pairs and per-host joins are LIMITed."""
+        path = make_url_index(self.base / 'u.sqlite')
+        db = sqlite3.connect(path)
+        api_url = db.execute("SELECT id FROM urls WHERE host = 'api.example.test' LIMIT 1").fetchone()[0]
+        db.execute("INSERT INTO test_runs (url_id, lane, param_key, skill, test_family, status, started_at, completed_at) "
+                   "VALUES (?, 'recon', 'q', 'manual', 'general-review', 'discovered', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')", (api_url,))
+        db.execute("INSERT INTO observations (url_id, lane, param_key, status, created_at) VALUES (?, 'sqli', 'q', 'discovered', '2026-01-01')", (api_url,))
+        db.commit()
+        db.close()
+        full = ri.url_index_summary(path)
+        self.assertEqual(full['truncated'], {})
+        with unittest.mock.patch.object(ri, 'GROUP_LIMIT', 1), unittest.mock.patch.object(ri, 'TESTED_PAIRS_LIMIT', 1):
+            r = ri.url_index_summary(path)
+        self.assertEqual(set(r['truncated']), {'coverage_matrix', 'observation_groups', 'host_tests', 'host_observations', 'tested_pairs', 'tested_lanes'})
+        self.assertEqual(len(r['detail']['coverage_matrix']), 1)
+        self.assertEqual(r['detail']['coverage_matrix'][0]['runs'], 2)  # the largest group is kept (ORDER BY runs DESC)
+        self.assertEqual(len(r['detail']['observation_groups']), 1)
+        # Headline numbers stay exact when breakdowns are truncated.
+        self.assertEqual(r['tests_recent'], full['tests_recent'])
+        self.assertEqual(r['observations'], full['observations'])
+        self.assertEqual(r['test_runs']['value'], 5)
 
     def test_large_index_uses_estimates_within_budget(self):
         path = make_large_url_index(self.base / 'big.sqlite', rows=300_000, hosts=40)
