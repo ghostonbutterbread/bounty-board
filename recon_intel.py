@@ -106,6 +106,9 @@ def to_epoch(value):
 # parse_qsl-decoded parameter keys) may contain them; a pasted ESC[201~ ends
 # bracketed paste and the rest runs as keystrokes.
 UNSAFE_CHARS = re.compile('[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\ufeff]')
+# ZWNJ and ZWJ (U+200C, U+200D) are part of normal Persian/Indic text and emoji
+# sequences: never offered for copying (UNSAFE_CHARS), but shown as they are.
+DISPLAY_ESCAPE = re.compile('[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\ufeff]')
 
 
 def _as_str(value):
@@ -121,7 +124,7 @@ def is_unsafe(*values):
 
 def escape_unsafe(value):
     """Display-safe form: unsafe characters become \\xNN or \\uNNNN."""
-    return UNSAFE_CHARS.sub(lambda m: f'\\x{ord(m.group()):02x}' if ord(m.group()) < 0x100 else f'\\u{ord(m.group()):04x}', _as_str(value))
+    return DISPLAY_ESCAPE.sub(lambda m: f'\\x{ord(m.group()):02x}' if ord(m.group()) < 0x100 else f'\\u{ord(m.group()):04x}', _as_str(value))
 
 
 def text(value, limit=TEXT_LIMIT):
@@ -222,6 +225,10 @@ def open_plan(path):
     if len(header) < 100 or not header.startswith(b'SQLite format 3\x00'):
         raise SourceError('invalid', 'not a readable SQLite database')
     wal, shm = _lstat(str(path) + '-wal'), _lstat(str(path) + '-shm')
+    journal = _lstat(str(path) + '-journal')
+    # A FIFO or device here would block the single worker thread inside SQLite.
+    if any(info is not None and not stat.S_ISREG(info.st_mode) for info in (wal, shm, journal)):
+        raise SourceError('unavailable', 'a database side file is not a regular file')
     if header[18] == 2 or header[19] == 2:
         if (wal is None and shm is None) or (wal is not None and wal.st_size == 0):
             return 'immutable'
@@ -280,11 +287,19 @@ class ReadOnlyDB:
             if 'interrupt' in str(error).lower():
                 self.timeouts += 1
                 raise QueryTimeout()
-            raise classify(error)
+            raise self._classify(error)
         except sqlite3.Error as error:
-            raise classify(error)
+            raise self._classify(error)
         finally:
             self.deadline = None
+
+    def _classify(self, error):
+        # An immutable read can see torn pages if a writer starts or checkpoints
+        # during it. Nothing is written; report it as transient so the next refresh
+        # retries instead of caching the source as invalid.
+        if self.mode == 'immutable' and 'malformed' in str(error).lower():
+            return SourceError('changed', 'the database changed during the read; retrying')
+        return classify(error)
 
     def one(self, sql, args=(), budget=None):
         rows = self.query(sql, args, budget)
@@ -695,6 +710,11 @@ def untested_params(db, cols, c, keys, tests, budget):
                 continue
             hints = parse_keys(row[0][0])
             missing = [h for h in hints if (h, key) not in tested]
+            if missing and c.truncated.get('tested_pairs'):
+                # The tested-pairs set is incomplete: confirm each claim with one
+                # indexed seek (idx_test_runs_param) so tested params never show as untested.
+                missing = [h for h in missing
+                           if db.one('SELECT 1 FROM test_runs WHERE param_key = ? AND lane = ? LIMIT 1', (key, h)) is None]
             if not missing:
                 continue
             count = db.one('SELECT COUNT(*) FROM (SELECT 1 FROM parameter_observations WHERE param_key = ? LIMIT 1001)', (key,))
@@ -1020,7 +1040,7 @@ class ReconIntel:
             self.cache.move_to_end(key)
         # Transient failures (a writer's lock, a budget overrun) are retried once the
         # refresh interval has passed, even when the file signature is unchanged.
-        transient = entry is not None and (entry['error'] or {}).get('code') in ('locked', 'timeout')
+        transient = entry is not None and (entry['error'] or {}).get('code') in ('locked', 'timeout', 'changed')
         fresh = entry is not None and entry['sig'] == sig and entry['level'] >= level and not transient
         recent = entry is not None and time.time() - entry['computed_at'] < self.refresh_interval and entry['level'] >= level
         if not fresh and not recent:

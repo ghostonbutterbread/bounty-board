@@ -237,7 +237,7 @@
   // ---- program ---------------------------------------------------------------
   function errorText(error) {
     const code = error?.code;
-    return {missing: 'Not found', locked: 'Locked by a writer; retried on the next refresh', timeout: 'Query exceeded the time budget',
+    return {missing: 'Not found', locked: 'Locked by a writer; retried on the next refresh', changed: 'Changed during the read; retried on the next refresh', timeout: 'Query exceeded the time budget',
       schema_mismatch: 'Schema differs from what this Board expects' + (error?.detail ? ` (${error.detail})` : ''),
       unavailable: 'Unavailable' + (error?.detail ? ` (${String(error.detail).replace(/_/g, ' ')})` : ''), invalid: 'Not a readable SQLite database'}[code] || 'Unavailable';
   }

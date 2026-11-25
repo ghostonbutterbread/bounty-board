@@ -114,6 +114,9 @@ class UrlIndexTests(Base):
         self.assertEqual(r['tests_recent'], full['tests_recent'])
         self.assertEqual(r['observations'], full['observations'])
         self.assertEqual(r['test_runs']['value'], 5)
+        # Review 9b: a capped tested-pairs set must not turn tested params into "untested".
+        untested = lambda x: {p['param_key']: p['untested_lanes'] for p in x['detail']['untested_params']}
+        self.assertEqual(untested(r), untested(full))
 
     def test_large_index_uses_estimates_within_budget(self):
         path = make_large_url_index(self.base / 'big.sqlite', rows=300_000, hosts=40)
@@ -484,6 +487,30 @@ class ReadLeavesNoTraceTests(Base):
         self.assertEqual(out['sources']['url_index']['state'], 'ready')
         self.assertEqual(out['sources']['url_index']['result']['urls']['value'], 98)
 
+    def test_side_file_that_is_not_regular_is_not_opened(self):
+        # Review 9b: a FIFO beside the database would block the worker inside SQLite.
+        to_wal(self.index)
+        for suffix in ('-wal', '-shm', '-journal'):
+            fifo = str(self.index) + suffix
+            os.mkfifo(fifo)
+            try:
+                with self.assertRaises(ri.SourceError) as caught:
+                    ri.open_plan(self.index)
+                self.assertEqual(caught.exception.code, 'unavailable', suffix)
+                self.assertIn('regular file', caught.exception.detail)
+            finally:
+                os.unlink(fifo)
+
+    def test_malformed_immutable_read_is_transient(self):
+        # Review 9b: torn pages seen by an immutable read are retried, not cached as invalid.
+        to_wal(self.index)
+        db = ri.ReadOnlyDB(self.index)
+        self.addCleanup(db.close)
+        self.assertEqual(db.mode, 'immutable')
+        self.assertEqual(db._classify(sqlite3.DatabaseError('database disk image is malformed')).code, 'changed')
+        db.mode = 'ro'
+        self.assertEqual(db._classify(sqlite3.DatabaseError('database disk image is malformed')).code, 'invalid')
+
     def test_wal_without_shm_is_not_opened(self):
         other = self.base / 'writer'
         other.mkdir()
@@ -538,7 +565,7 @@ class UnsafeCharacterTests(Base):
         self.addCleanup(svc.close)
         out = full_read(self, svc)
         encoded = json.dumps(out, ensure_ascii=False)
-        self.assertIsNone(ri.UNSAFE_CHARS.search(encoded), 'raw control or bidi characters in the payload')
+        self.assertIsNone(ri.DISPLAY_ESCAPE.search(encoded), 'raw control or bidi characters in the payload')
         params = {p['param_key']: p for p in out['sources']['url_index']['result']['detail']['untested_params']}
         hostile = params['\\x1b[201~\\x15touch PWNED\\x0dredirect_url']
         self.assertTrue(hostile['unsafe_chars'])
@@ -555,8 +582,12 @@ class UnsafeCharacterTests(Base):
         for code in listed:
             value = f'a{chr(code)}b'
             self.assertTrue(ri.is_unsafe(value), hex(code))
-            self.assertIsNone(ri.UNSAFE_CHARS.search(ri.text(value)), hex(code))
+            self.assertIsNone(ri.DISPLAY_ESCAPE.search(ri.text(value)), hex(code))
         self.assertEqual(ri.text('a\x1bb\u202ec'), 'a\\x1bb\\u202ec')
+        # Review 9b: ZWNJ (Persian) and ZWJ (emoji sequences) display as they are but are never offered for copying.
+        for value in ('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645', '\U0001f469\u200d\U0001f4bb'):
+            self.assertEqual(ri.text(value), value)
+            self.assertTrue(ri.is_unsafe(value))
         self.assertFalse(ri.is_unsafe('plain-key_1', 'https://a.example.test/?q=ü'))
 
 
