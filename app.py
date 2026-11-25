@@ -644,10 +644,15 @@ def valid_tailnet_host(host):
             re.fullmatch(fr'{label}\.{label}\.ts\.net', host) is not None)
 
 
+def valid_terminal_url(value):
+    import re
+    return isinstance(value, str) and re.fullmatch(r'/(?:[A-Za-z0-9_-]+/)+', value) is not None
+
+
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
                 tailnet_port=443, collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
                 report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
-                live_edit_dir=None, state_dir=None):
+                live_edit_dir=None, state_dir=None, terminal_url=None):
     import os
     import tempfile
     import threading
@@ -665,6 +670,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         raise ValueError('report autosave requires a collaboration store and excludes fixture publication')
     if tailnet_host is not None and not valid_tailnet_host(tailnet_host):
         raise ValueError('invalid canonical tailnet hostname')
+    if terminal_url is not None and not valid_terminal_url(terminal_url):
+        raise ValueError('terminal URL must be a same-origin path such as /terminal/')
     if type(tailnet_port) is not int or not 1 <= tailnet_port <= 65535:
         raise ValueError('invalid tailnet HTTPS port')
     if tailnet_host is None:
@@ -1578,6 +1585,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           'collaboration': collaboration is not None,
                                           'report_autosave': report_autosave,
                                           'live_edit': live is not None,
+                                          # Sandbox terminal (terminal_service.py, a separate process
+                                          # published on this origin); None hides the terminal UI.
+                                          'terminal_url': terminal_url,
                                           'fixture_publish': experimental_fixture_publish}
                 if self.server.report_na is not None:
                     # Forget marks of reports that were moved or deleted (confirmed per file, bounded).
@@ -2462,6 +2472,8 @@ def parse_config(argv=None):
                         help='edit reports in the Board: autosave to Markdown, merge outside changes, push updates live')
     parser.add_argument('--live-edit-dir', type=Path, default=Path.home() / '.local/state/bounty-board/live-edit',
                         help='private history directory for --live-edit (outside the data root)')
+    parser.add_argument('--terminal-url', help='same-origin path of the sandbox terminal service, e.g. /terminal/ '
+                        '(shows the terminal drawer; see docs/integrations/sandbox-terminal.md)')
     from report_publisher import DEFAULT_MAX_OPERATIONS, DEFAULT_MIN_FREE_BYTES
     parser.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/bounty-board',
                         help='private Board state directory, for example the previous status of archived findings (outside the data root)')
@@ -2511,6 +2523,8 @@ def parse_config(argv=None):
         parser.error('collaboration max bytes must be at least 65536')
     if args.retention_max_operations < 1 or args.retention_min_free_bytes < 0:
         parser.error('retention operations must be positive and free-space floor non-negative')
+    if args.terminal_url is not None and not valid_terminal_url(args.terminal_url):
+        parser.error('--terminal-url must be a same-origin path such as /terminal/')
     if args.live_edit and (args.collaboration_dir or args.report_autosave or args.experimental_fixture_publish):
         parser.error('--live-edit replaces --collaboration-dir, --report-autosave and --experimental-fixture-publish')
     return args
@@ -2529,6 +2543,7 @@ def main():
                 **({'report_autosave': True} if args.report_autosave else {}),
                 **({'live_edit_dir': args.live_edit_dir} if args.live_edit else {}),
                 state_dir=args.state_dir,
+                **({'terminal_url': args.terminal_url} if args.terminal_url else {}),
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
 
