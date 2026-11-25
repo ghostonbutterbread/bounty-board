@@ -312,6 +312,8 @@ def mapping_root(root):
         'F012-xss/EVIDENCE.md': '# Evidence\n',
         'F012-xss/acme.example-xss-F012.md': '# Submission\n',
         'F012-xss/_meta/x.md': '# Meta\n',
+        'F012-xss/_meta/deep/y.md': '# Deeper meta\n',
+        'scratch/_meta/z.md': '# Not a packet\n',
         'F012/notes.md': '# Notes\n',
         'F012-xss/owned.md': '# Owned\n',
         'F012-xss/nav.md': NAV,
@@ -349,7 +351,6 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(self.mapped(), {
             'F012-xss/EVIDENCE.md': ('F012', 'packet'),
             'F012-xss/acme.example-xss-F012.md': ('F012', 'packet'),
-            'F012-xss/_meta/x.md': ('F012', 'packet'),
             'F012/notes.md': ('F012', 'packet'),
             'F012-xss/owned.md': ('F060', 'report_path'),
             'reg/report.md': ('F020', 'report_path'),
@@ -360,7 +361,24 @@ class MappingTests(unittest.TestCase):
             'F099 - Not in ledger.md': None,
             'active.md': None,
             'F012.md': None,
+            'scratch/_meta/z.md': None,
         })
+
+    def test_packet_meta_hidden_like_navigation(self):
+        # Hidden from Recent by default, shown (and still mapped) with the navigation toggle.
+        hidden = self.items()
+        self.assertNotIn('F012-xss/_meta/x.md', hidden)
+        self.assertNotIn('F012-xss/_meta/deep/y.md', hidden)
+        self.assertFalse(hidden['scratch/_meta/z.md']['packet_meta'], 'only _meta/ inside a finding packet')
+        shown = self.items(include_navigation=True)
+        self.assertEqual((shown['F012-xss/_meta/x.md']['finding']['fid'], shown['F012-xss/_meta/x.md']['packet_meta']), ('F012', True))
+        self.assertTrue(shown['F012-xss/_meta/deep/y.md']['packet_meta'])
+        # Two packet _meta files and two navigation stubs (F012-xss/nav.md, index/F012.md).
+        self.assertEqual(self.index.recent(limit=1)['total_reports'] + 4, self.index.recent(limit=1, include_navigation=True)['total_reports'])
+        # Search never lists them, like generated navigation.
+        found = [r['path'] for r in self.index.search('meta', limit=50)['results']['reports']]
+        self.assertIn('scratch/_meta/z.md', found)
+        self.assertFalse([p for p in found if '/_meta/' in p and p.startswith('F012')])
 
     def test_navigation_never_maps(self):
         items = self.items(include_navigation=True)

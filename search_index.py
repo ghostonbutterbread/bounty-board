@@ -29,6 +29,15 @@ _PACKET_DIR = re.compile(r'^([A-Za-z][0-9]{2,})(?:-.*)?$')
 _LEGACY_NAME = re.compile(r'^([A-Za-z][0-9]{2,}) - .+\.md$', re.IGNORECASE)
 
 
+def packet_meta(rel):
+    """True for a file under a finding packet's _meta/ folder ("F012-xss/_meta/...").
+
+    Such files are packet bookkeeping: Recent and search hide them like
+    generated navigation (Recent shows them with its navigation toggle)."""
+    parts = rel.split('/')
+    return len(parts) >= 3 and _PACKET_DIR.match(parts[0]) is not None and '_meta' in parts[1:-1]
+
+
 def fold(text):
     """Lowercase without changing length, so offsets map back to the original."""
     return ''.join(c.lower() if len(c.lower()) == 1 else c for c in text)
@@ -243,6 +252,7 @@ class SearchIndex:
                     warnings.add('content_limit' if entry['unread'] != 'error' else 'content_unavailable')
                 elif entry['truncated']:
                     warnings.add('content_truncated')
+                entry['meta'] = packet_meta(rel)
                 reports[rel] = entry
         owners = self._ownership(lane, raw_findings)
         findings = []
@@ -457,7 +467,7 @@ class SearchIndex:
                     entry = seen.setdefault((l['family'], l['program']), {'lanes': [], 'findings': 0, 'reports': 0})
                     entry['lanes'].append(l['lane'])
                     entry['findings'] += len(l['findings'])
-                    entry['reports'] += sum(1 for r in l['reports'].values() if not r['nav'])
+                    entry['reports'] += sum(1 for r in l['reports'].values() if not r['nav'] and not r.get('meta'))
                 for (family, name), info in seen.items():
                     score = self._score_program(terms, full, fold(name), fold(f'{family}/{name}'))
                     if score:
@@ -498,7 +508,7 @@ class SearchIndex:
                             heapq.heappop(heaps['finding'])
                 if 'report' in kinds:
                     for rel, r in l['reports'].items():
-                        if r['nav']:
+                        if r['nav'] or r.get('meta'):
                             continue
                         hit = self._score_report(terms, full, r, now)
                         if not hit:
@@ -532,7 +542,7 @@ class SearchIndex:
 
         Filters: `within` (seconds before now), `programs` (ids "family/name"),
         `lane`, `query` (every term must occur in the title or path) and
-        generated navigation (excluded unless `include_navigation`). Facet
+        generated navigation and packet `_meta/` files (excluded unless `include_navigation`). Facet
         counts for programs and lanes each ignore their own filter.
 
         `na_keys` is the set of Board N/A marks ("family/program/lane/path"),
@@ -562,7 +572,7 @@ class SearchIndex:
                 findings = None
                 prefix = f"{pid}/{l['lane']}/"
                 for rel, r in l['reports'].items():
-                    if r['nav'] and not include_navigation:
+                    if (r['nav'] or r.get('meta')) and not include_navigation:
                         continue
                     na = prefix + rel in marks
                     if na and hiding:
@@ -615,7 +625,7 @@ class SearchIndex:
             items.append({'path': rel, 'name': rel.rsplit('/', 1)[-1], 'title': r['title'], 'program': pid,
                           'program_name': names[pid][0], 'family': names[pid][1], 'lane': lane_name,
                           'modified': mtime, 'report_kind': 'generated_navigation' if r['nav'] else r['report_kind'],
-                          'owner_fids': r['owner_fids'][:5], 'finding': finding, 'na': na,
+                          'owner_fids': r['owner_fids'][:5], 'finding': finding, 'na': na, 'packet_meta': bool(r.get('meta')),
                           'target': {'program': pid, 'lane': lane_name, 'section': 'reports', 'report': rel}})
         return {'index_state': self.state(), 'root_instance': self._instance, 'now': now,
                 'total': len(matches), 'total_reports': total_reports, 'offset': offset, 'limit': limit, 'order': order,
