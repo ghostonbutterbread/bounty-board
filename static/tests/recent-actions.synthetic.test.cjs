@@ -189,31 +189,39 @@ test('no Board state directory: N/A toggles are disabled with the reason',{timeo
   assert.match(await toggle.getAttribute('title'),/unavailable/);
 }));
 
-test('finding rows: metadata on one aligned line, title ellipsis, severity breakdown pills save',{timeout:120000},()=>withBoard('writer',async({page,finding})=>{
+// Geometry of every expanded drill-down row (shared by the layout tests).
+const rowBoxes=page=>page.locator('.drill li.frow').evaluateAll(list=>list.map(li=>{
+  const box=s=>{const n=li.querySelector(s);if(!n)return null;const b=n.getBoundingClientRect();return {top:b.top,bottom:b.bottom,left:b.left,right:b.right,mid:(b.top+b.bottom)/2,h:b.height,w:b.width};};
+  const title=li.querySelector('.frow-title'), row=li.getBoundingClientRect();
+  return {row:{left:row.left,right:row.right,w:row.width},sev:box('.frow-sev .pick-trigger'),sub:box('.frow-subm .pick-trigger'),links:box('.row-links'),title:box('.frow-title'),subline:box('.frow-sub'),
+    sevWidth:li.querySelector('.frow-sev .sev').getBoundingClientRect().width,lineHeight:parseFloat(getComputedStyle(title).lineHeight)||20,clamped:title.scrollHeight>title.clientHeight+1};
+}));
+const aligned=(boxes,pick,label)=>assert.ok(boxes.every(b=>Math.abs(pick(b)-pick(boxes[0]))<1),`${label}: ${boxes.map(pick).join(', ')}`);
+
+test('finding rows in the half-width panel: pills pinned right and aligned, submission in the subline, two-line titles, severity breakdown pills save',{timeout:120000},()=>withBoard('writer',async({page,finding})=>{
   await page.locator('[data-breakdown="class:xss"]').click();
-  const rows=page.locator('.drill li.frow');await rows.first().waitFor();
-  const boxes=await rows.evaluateAll(list=>list.map(li=>{
-    const r=s=>{const n=li.querySelector(s);if(!n)return null;const b=n.getBoundingClientRect();return {top:b.top,bottom:b.bottom,left:b.left,mid:(b.top+b.bottom)/2,h:b.height};};
-    const title=li.querySelector('.frow-title');
-    const right=s=>li.querySelector(s).getBoundingClientRect().right;
-    return {sev:r('.frow-sev .pick-trigger'),sub:r('.frow-subm .pick-trigger'),links:r('.row-links'),title:r('.frow-title'),subline:r('.frow-sub'),
-      sevRight:right('.frow-sev .pick-trigger'),subRight:right('.frow-subm .pick-trigger'),sevWidth:li.querySelector('.frow-sev .sev').getBoundingClientRect().width,
-      ellipsis:getComputedStyle(title).textOverflow,overflow:title.scrollWidth>title.clientWidth};
-  }));
+  await page.locator('.drill li.frow').first().waitFor();
+  const boxes=await rowBoxes(page);
   assert.ok(boxes.length>=3,'xss has a long title, a MEDIUM and an EXCEPTIONAL row');
+  // The severity pill and the icon column (room for two icons) end at the same x on every row.
+  aligned(boxes,b=>b.sev.right,'severity pills right edges');
+  aligned(boxes,b=>b.links.left,'icon column left');
+  aligned(boxes,b=>b.links.right,'icon column right');
   for(const b of boxes){
-    // Severity, submission and links share one line (vertical centres within 2 px).
-    assert.ok(Math.abs(b.sev.mid-b.sub.mid)<2 && Math.abs(b.sev.mid-b.links.mid)<2,`one line ${JSON.stringify(b)}`);
-    assert.ok(b.sub.h<30,'submission does not wrap');
-    assert.equal(b.ellipsis,'ellipsis');
-    assert.ok(b.title.h<24,'title stays on one line');
+    assert.ok(b.links.w>=50,'icon column reserves room for report and evidence');
+    // Narrow panel: submission sits in the subline after "ID · status".
+    assert.ok(Math.abs(b.sub.mid-b.subline.mid)<4 && b.sub.left>=b.subline.left,`submission in the subline ${JSON.stringify(b)}`);
+    assert.ok(b.title.w>=0.45*b.row.w,`title gets at least 45% of the row (${Math.round(b.title.w)} of ${Math.round(b.row.w)})`);
+    assert.ok(b.title.h<=2*b.lineHeight+1,'title is at most two lines');
+    assert.ok(b.sevWidth<=133,'a long severity is capped');
   }
-  // Pills sit together (6 px gap) and the cluster's right edge lines up across rows.
-  for(const b of boxes)assert.ok(Math.abs(b.sub.left-b.sevRight-6)<=1.5,`pills together: gap ${b.sub.left-b.sevRight}`);
-  assert.ok(boxes.every(b=>Math.abs(b.subRight-boxes[0].subRight)<1),'cluster right edges aligned');
-  assert.ok(boxes.every(b=>Math.abs(b.links.left-boxes[0].links.left)<1),'link column aligned');
-  assert.ok(boxes.every(b=>b.sevWidth<=133),'a long severity is capped');
-  assert.ok(boxes.some(b=>b.overflow),'the long title is truncated, not wrapped');
+  assert.ok(boxes.some(b=>b.title.h>1.5*b.lineHeight),'the long title wraps to a second line instead of a short ellipsis');
+  // Keyboard: the pills stay focusable buttons in reading order.
+  await page.locator('li[data-finding-id="F001"] .frow-title').focus();
+  await page.keyboard.press('Tab');
+  assert.match(await page.evaluate(()=>document.activeElement?.getAttribute('aria-label')||''),/^Severity HIGH/);
+  await page.keyboard.press('Tab');
+  assert.match(await page.evaluate(()=>document.activeElement?.getAttribute('aria-label')||''),/^Submission: /);
   // Severity breakdown: pills open and save.
   await page.locator('[data-breakdown^="sev:"]', {hasText:'LOW'}).first().click();
   const low=page.locator('section[aria-label="Severity breakdown"] li[data-finding-id="F003"]');
@@ -227,11 +235,30 @@ test('finding rows: metadata on one aligned line, title ellipsis, severity break
   await until(()=>finding('orchard','F003').submission?.state==='dropped','F003 dropped from the severity breakdown');
 }));
 
-test('phone width: finding row metadata wraps as one block under the title; dark theme renders',{timeout:90000},()=>withBoard('writer',async({page})=>{
+test('wide panel: severity and submission together on one line, pinned right, aligned',{timeout:90000},()=>withBoard('writer',async({page})=>{
   await page.locator('[data-breakdown="class:xss"]').click();
-  const row=page.locator('.drill li.frow').first();await row.waitFor();
-  const b=await row.evaluate(li=>{const r=s=>li.querySelector(s).getBoundingClientRect();return {title:r('.frow-title'),sev:r('.frow-sev'),sub:r('.frow-subm'),width:document.documentElement.scrollWidth};});
-  assert.ok(b.sev.top>=b.title.bottom-1,'pills sit under the title');
-  assert.ok(Math.abs(b.sev.top-b.sub.top)<2,'pills stay on one line');
-  assert.ok(b.width<=375,'no horizontal overflow');
+  await page.locator('.drill li.frow').first().waitFor();
+  const boxes=await rowBoxes(page);
+  for(const b of boxes){
+    assert.ok(Math.abs(b.sev.mid-b.sub.mid)<2 && Math.abs(b.sev.mid-b.links.mid)<2,`one line ${JSON.stringify(b)}`);
+    assert.ok(Math.abs(b.sub.left-b.sev.right-6)<=1.5,`pills together: gap ${b.sub.left-b.sev.right}`);
+    assert.ok(b.title.w>=0.45*b.row.w,'title keeps most of the row');
+    assert.ok(b.title.h<=b.lineHeight+1,'one-line title with ellipsis on wide rows');
+  }
+  aligned(boxes,b=>b.sub.right,'submission pills right edges');
+  aligned(boxes,b=>b.links.left,'icon column left');
+},{viewport:{width:1920,height:1080}}));
+
+test('phone width: pills under the title, icons on the right, no overflow; dark theme renders',{timeout:90000},()=>withBoard('writer',async({page})=>{
+  await page.locator('[data-breakdown="class:xss"]').click();
+  await page.locator('.drill li.frow').first().waitFor();
+  const boxes=await rowBoxes(page);
+  for(const b of boxes){
+    assert.ok(b.sev.top>=b.subline.bottom-1,'pills sit under the title and subline');
+    assert.ok(Math.abs(b.sev.mid-b.sub.mid)<2,'severity and submission share a line');
+    assert.ok(b.links.right<=b.row.right+1 && b.links.left>=b.title.right-1,'icons on the right, beside the title');
+    assert.ok(b.links.bottom<=b.sev.top+1 || b.links.left>=b.sub.right,'icons never overlap the pills');
+  }
+  aligned(boxes,b=>b.links.left,'icon column left');
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth)<=375,'no horizontal overflow');
 },{viewport:{width:375,height:812},theme:'dark'}));
