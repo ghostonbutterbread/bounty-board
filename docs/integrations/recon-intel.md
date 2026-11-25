@@ -33,25 +33,60 @@ Ryu asked to pull in the JS store and the URL index "so I can see the immediate 
   - hunt-next parameters: one bounded lookup per distinct key (first 200 rows for a hinted row, capped count to 1000+).
 - **Time budget.** Every statement runs under a deadline enforced by a progress handler and a watchdog calling `interrupt()`. The watchdog is needed: `COUNT(*)` is a single VDBE opcode, so a progress handler alone never fires during it (observed: the first version overran by minutes). A timed-out statement falls back to an estimate or records a section error; it never fails the source.
 - **Background worker and cache.** One thread computes; requests never touch SQLite. Cache entries are per source, keyed by `(size, mtime_ns)` of the database and its `-wal`; a changed source is served as stale and recomputed at most every 120 s (agents write constantly), or immediately on Refresh (`refresh=1`). Program requests jump the queue. The overview computes headline numbers only (no sampling); host tables and detail lists only when a program is opened. Memory is bounded by an LRU of 512 entries and capped lists.
-- **Read-only and path-safe.** `file:…?mode=ro`, `PRAGMA query_only=1`, busy timeout 1 s (no `immutable=1`, which would hide committed WAL data). Lanes come only from discovery (`discover(..., inventory_only=True)`); no request parameter becomes a path. Every component under the lane or artifact root is checked for symlinks (and `-wal`/`-shm`/`-journal`); the program directory on the artifact tier may be a symlink only when it resolves inside the artifact root. JS `downloads/`, `chunks/`, `sourcemaps/` and the library `ledger.json` are never opened.
+- **Read-only and path-safe.** See "Security: reads leave no trace" below for how databases are opened; every connection also sets `PRAGMA query_only=1` and a 1 s busy timeout. Lanes come only from discovery (`discover(..., inventory_only=True)`); no request parameter becomes a path. Every component under the lane or artifact root is checked for symlinks (and `-wal`/`-shm`/`-journal`); the program directory on the artifact tier may be a symlink only when it resolves inside the artifact root. JS `downloads/`, `chunks/`, `sourcemaps/` and the library `ledger.json` are never opened.
 - **JS library location.** Artifact tier first, then the lane under the Board root (some Shared lanes have a `_library`). The UI badges which one was read.
 - **Under-tested rule** (server-side, stated in the UI): a host with ≥ 50 URLs or ≥ 3 JS files and either no test runs/bounded reviews or fewer than one per 200 URLs.
 - **Findings per host** use the raw ledger's `asset`/`url`/`endpoint` host (most findings carry `asset`); archived findings are excluded and counted separately.
-- **Target data.** Hosts/URLs are escaped; external links are http(s) only, `target="_blank" rel="noopener noreferrer"`; the browser test aborts any non-loopback request and asserts none happened. Copy commands are shell-quoted.
+- **Target data.** Hosts/URLs are HTML-escaped; external links are http(s) only, `target="_blank" rel="noopener noreferrer"`; the browser test aborts any non-loopback request and asserts none happened. Copy commands are shell-quoted and refuse terminal-active characters (see "Security: nothing unsafe on the clipboard").
+- **Caps (review 9).** Grouped test-run and observation breakdowns, distinct lanes and per-host joins are fetched with `LIMIT 500` (largest first); the (lane, parameter) pairs that decide "untested" with `LIMIT 5000`, larger because a cut there can list a tested parameter as untested. Each capped section is named in `result.truncated` and shown in the UI. Headline recency and observation totals come from separate exact aggregates.
+
+## Security: reads leave no trace (review 9, blocker 1)
+
+**Rule:** a read never creates, modifies or leaves a file next to a database. A plain `mode=ro` open of a WAL database whose writer closed cleanly makes SQLite create `-wal` and `-shm`, which a read-only connection cannot remove. In Syncthing folders those files sync to every host, next to databases agents there may have open. The first version of this branch did exactly that: the real-data measurement runs (2026-11-24) left `url_index.sqlite-wal`/`-shm` in the synced lanes. They must not be deleted blindly, because a deletion would also sync. The orchestrator is handling that with the owner. `open_plan()` now decides from the header (bytes 18–19: 1 rollback, 2 WAL) and the side files, checked with `lstat` before opening:
+
+| Database state | Open | Why |
+| --- | --- | --- |
+| WAL, no `-wal` and no `-shm` | `?mode=ro&immutable=1` | the main file holds every committed page; nothing is created |
+| WAL, empty `-wal` (with or without `-shm`) | `?mode=ro&immutable=1` | no WAL content to miss |
+| WAL, non-empty `-wal` and existing `-shm` (active writer) | `?mode=ro` | opens the existing files and creates nothing (tested: every size and mtime unchanged) |
+| WAL, `-wal` without `-shm`, or `-shm` without `-wal` | not opened: `unavailable`, "writer state unclear" | |
+| WAL with an unreadable `-shm`, or WAL state that needs a write | `unavailable` with that reason (was `invalid`) | |
+| Rollback journal | `?mode=ro` | readers never create a journal and still respect a writer's lock (`locked`) |
+
+The rule applies to URL indexes and to JS libraries on both tiers. A read beside an active writer may still update the shared-memory read marks inside `-shm` (a memory map, not a new file); the tests show size and mtime unchanged. `immutable=1` skips locking, so a long read can overlap a checkpoint by a writer that starts afterwards. The result is then a slightly inconsistent snapshot, never a write.
+
+Recommended Syncthing ignore patterns for the shared folder (the orchestrator applies them with the owner; this branch edits no `.stignore`): `(?d)*.sqlite-wal`, `(?d)*.sqlite-shm`, `(?d)*.sqlite-journal`. `(?d)` lets Syncthing delete these files when it removes an otherwise ignored directory.
+
+The Board's existing `app.coverage()` reader opens `surface_coverage.sqlite` the same old way. That predates this branch and is recorded in `BUGFIXES.md`; reusing `open_plan()` would fix it.
+
+## Security: nothing unsafe on the clipboard (review 9, blocker 2)
+
+BBH `url_ingest.py` stores parameter keys decoded by `parse_qsl`, so a target URL such as `?%1b%5b201~%15touch%20X%0dredirect_url=1` yields a key containing ESC, Ctrl-U and CR, with a lane hint. Pasted into a terminal, `ESC[201~` ends bracketed paste, Ctrl-U clears the line and the rest runs at the CR, whatever the quoting.
+
+- **Server:** every recon string is display-safe. C0 (U+0000–001F), DEL, C1 (U+0080–009F), U+00AD, U+061C, U+200B–200F, U+202A–202E, U+2060–2069, U+FEFF, U+2028 and U+2029 are escaped as `\xNN` / `\uNNNN`. Items whose raw parameter key, hint, host, URL, program or lane contained one carry `unsafe_chars: true`. The overview row `id` stays the raw discovered identifier: it is only sent back URL-encoded, never displayed or copied.
+- **Client:** `shellQuote` throws on those characters; `bbhNext`, `bbhStatus` and `curlCommand` return `null`. A copy button for a flagged or unsafe value is rendered disabled with the visible reason "contains control characters". `copyText` refuses as a final check. Escaped URLs are not linked, because the escaped text is not the real URL.
 
 ## Evidence
 
 Synthetic tests (all data fictional, `*.example.test`):
 
-- `tests/test_recon_intel.py` (23 tests): exact small index; 300k-row generated index proving estimates, skip-scan host counts, sample scaling (±20 %) and a bounded run time under a 0.5 s budget; interrupt of a runaway statement; locked database (`BEGIN EXCLUSIVE` writer) → `locked`; WAL reader sees committed rows; schema drift (missing columns → `schema_mismatch`, missing optional tables → section errors); non-database → `invalid`; JS summary, signals, open observations, JS schema drift; line counts exact/capped; symlinked aggregate, URL index and artifact program dir (outside refused, inside followed); missing artifact root with expected paths; background compute, cache hit, signature invalidation, refresh interval and explicit refresh; large index partial-then-cached through the service; a locked source retried without a file change; HTTP trust/parameter checks; flags.
-- `static/tests/recon-intel.test.cjs` (5 tests): hash query round-trip/validation, sorting with unknowns last, formatting, shell quoting, http(s)-only links.
-- `static/tests/recon-intel.synthetic.test.cjs` (1 browser test): dashboard card, sidebar link and breadcrumb, overview sorting/filter/hash, program sections, under-tested highlight and filter, matrix, evidence links inside vs outside the lane, external link attributes, hunt-next items, lane-hint filter, clipboard contents of `bbh next` and curl, JS section, deep link with filters across reload, empty states, phone layout without horizontal overflow, no page errors, no non-loopback requests.
+- `tests/test_recon_intel.py` (34 tests): exact small index; 300k-row generated index proving estimates, skip-scan host counts, sample scaling (±20 %) and a bounded run time under a 0.5 s budget; interrupt of a runaway statement; locked database (`BEGIN EXCLUSIVE` writer) → `locked`; WAL reader sees committed rows; schema drift (missing columns → `schema_mismatch`, missing optional tables → section errors); non-database → `invalid`; JS summary, signals, open observations, JS schema drift; line counts exact/capped; symlinked aggregate, URL index and artifact program dir (outside refused, inside followed); missing artifact root with expected paths; background compute, cache hit, signature invalidation, refresh interval and explicit refresh; large index partial-then-cached through the service; a locked source retried without a file change; HTTP trust/parameter checks; flags. Review 9 additions:
+  - `ReadLeavesNoTraceTests` (7): snapshot of every entry's type, size and mtime (directories included) before and after a full overview and program read, for a clean WAL index, an empty `-wal`, an active writer, a rollback journal, a read-only directory, a `-wal` without `-shm` (`unavailable`) and an artifact-tier WAL JS library;
+  - `UnsafeCharacterTests` (2): the payload JSON has no unsafe character, and flags are set;
+  - `PasteTests` (1): the reviewer's `paste.py`. The `bbh next` text for an ESC/Ctrl-U/CR key is pasted, bracketed, into an interactive bash in a pty without Enter; nothing may run;
+  - `test_grouped_lists_are_capped_and_marked_truncated`.
+- `static/tests/recon-intel.test.cjs` (6 tests): hash query round-trip/validation, sorting with unknowns last, formatting, shell quoting, http(s)-only links, and command builders refusing ESC[201~, CR, Ctrl-U, U+202E and every listed character.
+- `static/tests/recon-intel.synthetic.test.cjs` (1 browser test): dashboard card, sidebar link and breadcrumb, overview sorting/filter/hash, program sections, under-tested highlight and filter, matrix, evidence links inside vs outside the lane, external link attributes, hunt-next items, lane-hint filter, clipboard contents of `bbh next` and curl, JS section, deep link with filters across reload, empty states, phone layout without horizontal overflow, no page errors, no non-loopback requests; a hostile synthetic key and bidi host render escaped with disabled copy buttons and the reason, and no raw control character reaches the DOM.
 
-Suite runs on 2026-11-24 (dev machine under load): `python3 tests/safe_suite.py` 346 tests, 345 pass + 1 skipped, with 1 failure caused by this branch (`test_config` exact `make_server` call) that was fixed in e9f41eb and rerun green (`test_config` + `test_recon_intel`: 30/30). `npm test` 186 tests: 185 pass, 1 fail (`ui-redesign` "not-submitted filter…" picker timeout); rerunning that file alone gave 7/7 pass.
+Review 9 round (2026-11-24, after 3a5fac0): `python3 -m unittest tests.test_recon_intel` 34 OK; `python3 tests/safe_suite.py` 358 tests OK (1 skipped); `npm test -- --test-concurrency=1` 187/187 pass (includes the 6 recon node tests and the recon browser test). Each new regression test was also run against an unmodified `git archive` of 7e805d1 and fails there.
+
+Earlier suite runs on 2026-11-24 (dev machine under load): `python3 tests/safe_suite.py` 346 tests, 345 pass + 1 skipped, with 1 failure caused by this branch (`test_config` exact `make_server` call) that was fixed in e9f41eb and rerun green (`test_config` + `test_recon_intel`: 30/30). `npm test` 186 tests: 185 pass, 1 fail (`ui-redesign` "not-submitted filter…" picker timeout); rerunning that file alone gave 7/7 pass.
 
 Real data, read-only from the dev machine (`~/Shared`, no `/mnt/bounty`); counts and timings only — see the table below.
 
-### Measurements (2026-11-24, dev machine, 6 cores, load average 5–13, `~/Shared` read-only)
+### Measurements (2026-11-24, dev machine, 6 cores, load average 5–13, `~/Shared` opened `mode=ro`)
+
+These runs used the first version of the reader and left `-wal`/`-shm` files in the synced lanes (see the security section above). No further real-data measurements were taken in the review 9 round, by instruction. Future measurements must use copies or the fixed reader.
 
 | What | Result |
 | --- | --- |
