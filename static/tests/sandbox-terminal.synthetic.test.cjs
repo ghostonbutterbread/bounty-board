@@ -37,7 +37,7 @@ async function withFixture(mode,fn){
 async function openReport(page,base,{live=true,report=REPORT}={}){
   await page.goto(base);
   await page.getByRole('button',{name:'Open workspace'}).click();
-  await page.getByRole('button',{name:'Reports',exact:true}).click();
+  await page.getByRole('link',{name:'Reports',exact:true}).click();
   await page.locator('#report-select').selectOption(report);
   if(live){
     await page.locator('#live-report-host .live-editor .CodeMirror').waitFor({timeout:15000});

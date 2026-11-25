@@ -421,7 +421,7 @@ dialog::backdrop{background:var(--overlay)}
 .sk-block{height:120px}
 
 /* Reports */
-.report-panel{display:grid;gap:var(--space-3)}
+.report-panel{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-3)}
 /* Live report view: editor plus artifacts. Side by side when the panel is
    wide enough for both; stacked (artifacts below) otherwise. */
 .report-panel{container-type:inline-size}
