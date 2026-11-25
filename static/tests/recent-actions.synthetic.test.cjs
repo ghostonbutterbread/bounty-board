@@ -111,6 +111,20 @@ test('a stale Recent pick is refused, not overwritten; context menu offers the f
   await page.keyboard.press('Escape');
 }));
 
+test('a finding with a non-standard ID maps through its owner path but its Recent pills stay read-only',{timeout:120000},()=>withBoard('writer',async({page,touch,url})=>{
+  touch('orchard','F003',{fid:'AC-3'});
+  const row=panelRow(page,'F003-open-redirect/orchard.example-open-redirect-F003.md');
+  const sev=row.locator('[data-recent-pick="sev"]'), sub=row.locator('[data-recent-pick="sub"]');
+  // The index notices the outside ledger change on a later pass; reload until it does.
+  await until(async()=>{await page.goto(url);await row.waitFor();return await sev.getAttribute('data-fid')==='AC-3';},'re-mapped AC-3',30000);
+  assert.equal(await sev.isDisabled(),true);assert.equal(await sub.isDisabled(),true);
+  assert.match(await sev.getAttribute('title'),/AC-3 is not a standard finding ID/);
+  await sev.click({force:true});
+  assert.equal(await page.getByRole('menu',{name:'Change severity'}).count(),0,'no picker opens');
+  const standard=panelRow(page,REPORT).locator('[data-recent-pick="sev"]');
+  assert.equal(await standard.isDisabled(),false);
+}));
+
 test('writer off: Recent pills are disabled with the hint, N/A still works (Board state)',{timeout:120000},()=>withBoard('readonly',async({page})=>{
   await panelRow(page,REPORT).locator('[data-recent-pick="sev"]').click();
   const pills=page.getByRole('menu',{name:'Change severity'});

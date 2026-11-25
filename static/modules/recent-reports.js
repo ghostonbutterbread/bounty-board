@@ -117,9 +117,12 @@
     for (const item of body.items || []) if (item.finding?.fid && !FA()?.entry?.(item.program, item.lane, item.finding.fid))
       fallback.set(JSON.stringify([String(item.program), String(item.lane), String(item.finding.fid)]), {...item.finding, id: item.finding.fid});
   }
+  // The ledger write path accepts only standard FIDs (letter + 2 or more digits; app.py PATCH check).
+  const WRITABLE_FID = /^[A-Za-z][0-9]{2,}$/;
   const pickHtml = (item, kind) => {
     const row = entryFor(item)?.row; if (!row) return '';
-    const attrs = `data-recent-pick="${kind}" data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-fid="${esc(row.id)}" aria-haspopup="menu" aria-expanded="false"`;
+    const writable = WRITABLE_FID.test(String(row.id));
+    const attrs = `data-recent-pick="${kind}" data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-fid="${esc(row.id)}" aria-haspopup="menu" aria-expanded="false"${writable ? '' : ` disabled title="${esc(`${row.id} is not a standard finding ID, so it cannot be edited from the Board`)}"`}`;
     if (kind === 'sev') return `<button type="button" class="pick-trigger" ${attrs} aria-label="Severity ${esc(row.severity || 'not recorded')}. Change severity of ${esc(row.id)}">${ui().severityBadge(row.severity)}</button>`;
     const label = ui().submissionLabel ? ui().submissionLabel(row) : '';
     return `<button type="button" class="pick-trigger" ${attrs} aria-label="Submission: ${esc(label)}. Change submission of ${esc(row.id)}">${ui().submissionBadge ? ui().submissionBadge(row) : esc(label)}</button>`;
@@ -368,7 +371,7 @@
   const pickSelector = (item, kind, scope) => `${scope} [data-recent-pick="${kind}"][data-program="${CSS.escape(String(item.program))}"][data-lane="${CSS.escape(String(item.lane))}"][data-fid="${CSS.escape(String(item.finding.fid))}"]`;
   function openPick(button) {
     const item = itemFor(button), entry = item && entryFor(item);
-    if (!entry || !FA()) return;
+    if (!entry || !FA() || button.disabled || !WRITABLE_FID.test(String(entry.row.id))) return;
     const scope = button.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : '#recent-reports-host';
     const kind = button.dataset.recentPick;
     FA()[kind === 'sev' ? 'severityPills' : 'submissionPills'](button, [entry], refocus(pickSelector(item, kind, scope)));
@@ -391,11 +394,12 @@
     const naOff = !NA() || item.naAvailable === false || !NA().available();
     const items = [{heading: item.finding ? `${item.finding.fid} · ${item.name}` : item.name},
       {label: 'Open report in new tab', icon: 'external-link', onSelect: () => openTab(reportHref(item))}];
+    const fidWritable = entry ? WRITABLE_FID.test(String(entry.row.id)) : false;
     if (entry) {
       items.push({label: 'Open finding', icon: 'bug', onSelect: () => ctx.navigate({program: item.program, lane: item.lane, section: 'findings', finding: String(entry.row.id)})},
         {separator: true},
-        {label: 'Change severity…', icon: 'signal', disabled: !fa?.canEdit('severity'), onSelect: () => fa.severityPills(at(), [entry], refocus(pickSelector(item, 'sev', scope)))},
-        {label: 'Submission…', icon: 'paper-plane-o', disabled: !fa?.canSubmit(), onSelect: () => fa.submissionPills(at(), [entry], refocus(pickSelector(item, 'sub', scope)))},
+        {label: 'Change severity…', icon: 'signal', disabled: !fidWritable || !fa?.canEdit('severity'), onSelect: () => fa.severityPills(at(), [entry], refocus(pickSelector(item, 'sev', scope)))},
+        {label: 'Submission…', icon: 'paper-plane-o', disabled: !fidWritable || !fa?.canSubmit(), onSelect: () => fa.submissionPills(at(), [entry], refocus(pickSelector(item, 'sub', scope)))},
         {label: 'Copy ID', icon: 'clipboard', onSelect: () => fa.copyIds([entry])});
       if (!fa?.canEdit('severity')) items.splice(1, 0, {heading: fa?.OFF_HINT || ''});
     }
