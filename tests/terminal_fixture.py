@@ -16,7 +16,8 @@ SECOND = 'D10-xss/example-com-xss-D10.md'             # D10 packet (D1 vs D10 ed
 THIRD = 'AC-1/EVIDENCE.md'                            # legacy FID-only packet, FID containing '-'
 LEGACY = 'findings/confirmed/D10 - HIGH - stored xss.md'   # maps to D10 by file name
 LEGACY_LEDGER = 'findings/open/D7 - LOW - redirect.md'     # maps to D7 by ledger report_path
-NAVIGATION = 'active.md'                              # generated navigation: not a report to test
+NAVIGATION = 'active.md'
+CONTROL = 'D11-ctrl/example-com-ctrl-D11.md'          # a block hiding ESC[201~ (review blocker 2)                              # generated navigation: not a report to test
 
 REPORT = """# Synthetic finding
 
@@ -71,6 +72,8 @@ def make_root(base):
     (d1 / 'poc.py').write_text('print("poc-ran-ok")\n')
     packet(lane, 'D10-xss', 'example-com-xss-D10.md', '# D10\n\n```bash\necho d10\n```\n')
     packet(lane, 'AC-1')
+    packet(lane, 'D11-ctrl', 'example-com-ctrl-D11.md',
+           '# Control characters\n\n```bash\necho safe-$((1+1))\n```\n\n```bash\necho hi\x1b[201~\ntouch pwned-marker\necho tail\n```\n')
     packet(lane, 'D7-open-redirect')
     reports = lane / 'reports'
     (reports / 'findings/confirmed').mkdir(parents=True)
@@ -91,6 +94,7 @@ def make_root(base):
         {'fid': 'D1', 'report_dir': 'reports/D1-sqli-login', 'evidence_path': 'reports/D1-sqli-login/EVIDENCE.md'},
         {'fid': 'D10', 'report_dir': 'reports/D10-xss'},
         {'fid': 'AC-1'},
+        {'fid': 'D11', 'report_dir': 'reports/D11-ctrl'},
         {'fid': 'D7', 'report_path': f'reports/{LEGACY_LEDGER}', 'report_dir': 'reports/D7-open-redirect'},
         {'fid': 'D5', 'report_dir': 'reports/D5-missing'},
     ]}))

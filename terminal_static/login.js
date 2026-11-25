@@ -2,10 +2,18 @@
 (() => {
   'use strict';
   try { const t = localStorage.getItem('bounty-board-theme'); if (t === 'light' || t === 'dark' || t === 'dusk') document.documentElement.dataset.theme = t; } catch {}
+  // After sign-in go back only to this origin's Board (/) or terminal pages. Parse
+  // with the URL parser so tabs, backslashes and encodings cannot turn the value
+  // into another host (for example /%09/evil.example becomes //evil.example).
   const next = (() => {
     const value = new URLSearchParams(location.search).get('next') || '/';
-    // Only same-origin paths: never a scheme or protocol-relative URL.
-    return /^\/(?![\/\\])/.test(value) ? value : '/';
+    try {
+      const url = new URL(value, location.origin);
+      if (url.origin === location.origin && (url.pathname === '/' || url.pathname.startsWith('/terminal/'))) {
+        return url.pathname + url.search + url.hash;
+      }
+    } catch {}
+    return '/';
   })();
   const post = (path, body) => fetch(`/terminal/api/${path}`, {
     method: 'POST', credentials: 'same-origin',

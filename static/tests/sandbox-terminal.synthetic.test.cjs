@@ -328,3 +328,44 @@ test('only reports in a finding folder get a terminal; legacy reports open their
     assert.deepEqual(page.errors,[]);
   });
 });
+
+test('blocks with control characters cannot be typed; sign-in never redirects off-origin',{timeout:150000},async()=>{
+  await withFixture('tailnet',async({base,newPage,lane})=>{
+    const page=await newPage();
+    await openReport(page,base,{report:'D11-ctrl/example-com-ctrl-D11.md'});
+    await page.locator('[data-term-toggle]').click();
+    await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
+    await sideBySide(page);
+    const bars=page.locator('#live-report-host .editor-preview-side [data-term-controls]');
+    await page.waitForFunction(()=>document.querySelectorAll('#live-report-host .editor-preview-side [data-term-unsafe]').length===1);
+    const bad=bars.nth(1);
+    assert.equal(await bad.locator('[data-term-unsafe]').textContent(),'This block contains control characters and cannot be typed; copy it manually after review.');
+    assert.equal(await bad.locator('[data-term-type]').isDisabled(),true);
+    assert.equal(await bad.locator('[data-term-run]').isDisabled(),true);
+    assert.equal(await bars.nth(0).locator('[data-term-unsafe]').count(),0);
+    // Even with the button forced on, the module refuses to send the text.
+    await bad.evaluate(el=>{for(const b of el.querySelectorAll('button')){b.disabled=false;b.click();b.dispatchEvent(new MouseEvent('click',{bubbles:true,shiftKey:true}));}});
+    await page.waitForTimeout(1500);
+    assert.equal(fs.existsSync(path.join(lane,'reports/D11-ctrl/pwned-marker')),false,'the hidden command never ran');
+    assert.ok(!(await screen(page)).some(x=>/echo hi|pwned/.test(x)),'nothing was typed');
+    // The safe block still types (without Enter) and runs.
+    await bars.nth(0).locator('[data-term-type]').click();
+    let lines=await waitScreen(page,l=>l.some(x=>/\$ echo safe-\$\(\(1\+1\)\)$/.test(x)),'typed safe block');
+    assert.ok(!lines.some(x=>x.trim()==='safe-2'),'typing alone does not run');
+    await page.keyboard.press('Control+U');
+    await bars.nth(0).locator('[data-term-run]').click();
+    await waitScreen(page,l=>l.some(x=>x.trim()==='safe-2'),'Run runs');
+    assert.deepEqual(page.errors,[]);
+  });
+  await withFixture('login',async({base,newPage,password})=>{
+    const page=await newPage();
+    await page.goto(`${base}/terminal/login?next=${encodeURIComponent('/\t/evil.example/x')}`);
+    await page.getByLabel('Username').fill('ryushe');
+    await page.getByLabel('Password').fill(password);
+    await page.getByRole('button',{name:'Sign in'}).click();
+    await page.waitForURL(url=>url.pathname==='/'||url.host!==new URL(base).host,{timeout:15000});
+    assert.equal(new URL(page.url()).host,new URL(base).host,'stayed on the Board origin');
+    assert.equal(new URL(page.url()).pathname,'/');
+    assert.deepEqual(page.errors,[]);
+  });
+});

@@ -77,6 +77,13 @@
     return lines.join('\n');
   }
 
+  // Text that must never be typed into a terminal: ESC (it can end bracketed
+  // paste with ESC[201~ and run what follows), any other C0 control except tab
+  // and newline, DEL, and C1 controls (U+0080-U+009F, e.g. the 8-bit CSI).
+  const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+  const unsafeText = text => UNSAFE.test(String(text));
+  const UNSAFE_MESSAGE = 'This block contains control characters and cannot be typed; copy it manually after review.';
+
   // -- transport -------------------------------------------------------------
   async function api(path, body) {
     const options = body
@@ -314,9 +321,16 @@
 
   // -- play buttons and check marks ------------------------------------------
   function typeText(text, run) {
-    if (blocked()) return;
+    if (blocked() || unsafeText(text)) return;  // never send control characters, whatever the caller
+    text = text.replace(/\n+$/, '');            // typing alone never presses Enter
     if (!prefs.open) toggle(true);
-    const action = () => { term.paste(text); if (run) send({t: 'in', d: '\r'}); term.focus(); };
+    const action = () => {
+      // Without bracketed paste a multi-line block would run line by line; only Run may do that.
+      if (!run && text.includes('\n') && !term.modes?.bracketedPasteMode) { note('This shell does not accept multi-line typing safely. Use Run, or type the lines one by one.'); return; }
+      term.paste(text);
+      if (run) send({t: 'in', d: '\r'});
+      term.focus();
+    };
     if (ws && ws.readyState === 1 && status === 'connected') action();
     else { pending.push(action); connect(); }
   }
@@ -341,10 +355,21 @@
           bar.innerHTML = `<span class="term-lang">${esc(lang || 'text')}</span><button type="button" class="button sm term-play" data-term-type aria-label="Type into terminal" title="Type into terminal. Shift+click to run it."><i class="fa fa-play" aria-hidden="true"></i></button>${SHELLISH.has(lang) ? '<button type="button" class="button sm subtle" data-term-run title="Type and press Enter">Run</button>' : ''}<label class="term-check"><input type="checkbox" data-term-check> Checked</label>`;
           pre.before(bar);
         }
+        const unsafe = unsafeText(texts[i]);
         for (const button of bar.querySelectorAll('[data-term-type],[data-term-run]')) {
-          button.disabled = blocked();
-          if (blocked()) button.title = mount.message; else button.title = button.matches('[data-term-run]') ? 'Type and press Enter' : 'Type into terminal. Shift+click to run it.';
+          button.disabled = blocked() || unsafe;
+          button.title = unsafe ? UNSAFE_MESSAGE : blocked() ? mount.message
+            : button.matches('[data-term-run]') ? 'Type and press Enter' : 'Type into terminal. Shift+click to run it.';
         }
+        let warning = bar.querySelector('[data-term-unsafe]');
+        if (unsafe && !warning) {
+          warning = document.createElement('span');
+          warning.className = 'term-unsafe';
+          warning.dataset.termUnsafe = '';
+          warning.setAttribute('role', 'note');
+          warning.textContent = UNSAFE_MESSAGE;
+          bar.querySelector('.term-lang').after(warning);
+        } else if (!unsafe && warning) warning.remove();
         bar.dataset.key = keys[i];
         bar.dataset.lang = lang;
         bar._text = texts[i];
@@ -501,5 +526,5 @@
     },
   });
   // Exposed for synthetic browser tests and diagnostics only.
-  window.BoardTerminal = {blockKeys, sha256hex, commandText, get status() { return status; }, get checks() { return checks; }, get term() { return term; }};
+  window.BoardTerminal = {blockKeys, sha256hex, commandText, unsafeText, get status() { return status; }, get checks() { return checks; }, get term() { return term; }};
 })();
