@@ -362,6 +362,33 @@ class HardeningTests(unittest.TestCase):
             for sock in idle:
                 sock.close()
 
+    def test_every_response_says_connection_close(self):
+        # Review 2 N4: the server answers one request per connection, so a keep-alive
+        # client (Tailscale Serve's reverse proxy) must be told, or its next request on
+        # the reused socket fails (POSTs are not retried and surfaced as 502).
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        try:
+            for path in ('/terminal/api/status', '/terminal/', '/terminal/api/status'):
+                conn.request('GET', path, headers={'Host': BOARD, 'Tailscale-User-Login': 'ryu@example.test'})
+                response = conn.getresponse()
+                response.read()
+                self.assertEqual(response.getheader('Connection'), 'close', path)
+                self.assertIn(response.status, (200, 302, 303), path)
+        finally:
+            conn.close()
+        sock = __import__('socket').create_connection(('127.0.0.1', self.port), timeout=10)
+        try:
+            sock.sendall((f'GET /terminal/api/status HTTP/1.1\r\nHost: {BOARD}\r\nConnection: keep-alive\r\n\r\n').encode())
+            head = b''
+            while b'\r\n\r\n' not in head:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            self.assertIn(b'\r\nConnection: close\r\n', head.split(b'\r\n\r\n')[0] + b'\r\n')
+        finally:
+            sock.close()
+
     def test_identified_cap_still_applies(self):
         held = [self.held_post(identified=True) for _ in range(12)]
         try:
