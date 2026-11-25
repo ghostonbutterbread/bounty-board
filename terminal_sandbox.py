@@ -427,6 +427,11 @@ class DockerBackend:
             # sure it is still the directory we validated (no symlink swap).
             if not session.mount.still_valid():
                 raise SandboxError('unsafe_folder', 'The report folder changed while the sandbox started. Try again.')
+            # The host check cannot see a swap that was undone in time; ask the
+            # container what it actually mounted and compare device and inode.
+            inside = self.run('exec', self.name(session), 'stat', '-c', '%d:%i', MOUNT_TARGET, check=False, timeout=30)
+            if inside.returncode != 0 or inside.stdout.decode().strip() != '%d:%d' % session.mount.identity:
+                raise SandboxError('unsafe_folder', 'The mounted folder is not the report folder that was checked. The sandbox was removed.')
         except BaseException:
             self.destroy(session)
             raise

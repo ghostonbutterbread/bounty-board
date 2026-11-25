@@ -333,6 +333,22 @@ class DockerSandboxTests(unittest.TestCase):
         session.write(b'echo after-measure-$((2+5))\n')
         self.viewer.wait_for('after-measure-7')
 
+    def test_095_mount_identity_checked_inside_container(self):
+        # Review item 11: verify what the container mounted, not only the host path.
+        session = sb.Session(self.manager, fx.selector(fx.SECOND))
+        session.mount = sb.resolve_mount(self.root, session.sel)
+        dev, ino = session.mount.identity
+        session.mount.identity = (dev, ino + 1)  # as if the path pointed elsewhere at mount time
+        session.mount.still_valid = lambda: True  # the host-side check is fooled
+        name = self.backend.name(session)
+        with self.assertRaises(sb.SandboxError) as caught:
+            self.backend.create(session)
+        self.assertEqual(caught.exception.code, 'unsafe_folder')
+        self.assertNotIn(name, our_containers(), 'the sandbox was removed')
+        # And the proxy socket is owner-only (review item 12) yet usable from the container (test_06).
+        sock = self.base / 'state/proxy' / self.session.id / 'proxy.sock'
+        self.assertEqual(os.stat(sock).st_mode & 0o777, 0o600)
+
     def test_99_cleanup_on_stop(self):
         manager = sb.SessionManager(self.root, sb.DockerBackend(image=IMAGE, state_dir=self.base / 'state3', proxy=self.proxy,
                                                                 prefix='bbterm-test-stop-'), reap_interval=0)
