@@ -36,7 +36,9 @@ class AddressAllowedTests(unittest.TestCase):
                'fd7a:115c:a1e0::1', 'fc00::1', 'ff02::1', '::ffff:127.0.0.1', '::ffff:10.0.0.1',
                '64:ff9b::a00:1', '2002:0a00:0001::1',
                # Review item 10: deprecated embeddings and site-local.
-               '::8.8.8.8', '::10.0.0.1', '::ffff:0:10.0.0.1', '::ffff:0:8.8.8.8', 'fec0::1', 'feff::1']
+               '::8.8.8.8', '::10.0.0.1', '::ffff:0:10.0.0.1', '::ffff:0:8.8.8.8', 'fec0::1', 'feff::1',
+               # Review N2: IPv4-mapped is refused outright, even for a public IPv4.
+               '::ffff:8.8.8.8', '::ffff:1.1.1.1']
     ALLOWED = ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']
 
     def test_table(self):
@@ -470,6 +472,56 @@ class ProxyTests(unittest.TestCase):
         resp = self.http_exchange(f'GET http://allowed.example.test:{self.http_port}/x HTTP/1.1\r\n\r\n'.encode())
         self.assertIn(b'403', resp.split(b'\r\n')[0])
         self.assertIn(b'host_address', resp)
+
+    def test_host_address_block_covers_mapped_and_nat64_forms(self):
+        # Review N2 (reviewer repro host_addr_mapped.py): the IPv4-mapped form of the
+        # host's own address reached host services.
+        import http.server as hs
+
+        class Host(hs.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'HOST-SERVICE-REACHED\n'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        host = hs.ThreadingHTTPServer(('127.0.0.1', 0), Host)
+        threading.Thread(target=host.serve_forever, daemon=True).start()
+        port = host.server_address[1]
+        try:
+            self.proxy.close()
+            # 127.0.0.1 stands in for the host's public IPv4 (allow_networks makes it "public").
+            self.proxy = self.make_proxy(allow_networks=[ipaddress.ip_network('127.0.0.0/8'),
+                                                         ipaddress.ip_network('::ffff:127.0.0.0/104')],
+                                         host_addresses=lambda: {'127.0.0.1'})
+            self.listener = self.proxy.listen_unix(self.path)
+            for target in ('127.0.0.1', '[::ffff:127.0.0.1]', '[::ffff:7f00:1]'):
+                resp = self.http_exchange(f'GET http://{target}:{port}/ HTTP/1.1\r\nHost: x\r\n\r\n'.encode())
+                self.assertIn(b' 403 ', resp.split(b'\r\n')[0] + b' ', target)
+                self.assertNotIn(b'HOST-SERVICE-REACHED', resp, target)
+            # Public stand-in: own address 8.8.8.8 in mapped and NAT64 form is refused before any connect.
+            self.proxy.close()
+            self.proxy = self.make_proxy(host_addresses=lambda: {'8.8.8.8'})
+            self.listener = self.proxy.listen_unix(self.path)
+            for target, reason in (('[::ffff:8.8.8.8]', b'blocked_address'), ('[64:ff9b::808:808]', b'host_address'),
+                                   ('8.8.8.8', b'host_address')):
+                resp = self.http_exchange(f'GET http://{target}/ HTTP/1.1\r\nHost: x\r\n\r\n'.encode())
+                self.assertIn(b' 403 ', resp.split(b'\r\n')[0] + b' ', target)
+                self.assertIn(reason, resp, target)
+        finally:
+            host.shutdown()
+            host.server_close()
+
+    def test_local_addresses_warns_when_proc_is_unreadable(self):
+        from terminal_proxy import local_addresses
+        warnings = []
+        found = local_addresses(os.path.join(self.dir, 'missing-fib'), os.path.join(self.dir, 'missing-inet6'), log=warnings.append)
+        self.assertEqual(found, set())
+        self.assertEqual(len(warnings), 2)
+        self.assertIn('not blocked', warnings[0])
 
     def test_local_addresses_reads_proc(self):
         from terminal_proxy import local_addresses

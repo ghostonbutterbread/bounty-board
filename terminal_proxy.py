@@ -37,7 +37,10 @@ NAT64 = ipaddress.ip_network('64:ff9b::/96')
 # Deprecated IPv6 forms that can embed or alias private space: IPv4-compatible
 # (::a.b.c.d), SIIT IPv4-translated (::ffff:0:a.b.c.d) and site-local fec0::/10.
 DEPRECATED_V6 = (ipaddress.ip_network('::/96'), ipaddress.ip_network('::ffff:0:0:0/96'), ipaddress.ip_network('fec0::/10'))
-EXPLICIT_BLOCKS = (CGNAT, TAILSCALE_V6, *DEPRECATED_V6)
+# IPv4-mapped (::ffff:a.b.c.d) reaches IPv4 through an AF_INET6 socket; clients
+# never need it, so it is refused outright (review N2).
+MAPPED_V6 = ipaddress.ip_network('::ffff:0:0/96')
+EXPLICIT_BLOCKS = (CGNAT, TAILSCALE_V6, MAPPED_V6, *DEPRECATED_V6)
 HANDSHAKE_DEADLINE = 20     # seconds for a whole request head or SOCKS handshake
 PER_LISTENER_CONNECTIONS = 24
 HOST_ADDRESS_REFRESH = 60
@@ -71,6 +74,16 @@ def _contains(net, ip):
     return ip.version == net.version and ip in net
 
 
+def embedded_ipv4(ip):
+    """IPv4 addresses an IPv6 address can lead to (mapped, NAT64, 6to4, Teredo)."""
+    if ip.version == 4:
+        return []
+    out = [ip.ipv4_mapped, ip.sixtofour, *(ip.teredo or ())]
+    if ip in NAT64:
+        out.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+    return [v4 for v4 in out if v4 is not None]
+
+
 def address_allowed(ip, allow_networks=()) -> bool:
     """True only for globally routable unicast addresses (plus test-only overrides)."""
     if not isinstance(ip, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
@@ -79,12 +92,8 @@ def address_allowed(ip, allow_networks=()) -> bool:
         return True
     if ip.is_multicast or not ip.is_global or any(_contains(n, ip) for n in EXPLICIT_BLOCKS):
         return False
-    if ip.version == 6:
-        embedded = [ip.ipv4_mapped, ip.sixtofour, *(ip.teredo or ())]
-        if ip in NAT64:
-            embedded.append(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
-        if any(v4 is not None and not address_allowed(v4) for v4 in embedded):
-            return False
+    if any(not address_allowed(v4) for v4 in embedded_ipv4(ip)):
+        return False
     return True
 
 
@@ -402,8 +411,11 @@ class FilteringProxy:
             addrs = resolve(host, port, allow_networks=self.allow_networks,
                             static_hosts=self.static_hosts, resolver=self.resolver)
             own = self.host_addresses()
-            if any(ipaddress.ip_address(sockaddr[0]) in own for _family, sockaddr in addrs):
-                raise Refused('host_address')
+            for _family, sockaddr in addrs:
+                ip = ipaddress.ip_address(sockaddr[0])
+                # Compare the address and every IPv4 it embeds (review N2).
+                if ip in own or any(v4 in own for v4 in embedded_ipv4(ip)):
+                    raise Refused('host_address')
             upstream = self._connect(addrs)
         except Refused as exc:
             self._log(f'{proto} {host!r}:{port} refused {exc.reason}')
@@ -523,8 +535,15 @@ class FilteringProxy:
         self._relay(conn, upstream)
 
 
-def local_addresses(fib_trie='/proc/net/fib_trie', if_inet6='/proc/net/if_inet6'):
-    """Every address assigned to this host (IPv4 LOCAL routes and IPv6 interface addresses)."""
+def _warn(message):
+    import sys
+    print(f'bbterm: {message}', file=sys.stderr, flush=True)
+
+
+def local_addresses(fib_trie='/proc/net/fib_trie', if_inet6='/proc/net/if_inet6', log=None):
+    """Every address assigned to this host (IPv4 LOCAL routes and IPv6 interface addresses).
+    Logs a warning when a source cannot be read (the own-address block is then incomplete)."""
+    log = log or _warn
     found = set()
     try:
         with open(fib_trie) as stream:
@@ -535,16 +554,16 @@ def local_addresses(fib_trie='/proc/net/fib_trie', if_inet6='/proc/net/if_inet6'
                     previous = text[3:].strip()
                 elif previous and '/32 host LOCAL' in text:
                     found.add(previous)
-    except OSError:
-        pass
+    except OSError as error:
+        log(f'cannot read {fib_trie} ({error.strerror}); host IPv4 addresses are not blocked by address')
     try:
         with open(if_inet6) as stream:
             for line in stream:
                 raw = line.split()[0] if line.strip() else ''
                 if len(raw) == 32:
                     found.add(str(ipaddress.IPv6Address(int(raw, 16))))
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as error:
+        log(f'cannot read {if_inet6} ({error}); host IPv6 addresses are not blocked by address')
     return found
 
 
