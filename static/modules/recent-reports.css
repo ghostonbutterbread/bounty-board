@@ -23,14 +23,32 @@
 /* Dashboard panel */
 .recent-dash .panel-head .button{text-decoration:none;flex:none}
 .recent-dash-list{list-style:none;margin:0;padding:0 var(--space-5) var(--space-3)}
-.recent-dash-list li{display:flex;align-items:center;gap:var(--space-3);padding:6px 0;border-bottom:1px solid var(--border);min-width:0}
+.recent-dash-list li{display:grid;grid-template-columns:minmax(0,1fr) var(--col-sev) var(--col-subm) var(--col-when) var(--col-na);align-items:center;column-gap:var(--space-3);padding:7px 6px;margin:0 -6px;border-bottom:1px solid var(--border);min-width:0}
+.recent-dash-list li:hover{background:var(--surface-2)}
+.recent-dash-list .frow-sev{grid-column:2}
+.recent-dash-list .frow-subm{grid-column:3}
+.recent-dash-list .recent-when{grid-column:4;justify-self:end}
+.recent-dash-list .recent-na{grid-column:5;justify-self:end}
 .recent-dash-list li:last-child{border-bottom:0}
-.recent-dash-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.recent-dash-main{grid-column:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .recent-dash-main .recent-link{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recent-where{font-size:var(--text-xs);color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recent-when{flex:none;font-size:var(--text-sm);color:var(--text-2);white-space:nowrap}
 @media(max-width:760px){
   .recent-toolbar .recent-filter{max-width:none;flex-basis:100%}
   .recent-report{max-width:none}
-  .recent-dash-list .sev{display:none}
 }
+@media(max-width:650px){
+  .recent-dash-list{padding-inline:var(--space-4)}
+  .recent-dash-list li{grid-template-columns:auto auto minmax(0,1fr) auto;row-gap:4px;column-gap:var(--space-2)}
+  .recent-dash-main{grid-column:1/-1}
+  .recent-dash-list .frow-sev{grid-column:1;grid-row:2}
+  .recent-dash-list .frow-subm{grid-column:2;grid-row:2}
+  .recent-dash-list .recent-when{grid-column:3;grid-row:2;justify-self:end}
+  .recent-dash-list .recent-na{grid-column:4;grid-row:2}
+}
+/* Recent view: finding ID with its pills; N/A toggle in the last column. */
+.recent-finding-cell{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.recent-table .id-link{font-family:var(--font-mono);font-size:var(--text-xs)}
+.recent-table td.recent-na,.recent-table th.recent-na{width:1%;text-align:right;white-space:nowrap}
+.recent-dash .panel-head .hint .na-hidden-note{margin-left:2px}

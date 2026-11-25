@@ -469,6 +469,7 @@
   state.sort=(s=>s && typeof s.key==='string' && ['title','severity','class','status','id','first_seen','last_seen'].includes(s.key) && ['asc','desc'].includes(s.dir) ? s : {key:'',dir:'asc'})(readStore('bounty-board-finding-sort',null));
   state.dashWork=readStore('bounty-board-dashboard-work','all')==='open' ? 'open' : 'all';
   state.classGroupBy=readStore('bounty-board-class-group','class')==='category' ? 'category' : 'class';
+  state.reportHideNa=readStore('bounty-board-report-list-hide-na',true)!==false;
   // Last-used program: recorded on explicit selection, offered on load.
   const recentPrograms = () => (readStore('bounty-board-recent-programs',[])||[]).filter(r=>r && typeof r.program==='string').slice(0,5);
   function markProgramUsed() {
@@ -816,7 +817,12 @@
       const report=reportIdFor(l,f);
       const target=`data-program="${esc(p.id)}" data-lane="${esc(l.name)}"`;
       // finding-actions hooks: row identity for selection/context menu, severity and submission pickers.
-      return `<li data-finding-row data-finding-id="${esc(f.id??'')}" data-program="${esc(p.id)}" data-lane="${esc(l.name)}" data-sev="${sevKey(f.severity)}">${kind!=='sev'?pickButton('sev',`Severity ${f.severity==null||f.severity===''?'not recorded':f.severity}. Change severity`,sevBadge(f.severity)):statusBadge(f.status)||''}<a class="link-button truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta">${kind==='cat' && f.class?`<span class="badge outline">${esc(f.class)}</span>`:''}<span class="id">${esc(f.id??'')}</span>${isArchived(f)?'<span class="badge outline">archive</span>':''}${window.BoardFindingActions?pickButton('submission',`Submission: ${submissionLabel(f)}. Change submission`,submissionBadge(f)):isNotSubmitted(f)?'<span class="badge outline">Not submitted</span>':''}${report?`<a class="link-button" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target}>${icon('file-text-o')} Report</a>`:''}</span></li>`;
+      // Row layout (feat/board-recent-actions), same rhythm as the Recent panel: title over a muted
+      // subline (ID, status, class, report markers) on the left, then one aligned cluster on the
+      // right: severity pill, submission pill, report/evidence icon links (.row-links).
+      const sub=[`<span class="id">${esc(f.id??'')}</span>`, f.status!=null && f.status!=='' && !isArchived(f) ? `<span>${esc(f.status)}</span>` : '', isArchived(f)?'<span class="badge outline">archive</span>':'', kind!=='class' && f.class?`<span class="frow-class">${esc(f.class)}</span>`:''].filter(Boolean).join('');
+      const reportNa=report && (l.reports||[]).some(r=>String(r.id)===String(report) && r.na===true);
+      return `<li data-finding-row class="frow" data-finding-id="${esc(f.id??'')}" data-program="${esc(p.id)}" data-lane="${esc(l.name)}" data-sev="${sevKey(f.severity)}"><span class="frow-main"><a class="link-button frow-title truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta frow-sub">${sub}</span></span><span class="frow-sev">${pickButton('sev',`Severity ${f.severity==null||f.severity===''?'not recorded':f.severity}. Change severity`,sevBadge(f.severity))}</span><span class="frow-subm">${window.BoardFindingActions?pickButton('submission',`Submission: ${submissionLabel(f)}. Change submission`,submissionBadge(f)):submissionBadge(f)}</span><span class="row-links">${report?`<a class="row-icon report-icon${reportNa?' is-na-link':''}" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target} aria-label="Report${reportNa?' (marked N/A)':''}: ${esc(report)}" data-tip="${reportNa?'Report (marked N/A on the Board)':'Open report'}: ${esc(report)}">${icon('file-text-o')}</a>`:''}</span></li>`;
     }).join('')}</ul></div>`).join('')}</div>`;
   }
   function breakdown(kind, groups, total) {
@@ -1062,15 +1068,18 @@
   function reportBrowser(all) {
     const program=currentProgram();if(!program)return '';
     const navCount=all.filter(r=>r.kind==='generated_navigation').length, showNav=state.reportNav===true;
-    const items=all.filter(r=>r.id!=null && (showNav || r.kind!=='generated_navigation')).sort((a,b)=>(typeof b.modified==='number'?b.modified:-1)-(typeof a.modified==='number'?a.modified:-1) || String(a.path??a.id).localeCompare(String(b.path??b.id)));
+    // Report N/A (report-na.js): marked rows are struck through and dimmed, hidden unless "Hide N/A" is off.
+    const naModule=window.BoardReportNa, hideNa=state.reportHideNa!==false;
+    const naCount=all.filter(r=>r.id!=null && (showNav || r.kind!=='generated_navigation') && r.na===true).length;
+    const items=all.filter(r=>r.id!=null && (showNav || r.kind!=='generated_navigation') && !(hideNa && r.na===true)).sort((a,b)=>(typeof b.modified==='number'?b.modified:-1)-(typeof a.modified==='number'?a.modified:-1) || String(a.path??a.id).localeCompare(String(b.path??b.id)));
     const open=readStore('bounty-board-report-list-open',true)!==false;
     const kinds={registered_report:'Registered',generated_report:'Generated',generated_evidence:'Evidence',generated_navigation:'Navigation',unregistered:'Unregistered'};
     const rowsHtml=items.map(r=>{
       const name=String(r.title || r.name || r.id), path=String(r.path ?? ''), owners=Array.isArray(r.owner_fids) ? r.owner_fids.map(String) : [];
       const when=relativeTime(r.modified);
-      return `<li data-report-row data-search="${esc([name,path,...owners].join(' ').toLowerCase())}"><a class="report-link" href="${esc(hrefFor({program:program.id,lane:state.lane,section:'reports',report:r.id}))}"${String(r.id)===state.report?' aria-current="page"':''}><span class="report-link-title">${esc(name)}</span>${path && path!==name?`<span class="report-link-path">${esc(path)}</span>`:''}</a><span class="report-link-meta">${owners.length?`<span class="id">${esc(owners[0])}</span>`:''}${kinds[r.kind]?`<span class="badge outline">${esc(kinds[r.kind])}</span>`:''}${when?`<time datetime="${esc(new Date(r.modified*1000).toISOString())}" title="${esc(absoluteTime(r.modified))}">${esc(when)}</time>`:''}</span></li>`;
+      return `<li data-report-row${r.na===true?' class="is-na"':''} data-search="${esc([name,path,...owners].join(' ').toLowerCase())}"><a class="report-link" href="${esc(hrefFor({program:program.id,lane:state.lane,section:'reports',report:r.id}))}"${String(r.id)===state.report?' aria-current="page"':''}><span class="report-link-title na-title">${esc(name)}</span>${path && path!==name?`<span class="report-link-path">${esc(path)}</span>`:''}</a><span class="report-link-meta">${owners.length?`<span class="id">${esc(owners[0])}</span>`:''}${kinds[r.kind]?`<span class="badge outline">${esc(kinds[r.kind])}</span>`:''}${when?`<time datetime="${esc(new Date(r.modified*1000).toISOString())}" title="${esc(absoluteTime(r.modified))}">${esc(when)}</time>`:''}${naModule && path?naModule.toggleHtml({program:program.id,lane:state.lane,path,na:r.na===true,label:name}):''}</span></li>`;
     }).join('');
-    return `<details class="report-browser" data-report-browser${open?' open':''}><summary>Reports in this lane <span class="count">${items.length}</span></summary><div class="report-browser-tools"><div class="input-icon">${icon('search')}<input id="report-filter" type="search" aria-label="Filter report list by name, path or finding" placeholder="Filter by name, path or finding" value="${esc(state.filters.reports||'')}" autocomplete="off"></div>${navCount?`<label class="report-nav-toggle"><input type="checkbox" id="report-nav-toggle"${showNav?' checked':''}> Show generated navigation (${navCount})</label>`:''}<span class="hint num" id="report-filter-count"></span></div>${items.length?`<ul class="report-links" aria-label="Report links">${rowsHtml}</ul>`:''}<p class="state" id="report-filter-empty"${items.length?' hidden':''}>${items.length?'No reports match this filter.':'Only generated navigation in this lane.'}</p><p class="hint">Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></details>`;
+    return `<details class="report-browser" data-report-browser data-na-scope="report-list"${open?' open':''}><summary>Reports in this lane <span class="count">${items.length}</span></summary><div class="report-browser-tools"><div class="input-icon">${icon('search')}<input id="report-filter" type="search" aria-label="Filter report list by name, path or finding" placeholder="Filter by name, path or finding" value="${esc(state.filters.reports||'')}" autocomplete="off"></div>${navCount?`<label class="report-nav-toggle"><input type="checkbox" id="report-nav-toggle"${showNav?' checked':''}> Show generated navigation (${navCount})</label>`:''}${naModule?`<label class="na-hide-toggle"><input type="checkbox" id="report-hide-na"${hideNa?' checked':''}> Hide N/A</label>${hideNa && naCount?`<span class="na-hidden-note">${naCount} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-report-show-na>Show</button></span>`:''}`:''}<span class="hint num" id="report-filter-count"></span></div>${items.length?`<ul class="report-links" aria-label="Report links">${rowsHtml}</ul>`:''}<p class="state" id="report-filter-empty"${items.length?' hidden':''}>${items.length?'No reports match this filter.':hideNa && naCount?'Every report here is marked N/A.':'Only generated navigation in this lane.'}</p><p class="hint">Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></details>`;
   }
   function applyReportFilter() {
     const input=app.querySelector('#report-filter');if(!input)return;
@@ -1717,6 +1726,7 @@
     navigate(route,{fromHistory:true});
   });
   app.addEventListener('click',event=>{
+    if(event.target.closest('[data-report-show-na]')){state.reportHideNa=false;writeStore('bounty-board-report-list-hide-na',false);render();app.querySelector('#report-hide-na')?.focus();return;}
     const tab=event.target.closest('a[data-section]');if(!tab || !plainClick(event))return;
     event.preventDefault();state.section=tab.dataset.section;state.highlight='';routePush=true;render();
   });
@@ -1834,6 +1844,7 @@
     else if(el.id==='report-select'){state.report=el.value;routePush=true;render();}
     else if(el.matches('[data-show-archived]')){state.showArchived=el.checked;try{localStorage.setItem('bounty-board-show-archived',String(el.checked));}catch{}render();app.querySelector('[data-show-archived]')?.focus();}
     else if(el.id==='report-nav-toggle'){state.reportNav=el.checked;render();app.querySelector('#report-nav-toggle')?.focus();}
+    else if(el.id==='report-hide-na'){state.reportHideNa=el.checked;writeStore('bounty-board-report-list-hide-na',el.checked);render();app.querySelector('#report-hide-na')?.focus();}
     else if(el.dataset.metadata)saveMetadata(el.dataset.metadata,el.dataset.id,el.value);
   });
   app.addEventListener('input',event=>{
@@ -1876,7 +1887,7 @@
   // Public UI helpers for feature modules (see style.css header for tokens).
   window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker, openPills, severityOptions,
     navigate:(route)=>navigate(route||{}), severityKey:sevKey, severityRank:sevRank, severityBadge:sevBadge,
-    statusBadge, submissionState, isNotSubmitted, icon, escape:esc, hrefFor, relativeTime, absoluteTime,
+    statusBadge, submissionState, isNotSubmitted, submissionBadge, submissionLabel, icon, escape:esc, hrefFor, relativeTime, absoluteTime,
     // provider(row, {program, lane}) returns extra row-menu items for a finding.
     registerFindingActions:provider=>{if(typeof provider==='function')findingActionProviders.push(provider);}});
   claimTab().then(load);

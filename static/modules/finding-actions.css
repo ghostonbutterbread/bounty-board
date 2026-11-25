@@ -40,7 +40,6 @@ td.has-select>.row-select{position:absolute;left:12px;top:13px}
 .toast .toast-action{border:1px solid var(--border-strong);background:var(--surface);color:var(--text);border-radius:var(--radius);padding:1px 8px;font-size:var(--text-sm);cursor:pointer}
 @media (max-width:640px){.selection-bar{left:8px;right:8px;transform:none;width:auto}}
 .toolbar label.archive-toggle{display:inline-flex;flex-direction:row;align-items:center;align-self:flex-end;min-height:32px}
-.drill li .meta{flex:0 1 auto;min-width:0;flex-wrap:wrap;justify-content:flex-end;row-gap:2px}
 .breakdown-row .label:has(.placeholder-badge){display:flex;align-items:center;gap:6px}
 .breakdown-row .label:has(.placeholder-badge) .sev{min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-block}
 .breakdown-row .label .placeholder-badge{flex:none}

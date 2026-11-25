@@ -13,7 +13,13 @@
  * &order=newest&nav=1&page=2) so a filtered view can be bookmarked or opened in
  * a new tab. Filter changes replace the URL, page changes push it. A link with a
  * query wins over the per-browser memory; unknown or invalid values fall back to
- * the defaults. Values are only parsed with URLSearchParams and escaped on output. */
+ * the defaults. Values are only parsed with URLSearchParams and escaped on output.
+ * Actions (feat/board-recent-actions): a report the server maps to a finding
+ * (item.finding) gets the shared severity and submission pills
+ * (BoardFindingActions, same write paths, revisions and Undo) and a context
+ * menu; every row gets the N/A toggle (report-na.js). N/A rows are hidden by
+ * default ("Hide N/A", hide_na=1 on the request, `na=show` in the URL when off),
+ * with "N hidden · Show". */
 (() => {
   'use strict';
   const PREFS = 'bounty-board-recent-reports';
@@ -23,9 +29,13 @@
   const DEFAULT_WINDOW = '7d';
   const MAX_PAGE = 20000; // the server accepts offsets up to 1,000,000
   let ctx = null;
-  const view = {window: DEFAULT_WINDOW, programs: [], lane: '', q: '', order: 'newest', nav: false, offset: 0,
+  const view = {window: DEFAULT_WINDOW, programs: [], lane: '', q: '', order: 'newest', nav: false, hideNa: true, offset: 0,
     data: null, at: 0, source: null, loading: false, error: '', seq: 0, controller: null, retry: 0, timer: 0, qTimer: 0};
-  const panel = {data: null, at: 0, source: null, loading: false, error: '', seq: 0, waitTimer: 0, waited: 0, retry: 0};
+  const panel = {data: null, at: 0, source: null, loading: false, error: '', seq: 0, waitTimer: 0, waited: 0, retry: 0, showNa: false};
+  // Rows for mapped findings that are not in the loaded workspace data yet
+  // (cold start): one shared object per finding, so the view and the panel
+  // show the same values after a save.
+  const fallback = new Map();
 
   try {
     const saved = JSON.parse(localStorage.getItem(PREFS) || 'null');
@@ -33,11 +43,12 @@
       if (WINDOWS.some(([k]) => k === saved.window)) view.window = saved.window;
       if (saved.order === 'oldest') view.order = 'oldest';
       view.nav = saved.nav === true;
+      view.hideNa = saved.hideNa !== false;
       if (Array.isArray(saved.programs)) view.programs = saved.programs.filter(p => typeof p === 'string').slice(0, 100);
       if (LANES.includes(saved.lane)) view.lane = saved.lane;
     }
   } catch {}
-  const savePrefs = () => { try { localStorage.setItem(PREFS, JSON.stringify({window: view.window, order: view.order, nav: view.nav, programs: view.programs, lane: view.lane})); } catch {} };
+  const savePrefs = () => { try { localStorage.setItem(PREFS, JSON.stringify({window: view.window, order: view.order, nav: view.nav, hideNa: view.hideNa, programs: view.programs, lane: view.lane})); } catch {} };
 
   // ---- URL state -----------------------------------------------------------
   function queryFor() {
@@ -47,6 +58,7 @@
     if (view.q.trim()) params.set('q', view.q.trim().slice(0, 200));
     params.set('order', view.order);
     if (view.nav) params.set('nav', '1');
+    if (!view.hideNa) params.set('na', 'show');
     const page = Math.floor(view.offset / PAGE) + 1;
     if (page > 1) params.set('page', String(page));
     return params.toString();
@@ -62,6 +74,7 @@
     view.q = clean(params.get('q') || '').slice(0, 200);
     view.order = params.get('order') === 'oldest' ? 'oldest' : 'newest';
     view.nav = params.get('nav') === '1';
+    view.hideNa = params.get('na') !== 'show';
     const page = /^[0-9]{1,6}$/.test(params.get('page') || '') ? Number(params.get('page')) : 1;
     view.offset = page > 1 && page <= MAX_PAGE ? (page - 1) * PAGE : 0;
   }
@@ -86,8 +99,32 @@
   };
   const reportHref = item => ctx.hrefFor(item.target || {program: item.program, lane: item.lane, section: 'reports', report: item.path});
   const programHref = item => ctx.hrefFor({program: item.program, lane: item.lane, section: 'findings'});
+  // ---- finding actions on mapped rows ------------------------------------
+  const FA = () => window.BoardFindingActions;
+  const NA = () => window.BoardReportNa;
+  function entryFor(item) {
+    const f = item.finding; if (!f || !f.fid) return null;
+    const loaded = FA()?.entry?.(item.program, item.lane, f.fid);
+    if (loaded) return loaded;
+    const key = JSON.stringify([String(item.program), String(item.lane), String(f.fid)]);
+    if (!fallback.has(key)) fallback.set(key, {...f, id: f.fid});
+    return {key, program: {id: item.program, name: item.program_name, family: item.family}, lane: {name: item.lane, findings: []}, row: fallback.get(key)};
+  }
+  // Fresh server values replace the cold-start copies (a save refreshes the index first).
+  function adopt(body) {
+    for (const item of body.items || []) if (item.finding?.fid && !FA()?.entry?.(item.program, item.lane, item.finding.fid))
+      fallback.set(JSON.stringify([String(item.program), String(item.lane), String(item.finding.fid)]), {...item.finding, id: item.finding.fid});
+  }
+  const pickHtml = (item, kind) => {
+    const row = entryFor(item)?.row; if (!row) return '';
+    const attrs = `data-recent-pick="${kind}" data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-fid="${esc(row.id)}" aria-haspopup="menu" aria-expanded="false"`;
+    if (kind === 'sev') return `<button type="button" class="pick-trigger" ${attrs} aria-label="Severity ${esc(row.severity || 'not recorded')}. Change severity of ${esc(row.id)}">${ui().severityBadge(row.severity)}</button>`;
+    const label = ui().submissionLabel ? ui().submissionLabel(row) : '';
+    return `<button type="button" class="pick-trigger" ${attrs} aria-label="Submission: ${esc(label)}. Change submission of ${esc(row.id)}">${ui().submissionBadge ? ui().submissionBadge(row) : esc(label)}</button>`;
+  };
+  const naHtml = item => NA() ? NA().toggleHtml({program: item.program, lane: item.lane, path: item.path, na: item.na === true, label: item.title || item.name, disabled: item.naAvailable === false ? true : null}) : '';
   const findingCell = item => item.finding
-    ? `<a class="link-button" href="${esc(ctx.hrefFor({program: item.program, lane: item.lane, section: 'findings', finding: item.finding.fid}))}" title="${esc(item.finding.title || '')}">${esc(item.finding.fid)}</a> ${ui().severityBadge(item.finding.severity)}`
+    ? `<span class="recent-finding-cell"><a class="link-button id-link" href="${esc(ctx.hrefFor({program: item.program, lane: item.lane, section: 'findings', finding: item.finding.fid}))}" title="${esc(item.finding.title || '')}">${esc(item.finding.fid)}</a>${pickHtml(item, 'sev')}${pickHtml(item, 'sub')}</span>`
     : (item.owner_fids && item.owner_fids.length ? `<span class="id">${esc(item.owner_fids[0])}</span>` : '<span class="hint">None</span>');
   const programLabel = id => { const p = ctx.programs().find(x => String(x.id) === id); return p ? String(p.name || p.id) : id.split('/').slice(1).join('/') || id; };
 
@@ -96,6 +133,8 @@
     if (!response.ok) { const error = new Error('recent reports failed'); error.status = response.status; throw error; }
     const body = await response.json();
     body.receivedAt = Date.now();
+    for (const item of body.items || []) item.naAvailable = body.na_available !== false;
+    adopt(body);
     return body;
   }
 
@@ -108,6 +147,7 @@
     if (view.lane) params.set('lane', view.lane);
     if (view.q.trim()) params.set('q', view.q.trim().slice(0, 200));
     if (view.nav) params.set('nav', '1');
+    if (view.hideNa) params.set('hide_na', '1');
     return params;
   }
   async function loadView({quiet = false} = {}) {
@@ -146,6 +186,7 @@
       <div class="input-icon recent-filter">${icon('search')}<input id="recent-filter" type="search" aria-label="Filter recent reports by title or path" placeholder="Filter by title or path" value="${esc(view.q)}" autocomplete="off"></div>
       <button type="button" class="button sm" data-recent-order aria-label="Sort: ${view.order === 'oldest' ? 'oldest first' : 'newest first'}">${icon(view.order === 'oldest' ? 'sort-amount-asc' : 'sort-amount-desc')}<span>${view.order === 'oldest' ? 'Oldest first' : 'Newest first'}</span></button>
       <label class="recent-nav"><input type="checkbox" id="recent-nav"${view.nav ? ' checked' : ''}> Include generated navigation</label>
+      <label class="recent-nav na-hide-toggle"><input type="checkbox" id="recent-hide-na"${view.hideNa ? ' checked' : ''}> Hide N/A</label>
       <button type="button" class="button sm" data-recent-refresh>${icon('refresh')}<span>Refresh list</span></button>
     </div>${chips || filtered ? `<div class="chips">${chips}${filtered ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>` : ''}`;
   }
@@ -155,42 +196,59 @@
       const first = d.total ? d.offset + 1 : 0, last = d.offset + d.items.length;
       bits.push(d.total ? `Showing ${first} to ${last} of ${d.total} ${d.total === 1 ? 'report' : 'reports'}` : 'No reports match');
       if (d.index_state === 'building') bits.push('the report index is still building, so the list may be incomplete');
+      if (d.na_available === false) bits.push('N/A marks are unavailable');
       if (ctx.state.data?.root_instance && d.root_instance && ctx.state.data.root_instance !== d.root_instance) bits.push('the data root changed: refresh the board');
     }
     if (view.loading) bits.push(d ? 'updating' : 'Loading recent reports');
-    return `${esc(bits.join('. '))}${bits.length ? '.' : ''}${view.error ? ` <span class="recent-error">${esc(view.error)}</span>` : ''}`;
+    const hidden = view.hideNa && d?.na_hidden > 0 ? ` <span class="na-hidden-note">${d.na_hidden} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-recent-show-na>Show</button></span>` : '';
+    return `${esc(bits.join('. '))}${bits.length ? '.' : ''}${hidden}${view.error ? ` <span class="recent-error">${esc(view.error)}</span>` : ''}`;
   }
   function resultsHtml() {
     const d = view.data;
     if (!d) return view.error ? '' : '<div class="state">Loading recent reports…</div>';
-    if (!d.items.length) return `<div class="empty">${icon('inbox')}<strong>${d.index_state === 'building' ? 'Indexing reports…' : 'No reports match these filters.'}</strong>${view.programs.length || view.lane || view.q || view.window !== DEFAULT_WINDOW ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>`;
-    const rows = d.items.map(item => `<tr data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}">
-      <td class="recent-report"><a class="recent-link" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-path">${esc(item.path)}</span></td>
+    if (!d.items.length) return `<div class="empty">${icon('inbox')}<strong>${d.index_state === 'building' ? 'Indexing reports…' : view.hideNa && d.na_hidden ? 'Every matching report is marked N/A.' : 'No reports match these filters.'}</strong>${view.programs.length || view.lane || view.q || view.window !== DEFAULT_WINDOW ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>`;
+    const rows = d.items.map(item => `<tr data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}>
+      <td class="recent-report"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-path">${esc(item.path)}</span></td>
       <td><a class="link-button" href="${esc(programHref(item))}">${esc(item.program_name)}</a><span class="id">${esc(item.family)}</span></td>
       <td>${esc(item.lane)}</td>
       <td class="recent-finding">${findingCell(item)}</td>
-      <td class="date">${timeCell(item.modified, d)}</td></tr>`).join('');
+      <td class="date">${timeCell(item.modified, d)}</td>
+      <td class="recent-na">${naHtml(item)}</td></tr>`).join('');
     const page = Math.floor(d.offset / PAGE) + 1, pages = Math.max(1, Math.ceil(d.total / PAGE));
     const pager = pages > 1 ? `<nav class="recent-pager" aria-label="Recent reports pages"><button type="button" class="button sm" data-recent-page="-1"${d.offset ? '' : ' disabled'}>${icon('angle-left')}<span>Previous</span></button><span class="hint num">Page ${page} of ${pages}</span><button type="button" class="button sm" data-recent-page="1"${d.offset + PAGE < d.total ? '' : ' disabled'}><span>Next</span>${icon('angle-right')}</button></nav>` : '';
-    return `<div class="table-wrap"><table class="recent-table"><thead><tr><th>Report</th><th>Program</th><th>Lane</th><th>Finding</th><th class="date">Modified</th></tr></thead><tbody>${rows}</tbody></table></div>${pager}`;
+    return `<div class="table-wrap"><table class="recent-table"><thead><tr><th>Report</th><th>Program</th><th>Lane</th><th>Finding</th><th class="date">Modified</th><th class="recent-na"><span class="sr-only">N/A</span></th></tr></thead><tbody>${rows}</tbody></table></div>${pager}`;
+  }
+  // Background refreshes repaint rows; keep keyboard focus on the same control.
+  function keepFocus(box, paint) {
+    const active = document.activeElement;
+    if (!box || !active || !box.contains(active)) return paint();
+    const row = active.closest('[data-recent-row]');
+    const which = active.matches('[data-na-toggle]') ? '[data-na-toggle]' : active.dataset.recentPick ? `[data-recent-pick="${active.dataset.recentPick}"]` : active.matches('a.recent-link') ? 'a.recent-link' : null;
+    const path = row?.dataset.path, program = row?.dataset.program, lane = row?.dataset.lane;
+    paint();
+    if (!which || path == null || box.contains(document.activeElement)) return;
+    const again = [...box.querySelectorAll('[data-recent-row]')].find(r => r.dataset.path === path && r.dataset.program === program && r.dataset.lane === lane);
+    again?.querySelector(which)?.focus();
   }
   function paintControls() { const box = ctx.app.querySelector('[data-recent-controls]'); if (box) box.innerHTML = controlsHtml(); }
   function paintStatus() { const box = ctx.app.querySelector('[data-recent-status]'); if (box) box.innerHTML = statusHtml(); }
   function paintView() {
     paintStatus();
-    const box = ctx.app.querySelector('[data-recent-results]'); if (box) box.innerHTML = resultsHtml();
+    const box = ctx.app.querySelector('[data-recent-results]'); if (box) keepFocus(box, () => { box.innerHTML = resultsHtml(); });
   }
   function mountView(host) {
     const linked = ctx.state.recentQuery;
     const fromLink = typeof linked === 'string' && linked !== '' && linked !== queryFor();
     if (fromLink) { applyQuery(linked); view.retry = 0; }
     writeUrl();
-    host.innerHTML = `<section class="panel recent-panel" aria-label="Recent reports list"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">Ordered by file modification time. Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
-    host.onclick = onViewClick; host.onchange = onViewChange; host.oninput = onViewInput;
+    host.innerHTML = `<section class="panel recent-panel" aria-label="Recent reports list" data-na-scope="recent-view"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">Ordered by file modification time. Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
+    host.onclick = onViewClick; host.onchange = onViewChange; host.oninput = onViewInput; host.oncontextmenu = onRowMenu; host.onkeydown = onRowKey;
     if (fromLink || !view.data || view.source !== ctx.state.data || Date.now() - view.at > 10000) { view.retry = 0; loadView(); }
   }
   function onViewClick(event) {
     const t = event.target.closest('button'); if (!t) return;
+    if (t.dataset.recentPick) return openPick(t);
+    if (t.hasAttribute('data-recent-show-na')) { view.hideNa = false; changed(); ctx.app.querySelector('#recent-hide-na')?.focus(); return; }
     if (t.dataset.recentWindow) { view.window = t.dataset.recentWindow; changed(); }
     else if (t.hasAttribute('data-recent-order')) { view.order = view.order === 'oldest' ? 'newest' : 'oldest'; changed(); ctx.app.querySelector('[data-recent-order]')?.focus(); }
     else if (t.hasAttribute('data-recent-refresh')) { view.retry = 0; loadView(); }
@@ -205,6 +263,7 @@
   function onViewChange(event) {
     if (event.target.id === 'recent-lane') { view.lane = event.target.value; changed(); ctx.app.querySelector('#recent-lane')?.focus(); }
     else if (event.target.id === 'recent-nav') { view.nav = event.target.checked; changed(); ctx.app.querySelector('#recent-nav')?.focus(); }
+    else if (event.target.id === 'recent-hide-na') { view.hideNa = event.target.checked; changed(); ctx.app.querySelector('#recent-hide-na')?.focus(); }
   }
   function onViewInput(event) {
     if (event.target.id !== 'recent-filter') return;
@@ -245,7 +304,7 @@
     const mine = ++panel.seq;
     panel.loading = true; panel.source = ctx.state.data;
     try {
-      const body = await fetchRecent(new URLSearchParams({limit: '8', order: 'newest'}));
+      const body = await fetchRecent(new URLSearchParams({limit: '8', order: 'newest', ...(panel.showNa ? {} : {hide_na: '1'})}));
       if (mine !== panel.seq) return;
       panel.data = body; panel.at = Date.now(); panel.error = '';
       if (body.index_state === 'building' && panel.retry++ < 120) setTimeout(() => { if (mine === panel.seq) loadPanel(); }, 1000);
@@ -260,17 +319,21 @@
   }
   function panelHtml() {
     const d = panel.data;
+    const row = item => `<li data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}><span class="recent-dash-main"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}</span></span><span class="frow-sev">${pickHtml(item, 'sev')}</span><span class="frow-subm">${pickHtml(item, 'sub')}</span><span class="recent-when">${timeCell(item.modified, d)}</span><span class="recent-na">${naHtml(item)}</span></li>`;
     const body = !d ? `<div class="state">${panel.error ? esc(panel.error) : 'Loading recent reports…'}</div>`
-      : !d.items.length ? `<div class="state">${d.index_state === 'building' ? 'Indexing reports…' : 'No reports found.'}</div>`
-        : `<ul class="recent-dash-list">${d.items.map(item => `<li data-recent-row data-path="${esc(item.path)}"><span class="recent-dash-main"><a class="recent-link" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}</span></span>${item.finding ? ui().severityBadge(item.finding.severity) : ''}<span class="recent-when">${timeCell(item.modified, d)}</span></li>`).join('')}</ul>`;
-    return `<section class="panel recent-dash" aria-label="Recently updated reports"><div class="panel-head"><div><h2>Recently updated reports</h2><p class="hint">Newest first across all programs${d?.index_state === 'building' ? '; the report index is still building' : ''}.</p></div><a class="button sm" href="${esc(ctx.hrefFor({view: 'recent', query: `within=${DEFAULT_WINDOW}&order=newest`}))}">${icon('clock-o')}<span>View all</span></a></div>${body}</section>`;
+      : !d.items.length ? `<div class="state">${d.index_state === 'building' ? 'Indexing reports…' : d.na_hidden ? 'Every recent report is marked N/A.' : 'No reports found.'}</div>`
+        : `<ul class="recent-dash-list">${d.items.map(row).join('')}</ul>`;
+    const hidden = !d ? '' : panel.showNa ? '<span class="na-hidden-note"><button type="button" class="link-button" data-recent-panel-na="hide">Hide N/A</button></span>'
+      : d.na_hidden_page > 0 || (!d.items.length && d.na_hidden > 0) ? `<span class="na-hidden-note">${d.na_hidden_page || d.na_hidden} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-recent-panel-na="show">show</button></span>` : '';
+    return `<section class="panel recent-dash" aria-label="Recently updated reports" data-na-scope="recent-panel"><div class="panel-head"><div><h2>Recently updated reports</h2><p class="hint">Newest first across all programs${d?.index_state === 'building' ? '; the report index is still building' : ''}.${hidden ? ' ' : ''}${hidden}</p></div><a class="button sm" href="${esc(ctx.hrefFor({view: 'recent', query: `within=${DEFAULT_WINDOW}&order=newest`}))}">${icon('clock-o')}<span>View all</span></a></div>${body}</section>`;
   }
-  function paintPanel() { const host = ctx.app.querySelector('#dashboard-recent-host'); if (host) host.innerHTML = panelHtml(); }
+  function paintPanel() { const host = ctx.app.querySelector('#dashboard-recent-host'); if (host) keepFocus(host, () => { host.innerHTML = panelHtml(); }); }
   // The panel never delays the dashboard's first paint: it renders from cache
   // and fetches afterwards, once the workspace's own report load has settled
   // (or after 4 s at most).
   function mountPanel(host) {
     host.innerHTML = panelHtml();
+    host.onclick = onPanelClick; host.oncontextmenu = onRowMenu; host.onkeydown = onRowKey;
     const stale = !panel.data || panel.source !== ctx.state.data || Date.now() - panel.at > 60000;
     if (!stale || panel.loading || panel.waitTimer) return;
     const attempt = () => {
@@ -282,6 +345,95 @@
     };
     panel.waitTimer = setTimeout(attempt, 0);
   }
+
+  // ---- row actions ---------------------------------------------------------
+  function onPanelClick(event) {
+    const t = event.target.closest('button'); if (!t) return;
+    if (t.dataset.recentPick) return openPick(t);
+    if (t.dataset.recentPanelNa) {
+      panel.showNa = t.dataset.recentPanelNa === 'show'; panel.retry = 0;
+      loadPanel().then(() => ctx.app.querySelector('#dashboard-recent-host [data-recent-panel-na]')?.focus());
+    }
+  }
+  // The item behind a row: the same report may be in the view and the panel.
+  function itemFor(node) {
+    const row = node?.closest?.('[data-recent-row]'); if (!row) return null;
+    const list = row.closest('#dashboard-recent-host') ? panel.data?.items : view.data?.items;
+    return (list || []).find(i => i.path === row.dataset.path && String(i.program) === row.dataset.program && String(i.lane) === row.dataset.lane) || null;
+  }
+  function refocus(selector) { return () => requestAnimationFrame(() => ctx.app.querySelector(selector)?.focus()); }
+  const pickSelector = (item, kind, scope) => `${scope} [data-recent-pick="${kind}"][data-program="${CSS.escape(String(item.program))}"][data-lane="${CSS.escape(String(item.lane))}"][data-fid="${CSS.escape(String(item.finding.fid))}"]`;
+  function openPick(button) {
+    const item = itemFor(button), entry = item && entryFor(item);
+    if (!entry || !FA()) return;
+    const scope = button.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : '#recent-reports-host';
+    const kind = button.dataset.recentPick;
+    FA()[kind === 'sev' ? 'severityPills' : 'submissionPills'](button, [entry], refocus(pickSelector(item, kind, scope)));
+  }
+  function pointAnchor(x, y) {
+    const anchor = document.createElement('span');
+    anchor.className = 'point-anchor'; anchor.setAttribute('aria-hidden', 'true');
+    anchor.style.left = `${Math.round(x)}px`; anchor.style.top = `${Math.round(y)}px`;
+    (document.querySelector('#ui-layer') || document.body).append(anchor);
+    return anchor;
+  }
+  // Report-centred menu; the finding parts reuse the finding-actions pickers.
+  function openRowMenu(node, x, y) {
+    const item = itemFor(node); if (!item) return;
+    const entry = entryFor(item), fa = FA();
+    const scope = node.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : '#recent-reports-host';
+    const focusBack = () => node.isConnected ? node.querySelector('a.recent-link')?.focus() : null;
+    const at = () => pointAnchor(x, y);
+    const openTab = href => window.open(new URL(href, location.href).href, '_blank', 'noopener');
+    const naOff = !NA() || item.naAvailable === false || !NA().available();
+    const items = [{heading: item.finding ? `${item.finding.fid} · ${item.name}` : item.name},
+      {label: 'Open report in new tab', icon: 'external-link', onSelect: () => openTab(reportHref(item))}];
+    if (entry) {
+      items.push({label: 'Open finding', icon: 'bug', onSelect: () => ctx.navigate({program: item.program, lane: item.lane, section: 'findings', finding: String(entry.row.id)})},
+        {separator: true},
+        {label: 'Change severity…', icon: 'signal', disabled: !fa?.canEdit('severity'), onSelect: () => fa.severityPills(at(), [entry], refocus(pickSelector(item, 'sev', scope)))},
+        {label: 'Submission…', icon: 'paper-plane-o', disabled: !fa?.canSubmit(), onSelect: () => fa.submissionPills(at(), [entry], refocus(pickSelector(item, 'sub', scope)))},
+        {label: 'Copy ID', icon: 'clipboard', onSelect: () => fa.copyIds([entry])});
+      if (!fa?.canEdit('severity')) items.splice(1, 0, {heading: fa?.OFF_HINT || ''});
+    }
+    items.push({separator: true}, {label: item.na ? 'Unmark N/A' : 'Mark N/A', icon: 'check', disabled: naOff,
+      onSelect: () => NA().set(item.program, item.lane, item.path, !item.na, {focusKey: scope === '#dashboard-recent-host' ? 'recent-panel' : 'recent-view'})});
+    const anchor = pointAnchor(x, y);
+    ui().openMenu(anchor, items, {label: `Actions for ${item.title || item.name}`, reanchor: () => null, onClose: () => { anchor.remove(); focusBack(); }});
+    document.querySelector('.menu-popover')?.classList.add('context-menu');
+    window.dispatchEvent(new Event('resize'));
+  }
+  let keyboardMenuAt = 0;
+  function onRowMenu(event) {
+    if (Date.now() - keyboardMenuAt < 1000 && document.querySelector('#ui-layer .context-menu')) { event.preventDefault(); return; }
+    if (event.shiftKey) return; // Shift+right-click keeps the browser menu.
+    const node = event.target.closest('[data-recent-row]'); if (!node || event.target.closest('input, select, textarea')) return;
+    event.preventDefault();
+    const r = node.getBoundingClientRect(), keyboard = event.clientX === 0 && event.clientY === 0;
+    openRowMenu(node, keyboard ? r.left + 24 : event.clientX, keyboard ? r.bottom : event.clientY);
+  }
+  function onRowKey(event) {
+    if (!(event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) return;
+    const node = event.target.closest('[data-recent-row]'); if (!node) return;
+    event.preventDefault(); keyboardMenuAt = Date.now();
+    const r = node.getBoundingClientRect();
+    openRowMenu(node, r.left + 24, r.bottom);
+  }
+  // A saved N/A mark (report-na.js): update both lists now, then refetch so
+  // totals and paging match the server.
+  window.addEventListener('board-report-na', event => {
+    const {program, lane, path, na} = event.detail || {};
+    for (const [d, hide] of [[view.data, view.hideNa], [panel.data, !panel.showNa]]) {
+      if (!d) continue;
+      const index = d.items.findIndex(i => i.path === path && String(i.program) === program && String(i.lane) === lane);
+      if (index < 0) continue;
+      d.items[index].na = na;
+      if (hide && na) { d.items.splice(index, 1); d.total = Math.max(0, d.total - 1); d.na_hidden = (d.na_hidden || 0) + 1; d.na_hidden_page = (d.na_hidden_page || 0) + 1; }
+    }
+    if (!ctx) return;
+    if (ctx.app.querySelector('#recent-reports-host')) { paintView(); loadView({quiet: true}); }
+    if (ctx.app.querySelector('#dashboard-recent-host')) { paintPanel(); loadPanel(); }
+  });
 
   // Keep an open view or panel current while the tab is visible.
   setInterval(() => {

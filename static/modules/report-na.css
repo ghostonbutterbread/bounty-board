@@ -1,0 +1,15 @@
+/* Report N/A marker (report-na.js): compact check-style toggle and the
+   struck-through, dimmed row. Rows stay readable and clickable. */
+.na-toggle{flex:none;display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 6px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface);color:var(--text-3);font:inherit;font-size:var(--text-xs);font-weight:600;line-height:1;cursor:pointer;white-space:nowrap}
+.na-toggle .fa{font-size:11px;opacity:.35}
+.na-toggle:hover:not(:disabled){color:var(--text);border-color:var(--text-3)}
+.na-toggle:hover:not(:disabled) .fa{opacity:.8}
+.na-toggle:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.na-toggle[aria-pressed="true"]{background:var(--text-2);border-color:var(--text-2);color:var(--surface)}
+.na-toggle[aria-pressed="true"] .fa{opacity:1}
+.na-toggle:disabled{cursor:not-allowed;opacity:.5}
+.is-na{opacity:.45;transition:opacity var(--dur) var(--ease)}
+.is-na:hover,.is-na:focus-within{opacity:.8}
+.is-na .na-title{text-decoration:line-through;text-decoration-thickness:1px}
+.na-hidden-note{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--text-3)}
+.na-hide-toggle{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--text-2);white-space:nowrap}

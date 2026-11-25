@@ -378,10 +378,12 @@
   const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   function reportInfo(entry) {
     const {lane, row} = entry;
-    if (ctx.reportIdFor?.(lane, row)) return {linked: ctx.reportIdFor(lane, row)};
     const reports = Array.isArray(lane.reports) ? lane.reports : null;
-    if (!reports || (Array.isArray(lane.warnings) && lane.warnings.some(w => typeof w === 'string' && w.startsWith('reports_')))) return null;
     const fid = String(row.id), pattern = new RegExp(`(^|[^a-z0-9])${escapeRe(fid)}([^a-z0-9]|$)`, 'i');
+    const linked = ctx.reportIdFor?.(lane, row);
+    // Evidence beside a linked report (BBH packets hold both) when it is a different file.
+    if (linked) return {linked, evidence: reports?.find(r => r.kind === 'generated_evidence' && String(r.id) !== String(linked) && pattern.test(String(r.path || ''))) || null};
+    if (!reports || (Array.isArray(lane.warnings) && lane.warnings.some(w => typeof w === 'string' && w.startsWith('reports_')))) return null;
     const possible = reports.find(r => POSSIBLE_KINDS.has(r.kind) && pattern.test(String(r.path || '')));
     const evidence = reports.find(r => r.kind === 'generated_evidence' && pattern.test(String(r.path || '')));
     const recorded = typeof row.report_path === 'string' && row.report_path.trim();
@@ -539,19 +541,27 @@
       node.dataset.placeholder = 'true';
       meta.insertAdjacentHTML('afterbegin', '<span class="badge outline placeholder-badge" tabindex="0" data-tip="Unfilled schema example from the ledger template. Select these, delete (archive), then delete permanently.">Template placeholder</span>');
     }
+    // Dashboard rows (.frow) keep report markers in their right-hand icon
+    // column (.row-links) and the actionable "Possible report" in the subline.
+    const links = node.querySelector('.row-links');
     const info = reportInfo(entry);
+    const program = entry.program.id, lane = entry.lane.name;
     if (info && !info.linked) {
-      const program = entry.program.id, lane = entry.lane.name;
-      let html = `<span class="report-missing" tabindex="0" data-tip="${esc(info.reason)}" aria-label="${esc(info.reason)}"><i class="fa fa-file-o" aria-hidden="true"></i>No report</span>`;
+      const missing = links
+        ? `<span class="report-missing row-icon" tabindex="0" data-tip="${esc(info.reason)}" aria-label="${esc(info.reason)}"><i class="fa fa-file-o" aria-hidden="true"></i></span>`
+        : `<span class="report-missing" tabindex="0" data-tip="${esc(info.reason)}" aria-label="${esc(info.reason)}"><i class="fa fa-file-o" aria-hidden="true"></i>No report</span>`;
+      (links || meta).insertAdjacentHTML(links ? 'afterbegin' : 'beforeend', missing);
       if (info.possible) {
         const tip = `Unlinked: ${info.possible.path} is a report file in this lane with this finding ID in its path. The ledger does not link it.`;
-        html += `<a class="possible-report" href="${esc(ctx.hrefFor({program, lane, section: 'reports', report: info.possible.id ?? info.possible.path}))}" data-tip="${esc(tip)}" aria-label="Possible report, unlinked: ${esc(info.possible.path)}"><i class="fa fa-question-circle-o" aria-hidden="true"></i>Possible report</a>`;
+        meta.insertAdjacentHTML('beforeend', `<a class="possible-report" href="${esc(ctx.hrefFor({program, lane, section: 'reports', report: info.possible.id ?? info.possible.path}))}" data-tip="${esc(tip)}" aria-label="Possible report, unlinked: ${esc(info.possible.path)}"><i class="fa fa-question-circle-o" aria-hidden="true"></i>Possible report</a>`);
       }
-      if (info.evidence) {
-        const tip = `Generated evidence file for this finding: ${info.evidence.path}. The ledger links it as evidence, not as the report.`;
-        html += `<a class="evidence-report" href="${esc(ctx.hrefFor({program, lane, section: 'reports', report: info.evidence.id ?? info.evidence.path}))}" data-tip="${esc(tip)}" aria-label="Evidence: ${esc(info.evidence.path)}"><i class="fa fa-file-text-o" aria-hidden="true"></i>Evidence</a>`;
-      }
-      meta.insertAdjacentHTML('beforeend', html);
+    }
+    if (info?.evidence) {
+      const tip = `Generated evidence file for this finding: ${info.evidence.path}. The ledger links it as evidence, not as the report.`;
+      const href = esc(ctx.hrefFor({program, lane, section: 'reports', report: info.evidence.id ?? info.evidence.path}));
+      (links || meta).insertAdjacentHTML('beforeend', links
+        ? `<a class="evidence-report row-icon" href="${href}" data-tip="${esc(tip)}" aria-label="Evidence: ${esc(info.evidence.path)}"><i class="fa fa-paperclip" aria-hidden="true"></i></a>`
+        : `<a class="evidence-report" href="${href}" data-tip="${esc(tip)}" aria-label="Evidence: ${esc(info.evidence.path)}"><i class="fa fa-file-text-o" aria-hidden="true"></i>Evidence</a>`);
     }
   }
   function decorateLists() {
@@ -732,5 +742,9 @@
     },
   });
   // Entry points and helpers for tests and other modules.
-  window.BoardFindingActions = {selected: () => [...selected], clearSelection, isPlaceholder, SEVERITIES};
+  // entry(): a loaded finding as {key, program, lane, row}, or null. The pickers
+  // and copyIds are reused by recent-reports.js for mapped report rows.
+  window.BoardFindingActions = {selected: () => [...selected], clearSelection, isPlaceholder, SEVERITIES,
+    entry: (programId, lane, fid) => ctx ? resolve(keyOf(programId, lane, fid)) : null, keyOf,
+    severityPills, submissionPills, copyIds, submission, canEdit, canSubmit, OFF_HINT};
 })();
