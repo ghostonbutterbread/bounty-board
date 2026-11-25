@@ -93,6 +93,18 @@ An independent review of `9235727` returned BLOCK. Every item is fixed with a re
 | 11 | The post-start mount check (host side) could not see a symlink swap that was undone in time. | After `docker run`, `docker exec <c> stat -c %d:%i /report` must equal the device and inode recorded when the host path was opened without symlinks; otherwise the sandbox is removed. | `test_terminal_docker.test_095_mount_identity_checked_inside_container` (real container; a wrong identity is refused and the container is gone) |
 | 12 | Proxy socket mode 0666. | 0600: the container runs as the service's UID, so it can still connect. | `ProxyTests.test_listen_unix_mode`; `test_095` checks the live socket is 0600 and `test_06_network_policy` shows the container still gets out through it |
 
+## Security review 2 (0e6566a): findings and fixes
+
+A second review confirmed the 12 fixes above and returned BLOCK on two problems they introduced, plus one low. Each new test failed on an export of `0e6566a` (the N1 tests in a scratch copy with only the new options removed) and passes on the fix.
+
+| # | Finding | Fix | Regression test (old code → new code) |
+| --- | --- | --- | --- |
+| N1 (blocker) | The 64-connection cap was taken at accept time and nothing timed a connection out before the WebSocket upgrade: 64 unauthenticated `POST /api/login` with `Content-Length: 65536` and no body locked everyone out of the terminal indefinitely (the allowlisted tailnet user got 503 at +0, +30 and +120 s). | One request per connection, `Handler.timeout = 10` s per read or write, and one 10 s deadline for the whole head and body (a watchdog shuts the socket). Admission happens *after* the head is parsed: requests with an allowlisted tailnet header or a valid session cookie take one of 64 slots, all others one of 8, so anonymous traffic can never take the slots identified users and WebSockets need. Connections still sending their head count as pending, and the oldest pending one is evicted when 128 wait. | `test_terminal_service.HardeningTests.test_stalled_anonymous_posts_cannot_lock_out_the_tailnet_user` (reviewer repro; old: tailnet user 503 → new: 200, the extra anonymous requests get 503 at once, the held ones are cut at the deadline); `HardeningTests.test_slow_request_heads_are_evicted_not_hoarded` (old: 503 → new: 200 with 3× the pending limit of unfinished heads); `HardeningTests.test_identified_cap_still_applies` |
+| N2 (blocker) | The host's-own-address block compared only the literal address: `::ffff:<own IPv4>` (IPv4-mapped, reachable through an AF_INET6 socket) and `64:ff9b::<own IPv4>` (NAT64) passed. | `::ffff:0:0/96` is refused outright (`blocked_address`); the own-address check also compares every IPv4 embedded in an IPv6 address (mapped, NAT64, 6to4, Teredo), the same normalisation the private-range check uses. `local_addresses()` logs a warning to stderr when `/proc/net/fib_trie` or `/proc/net/if_inet6` cannot be read. | `test_terminal_proxy.ProxyTests.test_host_address_block_covers_mapped_and_nat64_forms` (reviewer repro; old: `200 HOST-SERVICE-REACHED` via `[::ffff:127.0.0.1]` → new: 403); `AddressAllowedTests.test_table` (`::ffff:8.8.8.8`, `::ffff:1.1.1.1` refused); `ProxyTests.test_local_addresses_warns_when_proc_is_unreadable` |
+| N3 (low) | Bidi and invisible characters passed the type filter: with isolates the preview showed `echo hi#; touch …` as a comment while Run executed `touch`. | The refusal set now also covers U+00AD, U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2069, U+FEFF, U+2028 and U+2029, for every typing path, with the same visible warning. | `static/tests/sandbox-terminal-filter.test.cjs` "bidi and invisible characters make a block untypeable (review N3)" (reviewer's trojan block; old: allowed → new: refused) |
+
+Not changed (accepted by the reviewer): the host-address list refreshes every 60 s; with 24 connections per sandbox under a global 64, three busy sandboxes of the one user can still fill the proxy.
+
 ## Contract
 
 | Route (also without the `/terminal` prefix) | Auth | Purpose |
@@ -171,6 +183,10 @@ Run on Ghost, same TMPDIR. The fixture now uses the packet layout: `reports/D1-s
 - `tests.test_terminal_docker`: 11 OK in 2 of 2 runs (19 to 32 s) with the packet layout (the mount is `reports/D1-sqli-login`; a sibling packet and the navigation pages are not visible). Measured again on this run: idle sandbox 18.3 MiB (same while paused), pause median 52 ms, unpause median 82 ms.
 - `static/tests/sandbox-terminal.synthetic.test.cjs`: 7 pass. New: `active.md` shows a disabled Terminal button with the reason as its title and visible text, Ctrl+` does nothing, no `reports/active` folder appears; the legacy D10 report enables the button, opens D10's packet root (`basename $PWD` = `D10-xss`, EVIDENCE.md listed) and shows "Opened the finding folder reports/D10-xss/ (D10, from the ledger)."; switching to `index/all.md` hides the drawer and disables the button again. Screenshot: `$TMPDIR/screens/not-in-packet-light.png`.
 
+### Security fix round 2 evidence
+
+Run on Ghost, same TMPDIR: `tests.test_terminal_ws` 38 OK, `tests.test_terminal_proxy` 36 OK, `tests.test_terminal_sandbox` 47 OK, `tests.test_terminal_service` 25 OK (twice), `tests.test_terminal_docker` (`BBTERM_DOCKER_TESTS=1`, local `bbterm-test-image`) 12 OK, `static/tests/sandbox-terminal-filter.test.cjs` 3 pass, `static/tests/sandbox-terminal.synthetic.test.cjs` 8 pass (the drawer works with one request per connection). No `bbterm-test-*` container remained.
+
 ### Security fix round evidence
 
 Run on Ghost, same TMPDIR: `tests.test_terminal_ws` 38 OK, `tests.test_terminal_proxy` 34 OK, `tests.test_terminal_sandbox` 47 OK, `tests.test_terminal_service` 23 OK, `tests.test_terminal_docker` (`BBTERM_DOCKER_TESTS=1`, rebuilt test image) 12 OK, `static/tests/sandbox-terminal-filter.test.cjs` 2 pass, `static/tests/sandbox-terminal.synthetic.test.cjs` 8 pass. No `bbterm-test-*` container remained.
@@ -183,7 +199,8 @@ Run on Ghost, same TMPDIR: `tests.test_terminal_ws` 38 OK, `tests.test_terminal_
 - The transcript is what the PTY printed (echoed input included); full-screen programs (vim, less) leave noise even after ANSI stripping.
 - A packet folder whose FID is not in the lane ledger is not recognised (the exact-FID rule needs the ledger); such reports get the disabled button.
 - No disk quota on the mounted folder.
-- Password sign-in is limited to 2 concurrent scrypt checks and the service to 64 concurrent connections; a flood from the tailnet can make sign-in answer "busy" or refuse new connections until it stops (allowlisted tailnet users with open terminals keep theirs).
+- Password sign-in is limited to 2 concurrent scrypt checks and anonymous requests (sign-in page, password users before signing in) to 8 at a time; a flood from the tailnet can make sign-in answer "busy" or 503 until it stops. Allowlisted tailnet users and signed-in users have their own 64 slots and keep working.
+- Only the host's own addresses are blocked, not on-link neighbours in a public subnet; the host-address list refreshes every 60 s.
 - Blocks containing control characters cannot be typed at all; copy them by hand after review.
 - A service restart drops paused sessions (containers are cleaned up at start); there is no state file to adopt them.
 - A paused sandbox keeps its memory; the 2 GiB floor only guards creation. Twelve idle sandboxes measured about 16 MB each here, but one with a big process paused inside keeps all of it until removal or eviction.
@@ -232,6 +249,10 @@ Do these on Hoster as the Board's user. Review existing Serve config first (`tai
    - `curl -s http://127.0.0.1:9011/healthz` → `{"ok": true}`; `curl -s -H 'Host: 127.0.0.1:9011' -H 'Tailscale-User-Login: ryushe.dev@gmail.com' http://127.0.0.1:9011/api/status` → 403 (direct requests are not trusted).
    - From a tailnet device: open a report, press Ctrl+`, run `id; pwd; ls` (host UID, `/report`, the report's files), `curl -sI https://example.com` (works), then each of these must print "Blocked by sandbox egress policy": `curl -s http://127.0.0.1:9001/`, `curl -s http://172.17.0.1/`, `curl -s http://192.168.1.1/`, `curl -s http://100.100.100.100/`, `curl -s http://169.254.169.254/`; `curl --noproxy '*' -s https://example.com` must fail (no network); `ls /report/..` must not show other reports.
    - `docker inspect bbterm-<id>` → NetworkMode none, ReadonlyRootfs true, CapDrop [ALL], SecurityOpt [no-new-privileges], two mounts only.
+   - Anonymous connection hold (review N1): from a tailnet device, open 64 `POST /terminal/api/login` requests that declare `Content-Length: 65536` and send no body; the allowlisted user's `/terminal/api/status` must still return 200 and the held requests must be closed within about 10 s. Also confirm whether Serve streams request bodies to the backend.
+   - IPv4-mapped host address (review N2): in the terminal, `curl -s "http://[::ffff:<host public IPv4>]/"` must print "Blocked by sandbox egress policy". If the host has a global IPv6 address or a public IPv4 subnet, also try a neighbour's address in the same subnet: only the host's own addresses are blocked, not on-link neighbours (known gap).
+   - Paste guard (review N3): a code block with RLI/LRI bidi controls shows the control-character warning and its play and Run buttons are disabled.
+   - Idle tab: a tab left open but idle keeps its terminal attached for at least 10 minutes; a laptop that sleeps is dropped within about 75 s.
    - From a device signed in as a different tailnet user or a tagged device: the drawer shows "Sign-in needed"; the password works; five wrong passwords lock sign-in for 15 minutes.
    - Lifecycle: start `sleep 1000 &` in a terminal, close the drawer, wait 5 minutes: `docker ps --filter name=bbterm-` shows `(Paused)`; reopen the report: "Resumed", `jobs` still lists the sleep. `docker stats --no-stream` shows the idle sandbox's memory.
    - Save output as evidence → a new `validation/terminal-*.txt` in the report folder, owned by the host user, visible in the artifacts panel.
