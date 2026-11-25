@@ -127,6 +127,19 @@ Existing suites:
 
 Screenshots (synthetic): `$TMPDIR/screens/report-terminal-light.png`, `report-terminal-dark.png`, `login-light.png`, `login-dark.png`, `phone-terminal-light.png`, `phone-terminal-dark.png`.
 
+### Lifecycle change (pause/resume) evidence
+
+Run on Ghost, same TMPDIR, load average about 8 to 17.
+
+- Measured with the test image (`python:3.12-slim` base, forwarder + bash idle, limits 256 MiB / 0.5 CPU), `docker stats --no-stream` and 10 pause/unpause cycles, three runs: idle sandbox **15.4 to 15.9 MiB** (one earlier run with the shell busier: 27.4 MiB), the same while paused (15.4 MiB: pausing freezes, it does not free memory); `docker pause` median **118 to 140 ms** (max 516 ms), `docker unpause` median **105 to 119 ms** (max 686 ms). The production image runs the same processes when idle; its size on disk is larger but idle memory should be similar (not measured: image not built here).
+- `tests.test_terminal_sandbox`: 44 OK (was 33). New: real local shell pause, resume and removal (`export`, `cd` kept across a pause; fresh session after removal says `recreated_idle`); fake Docker backend with an injectable clock for every transition: grace period, never paused with a viewer, pause at 300 s, resume reuses the same shell process, removal 4 h after the last viewer left even while paused, idempotent passes, attach while a pause is in flight (blocked pause, attach waits, ends running and `resumed`), failed pause logged and retried, unpause after the container vanished (recreated, old scrollback dropped), running container vanished (recreated on attach), pause of a vanished container counts as removed, capacity with mixed paused/running/attached (paused first even if a running one left earlier, then running viewerless, refusal naming "All 3 sandboxes"), memory guard (refuses a new sandbox at 1.5 GB with the exact message, resume still allowed, unknown MemAvailable allowed), `/proc/meminfo` parser, defaults (12, 300, 14400, 2 GiB), stale cleanup at start, `idle_timeout` alias, double detach.
+- `tests.test_terminal_service`: 17 OK (was 15): flag validation (`--max-sessions` 0 and 33, pause after removal, too-short timers, `--idle-timeout` conflicting with `--remove-after`, bad `--min-free-memory`), size parsing, defaults through `make_service` with the alias.
+- `tests.test_terminal_ws` 35 OK, `tests.test_terminal_proxy` 30 OK (unchanged).
+- `tests.test_terminal_docker`: 11 OK in each of the last 3 runs (22 to 31 s), after one fix to the new test's own shell command. New: a background job writing 5 lines a second plus `cd sub`; pause via the reaper (`State.Paused` true, second pause idempotent); across 2.3 to 2.5 s including a 2 s pause the job wrote 1 to 2 lines (frozen), then 8 → 14 lines a second later (running again); resume event `resumed`, scrollback kept, `cwd=/report/sub alive=yes` (same shell, job alive). A paused container is removed by stop. Measurement test as above. No `bbterm-test-*` container remained.
+- `static/tests/sandbox-terminal.synthetic.test.cjs`: 6 pass (was 5). New: a sandbox paused after the drawer closes (service `--pause-after 10`), reopening shows the "Resumed" toast, the same scrollback, `still-here in sub, jobs=1` (same shell, cwd and background job), no restart notice. The main test now checks that the header has no lifecycle text and that the status tooltip reads "Pauses 5 min after the last viewer leaves and is removed after 4 hours. Files in the report folder are kept."
+- `python3 -W error::ResourceWarning tests/safe_suite.py`: 434 tests, OK (12 skipped: the 11 Docker tests and the existing skip).
+- `npm test`: 169 tests, 168 pass, 1 fail (`live-editor` "outside write appears in an idle editor with a notice", 30 s wait for the notice); `live-editor.synthetic.test.cjs` alone straight afterwards: 8/8 pass.
+
 ## Gaps
 
 - `sandbox/Dockerfile` (apt packages) was not built here: there is no network in this environment. The real-container tests use `sandbox/Dockerfile.test` (python:3.12-slim, same user, forwarder, bashrc and layout, no curl/jq/node). Build and verify the real image on Hoster (steps below).
@@ -135,6 +148,9 @@ Screenshots (synthetic): `$TMPDIR/screens/report-terminal-light.png`, `report-te
 - The transcript is what the PTY printed (echoed input included); full-screen programs (vim, less) leave noise even after ANSI stripping.
 - Per-report folders (rule 3) are not listed in the artifacts panel, because `report_artifacts` only lists dedicated folders; the evidence file is still written and the drawer shows its path.
 - No disk quota on the mounted folder.
+- A service restart drops paused sessions (containers are cleaned up at start); there is no state file to adopt them.
+- A paused sandbox keeps its memory; the 2 GiB floor only guards creation. Twelve idle sandboxes measured about 16 MB each here, but one with a big process paused inside keeps all of it until removal or eviction.
+- Paused time still counts toward removal (4 h from when the last viewer left).
 
 ## Deployment (orchestrator)
 
