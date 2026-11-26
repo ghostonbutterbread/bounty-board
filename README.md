@@ -37,7 +37,7 @@ tailscale serve --bg --https=443 http://127.0.0.1:9001
 
 Replace the hostname with the actual node name. When Serve listens on another HTTPS port (for example `tailscale serve --bg --https=9001 http://127.0.0.1:9001`), add `--tailnet-port 9001` so `https://<node>:9001` is the trusted origin. `tailnet_host` and `tailnet_port` may instead be set in the JSON/TOML config; the CLI flags override them. Opening the Board from a link on another site (chat, notes) loads only the page itself; data requests and writes still require the Board's own origin. It must be a canonical lowercase `node.tailnet.ts.net` name, without scheme, port, trailing dot, or wildcard. This setting does not configure Tailscale. Check the installed Tailscale version, DNS/certificate setup, existing Serve routes, and tailnet access policy before changing Serve; that command changes Serve configuration. Do not enable Funnel or expose this service to the public internet.
 
-**Trust boundary:** Tailscale Serve enforces access at the tailnet/network-policy boundary and terminates HTTPS. The Board does not identify or authenticate users: every device allowed by that policy can read sensitive program names, findings, reports, and evidence, and other local processes can reach the loopback server. Host, Origin and Fetch Metadata checks prevent some browser cross-origin attacks; they are not authentication and can be forged by non-browser clients. Never proxy this application through an unauthenticated or public proxy. The recommended Serve deployment remains read-only: omit `--bbh`, `--accept-uncoordinated-writes`, `--collaboration-dir`, and `--report-autosave`.
+**Trust boundary:** Tailscale Serve enforces access at the tailnet/network-policy boundary and terminates HTTPS. The Board does not identify or authenticate users: every device allowed by that policy can read sensitive program names, findings, reports, and evidence, and other local processes can reach the loopback server. Host, Origin and Fetch Metadata checks prevent some browser cross-origin attacks; they are not authentication and can be forged by non-browser clients. Never proxy this application through an unauthenticated or public proxy. The recommended Serve deployment remains read-only: omit `--bbh`, `--accept-uncoordinated-writes`, `--collaboration-dir`, `--report-autosave`, and `--artifact-uploads`.
 
 Browser storage is origin-scoped: `http://127.0.0.1:9001`, `http://localhost:9001`, and `https://<tailnet-host>` have separate local drafts and preferences even for the same data root. Local drafts may contain sensitive report material. The optional collaboration store separately retains shared drafts and history on the server.
 
@@ -86,6 +86,20 @@ Limits:
 - The file is replaced with an atomic exchange after a final check, and a write that lands between check and exchange is recovered and merged. A program that keeps the old file open and writes through that descriptor after the exchange can still lose that write. Agents and editors should write with temp-file-and-rename.
 - Browser backups are per origin and per browser profile; clearing site data removes them.
 - There is no authentication. The Tailscale Serve trust boundary above applies; anyone who can reach the Board can edit reports.
+
+### Optional artifact uploads
+
+`--artifact-uploads` adds an Upload files button, drag and drop and image paste to the report artifacts panel. Each file is written into the open report's own folder (the folder the panel lists as "Report folder"), so it appears in the panel at once.
+
+```sh
+python3 app.py --root /path/to/data --port 9001 --artifact-uploads
+```
+
+- **This writes into the data root, which Syncthing distributes**: every uploaded file reaches every device sharing the root. Do not upload anything you would not keep in a report folder.
+- Only reports with a dedicated folder take uploads; others show a disabled button with the reason. No folders are created and the ledger is not changed.
+- Nothing is overwritten: a name that exists (compared case-insensitively) gets `-2`, `-3`, ... Names are cleaned (path parts, unsafe characters, leading dots and underscores removed; 180 bytes max).
+- At most 512 MiB per file, two uploads at a time, and at least 1 GiB must stay free on the data root's filesystem.
+- There is no authentication. The Tailscale Serve trust boundary above applies; anyone who can reach the Board can upload. Contract and limits: `docs/integrations/artifact-uploads.md`.
 
 ### Optional sandbox terminal
 
