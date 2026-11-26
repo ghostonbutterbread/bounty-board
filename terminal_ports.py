@@ -22,7 +22,8 @@ schema; anything else closes that one connection):
 The agent is untrusted: any process in the sandbox can kill it and speak the
 protocol. Limits: 8 forwarded ports and 32 forwarded connections per session,
 128 in total, 16 opens waiting for an answer, 5 s to answer an open (the
-browser's connection is closed otherwise), 5 s for the first line, 8
+browser's connection is closed otherwise), 16 per browser IP across sessions,
+5 s for the first line, 8
 connections that have not identified themselves, 10 control connections a
 minute. Ids are random per open and valid once. Forwarded bytes are never
 interpreted. The proxy port (3128) is never forwarded, whatever the agent says.
@@ -54,6 +55,10 @@ MAX_PORTS = 8             # forwarded sandbox ports per session
 MAX_REPORTED = 64         # ports in one report line (more is malformed)
 MAX_SESSION_CONNS = 32    # forwarded connections per session (waiting ones included)
 MAX_TOTAL_CONNS = 128     # forwarded connections for the whole service
+MAX_CLIENT_CONNS = 16     # forwarded connections from one client IP, across sessions
+IDLE_CLOSE = 600          # a forwarded connection idle this long (no bytes either way) is closed ...
+IDLE_PRESSURE = 0.75      # ... while more than this share of MAX_TOTAL_CONNS is in use
+IDLE_CHECK = 30           # seconds between idle checks
 MAX_PENDING = 16          # opens waiting for the agent, per session
 MAX_UNIDENTIFIED = 8      # agent connections that have not sent their first line
 MAX_RESERVED = 16         # host port numbers remembered per session
@@ -223,17 +228,21 @@ def _local_addresses():
 class TailscaleAddress:
     """Finds the address to bind for tailnet access.
 
-    ``auto``: the first IPv4 in 100.64.0.0/10 on a local interface, preferring
-    ``tailscale0``. An explicit address must be in 100.64.0.0/10 and local.
-    ``networks``, ``addresses`` and ``interface`` exist for tests (loopback
-    aliases); the command line only reaches ``spec``.
+    ``auto``: the IPv4 address (in 100.64.0.0/10, local) of a ``tailscale*``
+    interface, ``tailscale0`` first. Never another interface, even one with a
+    100.64.0.0/10 address (ISP carrier-grade NAT, another overlay): while
+    Tailscale is down there is simply no address. An explicit address must be
+    in 100.64.0.0/10 and local, on any interface. ``networks``, ``addresses``,
+    ``interface`` and ``interfaces`` exist for tests (loopback aliases); the
+    command line only reaches ``spec``.
     """
 
-    def __init__(self, spec='auto', *, networks=(CGNAT,), addresses=None, interface=interface_ipv4):
+    def __init__(self, spec='auto', *, networks=(CGNAT,), addresses=None, interface=interface_ipv4, interfaces=None):
         self.spec = spec
         self.networks = tuple(networks)
         self.addresses = addresses or _local_addresses
         self.interface = interface
+        self.interfaces = interfaces or (lambda: [name for _, name in socket.if_nameindex()])
 
     def _usable(self, value):
         try:
@@ -246,10 +255,15 @@ class TailscaleAddress:
         local = {a for a in self.addresses() if self._usable(a)}
         if self.spec != 'auto':
             return self.spec if self.spec in local else None
-        preferred = self.interface('tailscale0')
-        if preferred in local:
-            return preferred
-        return min(local, key=ipaddress.ip_address) if local else None
+        try:
+            names = [n for n in self.interfaces() if n.startswith('tailscale')]
+        except OSError:
+            names = []
+        for name in sorted(names, key=lambda n: (n != 'tailscale0', n)):
+            address = self.interface(name)
+            if address in local:
+                return address
+        return None
 
 
 # -- settings -------------------------------------------------------------------
@@ -311,6 +325,7 @@ class SettingsStore:
             if self.state == 'corrupt':
                 aside = folder / f'{self.path.name}.corrupt-{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(3)}'
                 os.rename(self.path, aside)
+                self.state = 'missing'  # moved aside: a retry after a failed write must not move it again
                 self.log(f'set the unreadable settings file aside as {aside.name}')
             tmp = folder / f'.{self.path.name}.{secrets.token_hex(6)}.tmp'
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -456,10 +471,12 @@ class _Pending:
 class _Conn:
     """One forwarded browser connection (client side) and, once answered, its agent data connection."""
 
-    def __init__(self, client, via):
-        self.client, self.via = client, via
+    def __init__(self, session, client, via, peer):
+        self.session, self.client, self.via, self.peer = session, client, via, peer
         self.data = None
         self.dead = False
+        self.counted = True
+        self.last = time.monotonic()  # last byte either way
 
     def kill(self):
         self.dead = True
@@ -680,20 +697,26 @@ class SessionPorts:
     # -- browser side ----------------------------------------------------------------------
     def _accept_client(self, fwd, via, client):
         hub = self.hub
+        try:
+            peer = client.getpeername()[0]
+        except OSError:
+            client.close()
+            return
         with hub.lock:
             if (self.closed or fwd.listeners.get(via) is None or len(self.conns) >= MAX_SESSION_CONNS
-                    or hub.total_conns >= MAX_TOTAL_CONNS or len(self.pending) >= MAX_PENDING):
+                    or hub.client_conns.get(peer, 0) >= MAX_CLIENT_CONNS or len(self.pending) >= MAX_PENDING
+                    or (hub.total_conns >= MAX_TOTAL_CONNS and not hub._make_room(self))):
                 client.close()
                 return
-            record = _Conn(client, via)
+            record = _Conn(self, client, via, peer)
             self.conns.add(record)
             hub.total_conns += 1
+            hub.client_conns[peer] = hub.client_conns.get(peer, 0) + 1
         try:
             threading.Thread(target=self._client, args=(fwd, record), name='bbterm-ports-client', daemon=True).start()
         except BaseException:
             with hub.lock:
-                self.conns.discard(record)
-                hub.total_conns -= 1
+                hub._release(record)
             client.close()
 
     def _client(self, fwd, record):
@@ -722,8 +745,7 @@ class SessionPorts:
             self._pipe(record, pending.leftover)
         finally:
             with hub.lock:
-                self.conns.discard(record)
-                hub.total_conns -= 1
+                hub._release(record)
             _close(record.client)
             _close(record.data)
 
@@ -734,7 +756,7 @@ class SessionPorts:
         last = [time.monotonic()]
 
         def activity():
-            now = time.monotonic()
+            now = record.last = time.monotonic()
             if now - last[0] >= ACTIVITY_EVERY:
                 last[0] = now
                 try:
@@ -813,11 +835,15 @@ class PortsHub:
         self.toggle_lock = threading.Lock()
         self.sessions = set()
         self.total_conns = 0
+        self.client_conns = {}  # client IP -> forwarded connections, across sessions
         self._bound = {}  # (ip, port) -> socket bound by _allocate, taken by _activate
         self.ts_ip = None
         self.closed = False
         self.acceptor = _Acceptor()
-        if self.settings.get('ports_tailscale'):
+        # What is in effect. Normally equal to the saved setting; after a failed save
+        # of "off" it stays off (fail closed) although the file still says on.
+        self.ts_on = bool(self.settings.get('ports_tailscale'))
+        if self.ts_on:
             self.ts_ip = self.tailscale.detect()
             if self.ts_ip is None:
                 self.log('Tailscale ports are on but no Tailscale address was found; retrying every minute')
@@ -825,6 +851,57 @@ class PortsHub:
         if refresh_interval:
             threading.Thread(target=self._refresher, args=(refresh_interval,), name='bbterm-ports-tailscale',
                              daemon=True).start()
+            threading.Thread(target=self._idle_checker, args=(IDLE_CHECK,), name='bbterm-ports-idle',
+                             daemon=True).start()
+
+    # -- connection accounting (lock held) ------------------------------------------------
+    def _release(self, record):
+        """Give back a connection's slots, once."""
+        if not record.counted:
+            return
+        record.counted = False
+        record.session.conns.discard(record)
+        self.total_conns -= 1
+        left = self.client_conns.get(record.peer, 0) - 1
+        if left > 0:
+            self.client_conns[record.peer] = left
+        else:
+            self.client_conns.pop(record.peer, None)
+
+    def _make_room(self, sp):
+        """The global cap is full. A session below its fair share closes the longest-idle
+        connection of the session holding the most, so one client cannot starve other
+        sessions' previews. Returns True when a slot was freed."""
+        busy = [other for other in self.sessions if other.conns]
+        share = MAX_TOTAL_CONNS // max(1, len(set(busy) | {sp}))
+        if len(sp.conns) >= share:
+            return False
+        hog = max(busy, key=lambda other: len(other.conns), default=None)
+        if hog is None or hog is sp or len(hog.conns) <= share:
+            return False
+        victim = min(hog.conns, key=lambda record: record.last)
+        victim.kill()
+        self._release(victim)
+        return True
+
+    def reap_idle_conns(self, now=None):
+        """Close connections idle for IDLE_CLOSE while the global cap is under pressure. Returns how many."""
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            if self.total_conns <= MAX_TOTAL_CONNS * IDLE_PRESSURE:
+                return 0
+            idle = [r for sp in self.sessions for r in sp.conns if now - r.last >= IDLE_CLOSE]
+            for record in idle:
+                record.kill()
+                self._release(record)
+        return len(idle)
+
+    def _idle_checker(self, interval):
+        while not self.stop_event.wait(interval):
+            try:
+                self.reap_idle_conns()
+            except Exception as error:
+                self.log(f'idle connection check failed: {error}')
 
     def open_session(self, path, owner):
         sp = SessionPorts(self, path, owner)
@@ -898,17 +975,21 @@ class PortsHub:
                 ip = self.tailscale.detect()
                 if ip is None:
                     raise PortsError('tailscale_not_found', 'No Tailscale address was found on this machine.')
-                self.settings.update(ports_tailscale=True)
+                self.settings.update(ports_tailscale=True)  # a failed save leaves Tailscale off
+                self.ts_on = True
                 self._apply_tailscale(ip)
             else:
-                self.settings.update(ports_tailscale=False)
+                # Fail closed: close the tailnet listeners and connections first, then save.
+                # A failed save still raises, but nothing stays reachable on the tailnet.
+                self.ts_on = False
                 self._apply_tailscale(None)
+                self.settings.update(ports_tailscale=False)
         return self.settings_payload()
 
     def refresh(self):
         """Re-detect the Tailscale address while the setting is on; rebind when it changed."""
         with self.toggle_lock:
-            if self.settings.get('ports_tailscale'):
+            if self.ts_on:
                 ip = self.tailscale.detect()
                 if ip != self.ts_ip:
                     self.log(f'Tailscale address changed to {ip or "none"}')
@@ -922,7 +1003,7 @@ class PortsHub:
                 self.log(f'Tailscale address check failed: {error}')
 
     def settings_payload(self):
-        on = self.settings.get('ports_tailscale')
+        on = self.ts_on
         with self.lock:
             ip = self.ts_ip
         return {'preview_ports': True, 'ports_tailscale': on, 'tailscale_address': ip if on else None,

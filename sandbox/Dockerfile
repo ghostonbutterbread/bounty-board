@@ -28,6 +28,6 @@ USER sandbox
 WORKDIR /report
 # The service runs the container with --init, --network none, --read-only and
 # the proxy socket mounted at /run/bbterm/proxy.sock. The forwarder is PID 1's child.
-# The preview-ports agent dials out to /run/bbterm/ports.sock (only present with
-# --preview-ports) and is restarted if anything in the sandbox kills it.
-CMD ["sh", "-c", "while :; do python3 /usr/local/bin/bbterm-ports /run/bbterm/ports.sock 3128; sleep 1; done & exec python3 /usr/local/bin/bbterm-forward 3128 /run/bbterm/proxy.sock"]
+# The same process runs the preview-ports agent as a supervised thread; it dials
+# out to /run/bbterm/ports.sock (only present with --preview-ports).
+CMD ["python3", "/usr/local/bin/bbterm-forward", "3128", "/run/bbterm/proxy.sock", "/run/bbterm/ports.sock"]

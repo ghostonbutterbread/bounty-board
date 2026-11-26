@@ -47,12 +47,23 @@ def load_agent(sock_path):
     spec = importlib.util.spec_from_file_location('bbterm_ports_agent', ROOT / 'sandbox/bbterm-ports.py')
     module = importlib.util.module_from_spec(spec)
     old = sys.argv
-    sys.argv = ['bbterm-ports', str(sock_path), '3128']
+    sys.argv = ['bbterm-ports', str(sock_path), '3128']  # the 0632c25 agent read argv at import
     try:
         spec.loader.exec_module(module)
     finally:
         sys.argv = old
+    module.SOCKET, module.EXCLUDE = str(sock_path), {3128}
     return module
+
+
+def tailscale_address(*args, **kw):
+    """TailscaleAddress; drops ``interfaces`` for the 0632c25 signature so the review-round-1
+    regression tests can be shown red against that code (they then fail on their asserts)."""
+    try:
+        return tp.TailscaleAddress(*args, **kw)
+    except TypeError:
+        kw.pop('interfaces', None)
+        return tp.TailscaleAddress(*args, **kw)
 
 
 def free_range(size=12):
@@ -225,9 +236,13 @@ class HubCase(unittest.TestCase):
         self.base = fx.tmp_base('ports')
         self.range = free_range()
         self.addresses = {'127.0.0.1', '127.0.0.2'}
-        self.tailscale = tp.TailscaleAddress('auto', networks=[ipaddress.ip_network('127.0.0.2/32'),
+        self.tailscale = tailscale_address('auto', networks=[ipaddress.ip_network('127.0.0.2/32'),
                                                                ipaddress.ip_network('127.0.0.3/32')],
-                                             addresses=lambda: self.addresses, interface=lambda name: None)
+                                             addresses=lambda: self.addresses, interfaces=lambda: ['eth0', 'tailscale0'],
+                                             # TEST ONLY: "tailscale0" carries whichever alias is up
+                                             interface=lambda name: next((a for a in sorted(self.addresses)
+                                                                          if a in ('127.0.0.2', '127.0.0.3')), None)
+                                             if name == 'tailscale0' else None)
         self.logs = []
         self.hub = tp.PortsHub(state_dir=self.base, ports_range=self.range, tailscale=self.tailscale,
                                log=self.logs.append, refresh_interval=0)
@@ -620,6 +635,173 @@ class ReviewFixTests(HubCase):
         self.assertEqual(self.sp.items(), [], 'an active forward is never taken')
 
 
+class ReviewRound1Tests(HubCase):
+    """Regression tests for the independent review of 0632c25 (repros R1-R4)."""
+
+    def test_r1_switching_off_closes_tailnet_listeners_even_when_the_save_fails(self):
+        server, agent, item = self.forward()
+        host_port = item['host_port']
+        self.hub.set_tailscale(True)
+        via_tailnet = tcp('127.0.0.2', host_port)
+        via_tailnet.sendall(b'p')
+        self.assertEqual(via_tailnet.recv(1), b'p')
+        with mock.patch.object(tp.os, 'fsync', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(OSError):  # the service answers 500 settings_failed
+                self.hub.set_tailscale(False)
+        self.assertFalse(connectable('127.0.0.2', host_port), 'off means off, saved or not')
+        self.assertTrue(closed_by_peer(via_tailnet, timeout=2))
+        payload = self.hub.settings_payload()
+        self.assertEqual((payload['ports_tailscale'], payload['tailscale_address']), (False, None))
+        self.hub.refresh()  # the 60 s check must not turn it back on from the stale file
+        self.assertFalse(connectable('127.0.0.2', host_port))
+        self.assertIsNone(self.sp.items()[0]['tailscale_url'])
+
+    def test_r1_mirror_a_failed_save_when_switching_on_leaves_it_off(self):
+        server, agent, item = self.forward()
+        with mock.patch.object(tp.os, 'fsync', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(OSError):
+                self.hub.set_tailscale(True)
+        self.assertFalse(connectable('127.0.0.2', item['host_port']))
+        self.assertFalse(self.hub.settings_payload()['ports_tailscale'])
+        self.hub.refresh()
+        self.assertFalse(connectable('127.0.0.2', item['host_port']))
+
+    def test_r2_settings_work_again_after_a_failed_write_of_a_corrupt_file(self):
+        path = self.base / 'r2-settings.json'
+        path.write_text('{not json')
+        store = tp.SettingsStore(path, log=lambda m: None)
+        self.assertEqual(store.state, 'corrupt')
+        with mock.patch.object(tp.os, 'fsync', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(OSError):
+                store.update(ports_tailscale=True)
+        store.update(ports_tailscale=True)  # disk is fine again: no restart needed
+        self.assertTrue(store.get('ports_tailscale'))
+        self.assertEqual(len([p for p in self.base.iterdir() if p.name.startswith('r2-settings.json.corrupt-')]), 1)
+        self.assertEqual(json.loads(path.read_text()), {'ports_tailscale': True})
+
+    def open_hogs(self, count):
+        ports = []
+        for n in range(count):
+            path = self.base / f'hog{n}.sock'
+            sp = self.hub.open_session(str(path), FakeOwner())
+            server = self.server()
+            AutoAgent(path).ports([server.port])
+            ports.append(wait(lambda sp=sp: sp.items() and sp.items()[0])['host_port'])
+        return ports
+
+    def held(self, host_port, count):
+        out = []
+        for _ in range(count):
+            c = tcp('127.0.0.1', host_port)
+            c.sendall(b'x')
+            self.assertEqual(c.recv(1), b'x')
+            out.append(c)
+        return out
+
+    def test_r3_idle_hog_on_two_sessions_does_not_lock_out_a_third(self):
+        hogs = self.open_hogs(2)
+        server, agent, item = self.forward()  # the victim session
+        with mock.patch.object(tp, 'MAX_SESSION_CONNS', 2), mock.patch.object(tp, 'MAX_TOTAL_CONNS', 4):
+            held = [c for host_port in hogs for c in self.held(host_port, 2)]
+            victim = tcp('127.0.0.1', item['host_port'])
+            victim.sendall(b'v')
+            victim.settimeout(5)
+            self.assertEqual(victim.recv(1), b'v', "another session's idle connections must not lock this one out")
+            self.assertEqual(sum(1 for c in held if closed_by_peer(c, timeout=1)), 1, 'exactly one idle hog closed')
+            self.assertLessEqual(self.hub.total_conns, 4)
+
+    def test_r3_per_client_cap_across_sessions(self):
+        hogs = self.open_hogs(2)
+        with mock.patch.object(tp, 'MAX_CLIENT_CONNS', 3):
+            self.held(hogs[0], 2)
+            self.held(hogs[1], 1)
+            extra = tcp('127.0.0.1', hogs[1])
+            self.assertTrue(closed_by_peer(extra, timeout=3), 'the 4th connection from one IP is refused')
+            self.assertEqual(self.hub.client_conns, {'127.0.0.1': 3})
+        close_all()
+        wait(lambda: self.hub.client_conns == {} and self.hub.total_conns == 0)
+
+    def test_r3_idle_connections_close_only_under_pressure(self):
+        hogs = self.open_hogs(1)
+        with mock.patch.object(tp, 'MAX_TOTAL_CONNS', 4):
+            held = self.held(hogs[0], 3)  # 75%: not over the threshold
+            future = time.monotonic() + tp.IDLE_CLOSE + 1
+            self.assertEqual(self.hub.reap_idle_conns(now=future), 0)
+            held += self.held(hogs[0], 1)  # 100%
+            self.assertEqual(self.hub.reap_idle_conns(now=time.monotonic()), 0, 'not idle long enough')
+            held[0].sendall(b'y')  # one connection stays busy
+            self.assertEqual(held[0].recv(1), b'y')
+            # Every connection is idle at "future" except none has had traffic since; pretend the busy
+            # one sent bytes just before it.
+            busy = next(r for sp in self.hub.sessions for r in sp.conns
+                        if r.client.getpeername() == held[0].getsockname())
+            busy.last = future
+            self.assertEqual(self.hub.reap_idle_conns(now=future), 3)
+            self.assertFalse(closed_by_peer(held[0], timeout=0.3), 'the busy connection stays')
+            for c in held[1:]:
+                self.assertTrue(closed_by_peer(c, timeout=2))
+
+    def test_r4_auto_never_falls_back_to_a_non_tailscale_cgnat_address(self):
+        isp_cgnat_on_eth0 = '100.72.13.9'
+        detect = tailscale_address('auto', addresses=lambda: {'127.0.0.1', isp_cgnat_on_eth0},
+                                     interfaces=lambda: ['lo', 'eth0'],
+                                     interface=lambda name: isp_cgnat_on_eth0 if name == 'eth0' else None).detect()
+        self.assertIsNone(detect)
+        detect = tailscale_address('auto', addresses=lambda: {'127.0.0.1', isp_cgnat_on_eth0},
+                                     interface=lambda name: None).detect()  # the reviewer's form, real interface list
+        self.assertIsNone(detect)
+
+
+class ForwarderAgentTests(HubCase):
+    """The agent runs as a supervised thread inside bbterm-forward (one process per sandbox)."""
+
+    def load_forwarder(self):
+        spec = importlib.util.spec_from_file_location('bbterm_forward', ROOT / 'sandbox/bbterm-forward.py')
+        module = importlib.util.module_from_spec(spec)
+        old = sys.argv
+        sys.argv = ['bbterm-forward']
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.argv = old
+        return module
+
+    def test_forwarder_process_runs_the_agent(self):
+        import subprocess
+        probe = socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        free = probe.getsockname()[1]
+        probe.close()
+        proc = subprocess.Popen([sys.executable, '-I', str(ROOT / 'sandbox/bbterm-forward.py'), str(free),
+                                 str(self.base / 'no-proxy.sock'), str(self.sock_path)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            wait(lambda: self.sp.control is not None, timeout=15, message='the agent thread never connected')
+            self.assertIsNone(proc.poll(), 'the forwarder keeps running')
+            # Its own listen port (3128 in the container) is excluded from what it reports.
+            time.sleep(1.5)
+            self.assertNotIn(free, self.sp.forwards)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+    def test_supervisor_restarts_a_dead_agent(self):
+        forwarder = self.load_forwarder()
+        counter = self.base / 'starts'
+        fake = self.base / 'fake-agent'
+        fake.write_text(
+            'import pathlib\n'
+            f'COUNTER = pathlib.Path({str(counter)!r})\n'
+            'def main():\n'
+            '    COUNTER.write_text(str(int(COUNTER.read_text() or 0) + 1) if COUNTER.exists() else "1")\n'
+            '    raise RuntimeError("agent crashed")\n')
+        threading.Thread(target=forwarder.supervise_agent, args=(str(fake), str(self.sock_path), 3128, 0.05),
+                         daemon=True).start()
+        wait(lambda: counter.exists() and int(counter.read_text()) >= 3, message='agent not restarted')
+        agent = forwarder.load_agent(str(ROOT / 'sandbox/bbterm-ports.py'), '/run/bbterm/ports.sock', 3128)
+        self.assertEqual((agent.SOCKET, agent.EXCLUDE), ('/run/bbterm/ports.sock', {3128}))
+
+
 class BackendOrderTests(unittest.TestCase):
     def test_destroy_closes_ports_even_when_docker_rm_fails(self):
         import subprocess
@@ -724,14 +906,22 @@ class SettingsTests(unittest.TestCase):
 
 class TailscaleTests(HubCase):
     def test_detection_rules(self):
-        make = lambda spec, addrs, iface=None, nets=(tp.CGNAT,): tp.TailscaleAddress(
-            spec, networks=nets, addresses=lambda: addrs, interface=lambda name: iface).detect()
-        self.assertEqual(make('auto', {'192.168.1.5', '100.101.1.2', '100.64.0.9'}), '100.64.0.9')
-        self.assertEqual(make('auto', {'100.101.1.2', '100.64.0.9'}, iface='100.101.1.2'), '100.101.1.2', 'tailscale0 first')
-        self.assertIsNone(make('auto', {'192.168.1.5', '127.0.0.1', 'fd7a:115c:a1e0::1'}))
-        self.assertEqual(make('100.101.1.2', {'100.101.1.2'}), '100.101.1.2')
+        def make(spec, addrs, ifaces=None, nets=(tp.CGNAT,)):
+            ifaces = ifaces or {}
+            return tailscale_address(spec, networks=nets, addresses=lambda: addrs, interfaces=lambda: list(ifaces),
+                                       interface=lambda name: ifaces.get(name)).detect()
+        both = {'192.168.1.5', '100.101.1.2', '100.64.0.9'}
+        self.assertEqual(make('auto', both, {'eth0': '100.64.0.9', 'tailscale0': '100.101.1.2'}), '100.101.1.2')
+        self.assertEqual(make('auto', both, {'tailscale1': '100.64.0.9', 'tailscale0': '100.101.1.2'}), '100.101.1.2',
+                         'tailscale0 first')
+        self.assertEqual(make('auto', both, {'tailscale1': '100.64.0.9', 'tailscale0': None}), '100.64.0.9',
+                         'another tailscale* interface')
+        self.assertIsNone(make('auto', both, {'eth0': '100.64.0.9', 'tailscale0': None}), 'never a non-Tailscale interface')
+        self.assertIsNone(make('auto', both, {'tailscale0': '100.99.9.9'}), 'the interface address must be local')
+        self.assertIsNone(make('auto', {'192.168.1.5', '127.0.0.1', 'fd7a:115c:a1e0::1'}, {'tailscale0': '127.0.0.1'}))
+        self.assertEqual(make('100.101.1.2', {'100.101.1.2'}), '100.101.1.2', 'explicit: any interface')
         self.assertIsNone(make('100.101.1.2', {'100.64.0.9'}), 'an explicit address must be local')
-        self.assertIsNone(make('auto', {'127.0.0.2'}), 'loopback only with the test override')
+        self.assertIsNone(make('auto', {'127.0.0.2'}, {'tailscale0': '127.0.0.2'}), 'loopback only with the test override')
         self.assertEqual(tp.parse_tailscale_address('auto'), 'auto')
         self.assertEqual(tp.parse_tailscale_address('100.100.1.1'), '100.100.1.1')
         for bad in ('0.0.0.0', '127.0.0.1', '192.168.1.1', '100.128.0.1', '::', 'fd7a:115c:a1e0::1', 'tailscale0'):
@@ -830,7 +1020,7 @@ class LifecycleTests(unittest.TestCase):
         self.root = fx.make_root(self.base)
         self.now = [0.0]
         self.hub = tp.PortsHub(state_dir=self.base / 'state', ports_range=free_range(), refresh_interval=0,
-                               tailscale=tp.TailscaleAddress(addresses=lambda: set()))
+                               tailscale=tailscale_address(addresses=lambda: set()))
         self.docker = PortsDocker(self.base, self.hub)
         self.manager = sb.SessionManager(self.root, self.docker, max_sessions=3, pause_after=300, remove_after=4 * 3600,
                                          min_free_memory=0, clock=lambda: self.now[0], reap_interval=0, log=lambda m: None)

@@ -4,13 +4,28 @@
 The container has no network (``--network none``); its only way out is the
 terminal service's filtering proxy, reached over this Unix socket. HTTP_PROXY,
 HTTPS_PROXY and ALL_PROXY point at 127.0.0.1:3128.
+
+With a third argument (the preview-ports socket, /run/bbterm/ports.sock) the
+same process also runs the preview-ports agent (bbterm-ports, next to this
+file) in a thread, restarted by a supervisor loop if it ever dies. One process
+instead of two saves about 9 MiB per sandbox.
+
+Usage: bbterm-forward [PORT [PROXY_SOCKET [PORTS_SOCKET]]]
 """
+import importlib.machinery
+import importlib.util
+import os
 import socket
 import sys
 import threading
+import time
 
 LISTEN = ('127.0.0.1', int(sys.argv[1]) if len(sys.argv) > 1 else 3128)
 SOCKET = sys.argv[2] if len(sys.argv) > 2 else '/run/bbterm/proxy.sock'
+PORTS_SOCKET = sys.argv[3] if len(sys.argv) > 3 else None
+HERE = os.path.dirname(os.path.abspath(__file__))
+AGENT = next((p for p in (os.path.join(HERE, 'bbterm-ports'), os.path.join(HERE, 'bbterm-ports.py'))
+              if os.path.exists(p)), os.path.join(HERE, 'bbterm-ports'))  # image name; repo name for tests
 
 
 def pump(src, dst):
@@ -46,7 +61,31 @@ def serve(client):
     upstream.close()
 
 
+def load_agent(path, sock, exclude):
+    loader = importlib.machinery.SourceFileLoader('bbterm_ports', path)
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader('bbterm_ports', loader))
+    loader.exec_module(module)
+    module.SOCKET, module.EXCLUDE = sock, {exclude}
+    return module
+
+
+def supervise_agent(path, sock, exclude, delay=1):
+    """Run the preview-ports agent in a thread; start it again if it ever ends."""
+    while True:
+        try:
+            agent = load_agent(path, sock, exclude)
+            worker = threading.Thread(target=agent.main, name='bbterm-ports-agent', daemon=True)
+            worker.start()
+            worker.join()
+        except Exception as error:  # a broken agent must never take the proxy forwarder down
+            print(f'bbterm-forward: ports agent stopped: {error}', file=sys.stderr, flush=True)
+        time.sleep(delay)
+
+
 def main():
+    if PORTS_SOCKET:
+        threading.Thread(target=supervise_agent, args=(AGENT, PORTS_SOCKET, LISTEN[1]),
+                         name='bbterm-ports-supervisor', daemon=True).start()
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(LISTEN)

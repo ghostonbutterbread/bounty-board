@@ -302,6 +302,10 @@ class DockerSandboxTests(unittest.TestCase):
         import urllib.request
         if self.exec('test', '-x', '/usr/local/bin/bbterm-ports').returncode != 0:
             self.fail(f'{IMAGE} has no ports agent; rebuild it from sandbox/Dockerfile.test')
+        # One process carries both the proxy forwarder and the ports agent (review round 1, memory).
+        top = docker('top', self.name, '-o', 'pid,args').stdout
+        self.assertEqual(len([l for l in top.splitlines() if 'bbterm-forward' in l and 'docker-init' not in l]), 1, top)
+        self.assertNotIn('bbterm-ports', top.replace('/run/bbterm/ports.sock', ''), top)
         folder = self.lane / 'reports/D1-sqli-login'
         (folder / 'poc-page.html').write_text('<p>synthetic-preview-ok</p>\n')
         self.exec('sh', '-c', 'cd /report && echo $$ > /tmp/srv.pid && exec python3 -m http.server 8000 >/tmp/srv.log 2>&1',

@@ -254,7 +254,8 @@ class PortsServiceTests(unittest.TestCase):
         cls.root = fx.make_root(cls.base)
         cls.addresses = {'127.0.0.1'}
         tailscale = tp.TailscaleAddress('auto', networks=[ipaddress.ip_network('127.0.0.2/32')],
-                                        addresses=lambda: cls.addresses, interface=lambda name: None)
+                                        addresses=lambda: cls.addresses, interfaces=lambda: ['tailscale0'],
+                                        interface=lambda name: '127.0.0.2')  # TEST ONLY alias as "tailscale0"
         cls.range = free_range()
         cls.backend = sb.LocalBackend(cls.base / 'local')
         cls.server = ts.make_service(cls.root, port=0, allowed_origins=[ORIGIN], allowed_users=['ryu@example.test'],

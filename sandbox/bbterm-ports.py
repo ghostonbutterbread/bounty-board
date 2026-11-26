@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """In-container preview-ports agent: dials out to /run/bbterm/ports.sock.
 
+Normally loaded by bbterm-forward as a thread in the same process (it sets
+SOCKET and EXCLUDE); it still runs on its own for tests: bbterm-ports SOCKET [EXCLUDE].
+
 The container has no network. The terminal service listens on a host-owned
 Unix socket in the read-only /run/bbterm directory; this agent connects to it
 (the host never connects into the container). It reports the TCP ports that
@@ -21,8 +24,8 @@ import sys
 import threading
 import time
 
-SOCKET = sys.argv[1] if len(sys.argv) > 1 else '/run/bbterm/ports.sock'
-EXCLUDE = {int(sys.argv[2]) if len(sys.argv) > 2 else 3128}
+SOCKET = '/run/bbterm/ports.sock'  # set by bbterm-forward when loaded as a thread
+EXCLUDE = {3128}
 MAX_PORTS = 64
 POLL = 1.0
 
@@ -176,4 +179,6 @@ def main():
 
 
 if __name__ == '__main__':
+    SOCKET = sys.argv[1] if len(sys.argv) > 1 else SOCKET
+    EXCLUDE = {int(sys.argv[2]) if len(sys.argv) > 2 else 3128}
     main()
