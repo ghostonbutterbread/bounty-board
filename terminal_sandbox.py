@@ -806,7 +806,8 @@ class SessionManager:
 
     def _pick_victim_locked(self):
         """Paused sandbox idle longest first, then a running viewerless one; never one with a viewer."""
-        idle = [s for s in self.sessions.values() if not s.viewer_count()]
+        idle = [s for s in self.sessions.values() if not s.viewer_count()
+                and not (self.agent_hub is not None and self.agent_hub.pause_held(s))]  # nor an agent at work
         if not idle:
             return None
         return min(idle, key=lambda s: (not s.paused, s.left_at))

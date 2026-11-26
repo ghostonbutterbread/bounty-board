@@ -266,8 +266,12 @@ class ConnectHub:
     def _grace_over(self, cs):
         with cs.lock:
             cs.grace_timer = None
-        if cs.pty.viewers:
-            return
+        with self.lock:  # attach joins under this lock: either it joined first, or it sees the session closed
+            if cs.pty.viewers or cs.closed:
+                return
+            cs.closed = True
+            if self.sessions.get(cs.key) is cs:
+                del self.sessions[cs.key]
         self._end(cs)
 
     def _end(self, cs):

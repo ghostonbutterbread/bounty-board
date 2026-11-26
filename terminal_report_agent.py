@@ -170,15 +170,21 @@ class DockerExec:
         self.backend = backend
 
     def write_home(self, session, archive):
-        result = subprocess.run([self.backend.docker, 'exec', '-i', self.backend.name(session), 'tar', '-x', '-C',
-                                 cli.SANDBOX_HOME, '-f', '-'], input=archive, capture_output=True, timeout=60)
+        try:
+            result = subprocess.run([self.backend.docker, 'exec', '-i', self.backend.name(session), 'tar', '-x', '-C',
+                                     cli.SANDBOX_HOME, '-f', '-'], input=archive, capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            raise AgentError(500, 'agent_setup_failed', 'The agent files could not be written into the sandbox.') from None
         if result.returncode != 0:
             raise AgentError(500, 'agent_setup_failed', 'The agent files could not be written into the sandbox.')
 
     def raise_memory(self, session):
-        result = self.backend.run('update', '--memory', AGENT_MEMORY, '--memory-swap', AGENT_MEMORY,
-                                  self.backend.name(session), check=False, timeout=30)
-        if result.returncode != 0:
+        try:
+            result = self.backend.run('update', '--memory', AGENT_MEMORY, '--memory-swap', AGENT_MEMORY,
+                                      self.backend.name(session), check=False, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is None or result.returncode != 0:
             raise AgentError(500, 'agent_setup_failed', 'The sandbox memory limit could not be raised for the agent.')
 
     def argv(self, session, binary_target, cli_args, env):
@@ -200,10 +206,15 @@ class DockerExec:
         """Signal the agent inside the container (a killed ``docker exec`` client
         does not end the process it started). The pid file is written by the
         fixed wrapper; only digits are accepted."""
-        script = 'p=$(cat "$HOME/.report-agent/agent.pid" 2>/dev/null); case "$p" in ""|*[!0-9]*) exit 1;; esac; kill -s "$1" "$p"'
-        self.backend.run('exec', self.backend.name(session), '/bin/sh', '-c', script, 'report-agent',
-                         {signal.SIGHUP: 'HUP', signal.SIGTERM: 'TERM', signal.SIGKILL: 'KILL'}[sig],
-                         check=False, timeout=15)
+        # The group first (commands the CLI started, such as a hanging poc.py), then the CLI itself.
+        script = ('p=$(cat "$HOME/.report-agent/agent.pid" 2>/dev/null); case "$p" in ""|*[!0-9]*) exit 1;; esac; '
+                  'kill -s "$1" -- "-$p" 2>/dev/null; kill -s "$1" "$p"')
+        try:
+            self.backend.run('exec', self.backend.name(session), '/bin/sh', '-c', script, 'report-agent',
+                             {signal.SIGHUP: 'HUP', signal.SIGTERM: 'TERM', signal.SIGKILL: 'KILL'}[sig],
+                             check=False, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # the client is stopped next either way
 
 
 class LocalExec:
@@ -488,6 +499,7 @@ class ReportAgentHub:
             manager._check_memory()
             agent = ReportAgent(self, session, cli_id, model, task['kind'])
             session.agent = agent
+            session.left_at = manager.clock()  # removal counts from now, not from an old shell viewer
             try:
                 self._launch(manager, session, agent, spec, real, model, task, inner)
             except BaseException:
@@ -549,6 +561,9 @@ class ReportAgentHub:
             status = {'bad_selector': 400, 'report_not_found': 404, 'not_in_packet': 409, 'unsafe_folder': 409,
                       'too_many_sessions': 503, 'low_memory': 503, 'shutting_down': 503}.get(error.code, 500)
             return status, {'error': error.code, 'message': error.message}
+        except Exception as error:  # Docker timeouts, PTY spawn failures: answer instead of dropping the request
+            self.log(f'agent route failed: {type(error).__name__}')
+            return 500, {'error': 'agent_failed', 'message': 'The agent could not be started or stopped. Try again.'}
 
     def stop(self, manager, body):
         if not isinstance(body, dict) or set(body) != {'selector'}:
@@ -578,6 +593,8 @@ class ReportAgentHub:
                         continue
                 if agent.pty is not None:
                     agent.pty.stop(grace=1.0)  # the client, if it is still there
+                if session.relay is not None and self.relay is not None:
+                    self.relay.cancel(session.relay)  # in-flight model requests end with the agent
             if agent.pty is not None:
                 agent.pty.close_viewers('The agent was stopped.')
             session.agent = None

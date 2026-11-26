@@ -194,6 +194,31 @@ class ConnectTests(unittest.TestCase):
             again.close()
         self.assertEqual(len([e for e in self.log_entries() if 'attached' in e]), 1)
 
+    def test_review_r7_grace_end_and_reattach_do_not_race(self):
+        client = self.ws('w1:p1', 'term_a1', 'uuid-a')
+        try:
+            client.wait_output('ATTACHED')
+            cs = next(iter(self.hub.sessions.values()))
+            self.hub._grace_over(cs)  # a timer that fires while a viewer is attached ends nothing
+            self.assertFalse(cs.closed)
+            client.send_json({'t': 'in', 'd': 'alive\r'})
+            client.wait_output('AGENT-ECHO alive')
+        finally:
+            client.close()
+        deadline = time.monotonic() + 10
+        while cs.pty.viewers and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if cs.grace_timer is not None:
+            cs.grace_timer.cancel()
+        self.hub._grace_over(cs)
+        self.assertTrue(cs.closed)
+        again = self.ws('w1:p1', 'term_a1', 'uuid-a')  # a new viewer gets a new client, not the dying one
+        try:
+            again.wait_output('ATTACHED')
+            self.assertIsNot(next(iter(self.hub.sessions.values())), cs)
+        finally:
+            again.close()
+
     def test_reused_pane_id_is_refused(self):
         client = self.ws('w1:p1', 'term_OLD', 'uuid-a')
         try:

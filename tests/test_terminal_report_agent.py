@@ -557,6 +557,51 @@ class AgentServiceTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_review_r1_start_resets_the_removal_clock(self):
+        manager = self.server.manager
+        client = self.ws(fx.selector(), kind='shell')  # a shell viewer that left long ago
+        client.pump_until(lambda c: any(m.get('type') == 'hello' for m in c.controls))
+        client.close()
+        session = manager.get(fx.selector())
+        deadline = time.monotonic() + 10
+        while session.viewer_count() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        session.left_at = self.clock[0] - manager.remove_after + 60  # one minute before removal
+        self.assertEqual(self.start()[0], 200)
+        self.clock[0] += 120
+        session.agent.pty.last_output = time.monotonic() - 1000
+        _, removed = manager.reap_idle()
+        self.assertEqual(removed, [])
+        self.assertEqual(self.session_state()['state'] in ('working', 'waiting'), True)
+
+    def test_review_r4_unexpected_errors_answer_500(self):
+        original = self.hub._launch
+
+        def broken(*args, **kwargs):
+            raise __import__('subprocess').TimeoutExpired(['docker'], 60)
+        self.hub._launch = broken
+        try:
+            status, payload = self.start()
+        finally:
+            self.hub._launch = original
+        self.assertEqual((status, payload['error']), (500, 'agent_failed'))
+        self.assertEqual(self.session_state()['state'], 'none')
+
+    def test_review_r9_eviction_skips_a_working_agent(self):
+        self.assertEqual(self.start()[0], 200)
+        manager = self.server.manager
+        session = manager.get(fx.selector())
+        deadline = time.monotonic() + 10
+        while session.viewer_count() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        session.agent.pty.last_output = time.monotonic()
+        with manager.lock:
+            self.assertIsNot(manager._pick_victim_locked(), session)
+        session.agent.pty.last_output = time.monotonic() - ra.PAUSE_HOLD - 1
+        with manager.lock:
+            candidates = [s for s in manager.sessions.values() if not s.viewer_count()]
+            self.assertIn(session, candidates)
+
     def test_reset_and_removal_end_the_agent(self):
         self.assertEqual(self.start()[0], 200)
         manager = self.server.manager

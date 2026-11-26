@@ -313,6 +313,7 @@ class RelaySession:
         self.inflight = 0
         self.closed = False
         self.conns = set()
+        self.upstreams = set()
 
 
 class ModelRelay:
@@ -367,14 +368,19 @@ class ModelRelay:
                 self.selector.unregister(rs.sock)
             except (KeyError, ValueError):
                 pass
-            conns = list(rs.conns)
         try:
             rs.sock.close()
         except OSError:
             pass
-        for conn in conns:
+        self.cancel(rs)
+
+    def cancel(self, rs):
+        """End every request in flight for this sandbox, on both sides (agent stopped, reset, removed)."""
+        with self.lock:
+            socks = list(rs.conns) + list(rs.upstreams)
+        for sock in socks:
             try:
-                conn.shutdown(socket.SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
 
@@ -416,19 +422,27 @@ class ModelRelay:
                     conn, _ = rs.sock.accept()
                 except OSError:
                     continue
-                self._admit(rs, conn)
+                try:
+                    self._admit(rs, conn)
+                except Exception as error:  # e.g. no thread could be started: keep serving the others
+                    self.log(f'could not serve a model request: {type(error).__name__}')
+                    _drain(conn)
+                    conn.close()
 
     def _admit(self, rs, conn):
+        # The gate runs before a slot is taken: a sandbox without a live agent cannot hold slots.
+        _, refusal = rs.gate()
         with self.lock:
-            full = rs.closed or rs.inflight >= self.max_session or self.total >= self.max_total
-            if not full:
+            full = refusal is None and (rs.closed or rs.inflight >= self.max_session or self.total >= self.max_total)
+            if refusal is None and not full:
                 rs.inflight += 1
                 self.total += 1
                 rs.conns.add(conn)
-        if full:
+        if refusal is not None or full:
+            status, code = refusal or (503, 'busy')
             try:
                 conn.settimeout(2)
-                conn.sendall(simple_response(503, 'busy'))
+                conn.sendall(simple_response(status, code))
             except OSError:
                 pass
             _drain(conn)
@@ -438,11 +452,12 @@ class ModelRelay:
             threading.Thread(target=self._serve, args=(rs, conn), name='bbterm-relay', daemon=True).start()
         except BaseException:
             self._release(rs, conn)
-            conn.close()
             raise
 
-    def _release(self, rs, conn):
+    def _release(self, rs, conn, held=()):
         with self.lock:
+            for sock in held:
+                rs.upstreams.discard(sock)
             if conn in rs.conns:
                 rs.conns.discard(conn)
                 rs.inflight -= 1
@@ -467,7 +482,7 @@ class ModelRelay:
                     sock.close()
                 except OSError:
                     pass
-            self._release(rs, conn)
+            self._release(rs, conn, held)
 
     def _relay_one(self, rs, conn, held):
         start = time.monotonic()
@@ -498,18 +513,25 @@ class ModelRelay:
         except OSError:
             raise BadRequest(502, 'upstream_unreachable') from None
         held.append(raw)
+        with self.lock:
+            rs.upstreams.add(raw)
         try:
             upstream = self.ssl_context.wrap_socket(raw, server_hostname=host)
         except (OSError, ssl.SSLError):
             raise BadRequest(502, 'upstream_tls_failed') from None
         held.append(upstream)
+        with self.lock:
+            rs.upstreams.add(upstream)
         upstream.settimeout(self.upstream_idle)
         upstream.sendall(request_head)
         if rest:
             upstream.sendall(rest)
         left = length - len(rest)
-        conn.settimeout(self.client_idle)
         while left > 0:
+            remaining = start + self.max_lifetime - time.monotonic()
+            if remaining <= 0:
+                raise BadRequest(408, 'body_timeout')
+            conn.settimeout(min(self.client_idle, remaining))
             chunk = conn.recv(min(65536, left))
             if not chunk:
                 raise BadRequest(400, 'incomplete_body')

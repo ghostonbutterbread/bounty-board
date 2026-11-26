@@ -27,7 +27,10 @@ def request(path, extra=b'', body=BODY, method=b'POST', target=b'/v1/messages?be
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(20)
     sock.connect(path)
-    sock.sendall(head + body)
+    try:
+        sock.sendall(head + body)
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # refused at accept (cap or gate) before the request was written: the answer is still there to read
     return sock
 
 
@@ -36,7 +39,7 @@ def read_all(sock):
     while True:
         try:
             chunk = sock.recv(65536)
-        except socket.timeout:
+        except (socket.timeout, ConnectionResetError):
             break
         if not chunk:
             break
@@ -230,6 +233,84 @@ class RelayTests(unittest.TestCase):
         while self.relay.total and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertEqual(self.relay.total, 0)
+
+    def test_review_r2_no_slots_without_a_live_agent(self):
+        self.relay.close()
+        self.relay = self.make_relay(max_session=2, max_total=3)
+        self.rs = self.relay.open_session(self.sock_path, self.gate)
+        self.live = False
+        idle = []
+        for _ in range(10):  # partial heads from a sandbox whose agent is not running
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect(self.sock_path)  # refused at accept, before it sends anything
+            idle.append(sock)
+        for sock in idle:
+            self.assertIn(b'agent_not_running', read_all(sock))
+        self.assertEqual(self.relay.total, 0)
+        self.live = True
+        self.assertTrue(read_all(request(self.sock_path)).startswith(b'HTTP/1.1 200'))
+
+    def test_review_r2_body_has_a_total_deadline(self):
+        self.relay.close()
+        self.relay = self.make_relay(max_lifetime=1.0)
+        self.rs = self.relay.open_session(self.sock_path, self.gate)
+        sock = request(self.sock_path, body=b'{', length=1000)
+        started = time.monotonic()
+        try:
+            for _ in range(40):
+                sock.send(b' ')
+                time.sleep(0.1)
+        except OSError:
+            pass
+        read_all(sock)
+        self.assertLess(time.monotonic() - started, 4.5)
+        deadline = time.monotonic() + 5
+        while self.relay.total and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.relay.total, 0)
+
+    def test_review_r3_accept_loop_survives_a_failed_thread_start(self):
+        real = tr.threading.Thread
+        failures = []
+
+        class Flaky(real):
+            def start(self):
+                if self.name == 'bbterm-relay' and not failures:
+                    failures.append(1)
+                    raise RuntimeError("can't start new thread")
+                return super().start()
+        tr.threading.Thread = Flaky
+        try:
+            first = request(self.sock_path)
+            self.assertEqual(read_all(first), b'')
+            self.assertTrue(read_all(request(self.sock_path)).startswith(b'HTTP/1.1 200'))
+        finally:
+            tr.threading.Thread = real
+        self.assertEqual(failures, [1])
+        deadline = time.monotonic() + 5
+        while self.relay.total and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.relay.total, 0)
+
+    def test_review_r6_cancel_ends_requests_in_flight(self):
+        self.upstream.close()
+        hold = threading.Event()
+        self.upstream = fu.FakeUpstream(self.cert, self.key, hold=hold)
+        self.relay.upstream_override = ('127.0.0.1', self.upstream.port)
+        sock = request(self.sock_path)
+        data = b''
+        while b'message_start' not in data:
+            data += sock.recv(65536)
+        self.relay.cancel(self.rs)
+        started = time.monotonic()
+        read_all(sock)
+        self.assertLess(time.monotonic() - started, 5)
+        deadline = time.monotonic() + 5
+        while self.relay.total and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual((self.relay.total, self.rs.upstreams), (0, set()))
+        hold.set()
 
     def test_socket_is_0600_and_nothing_is_logged(self):
         self.assertEqual(stat.S_IMODE(os.lstat(self.sock_path).st_mode), 0o600)

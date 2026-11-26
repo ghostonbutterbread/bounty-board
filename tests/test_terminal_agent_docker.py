@@ -220,11 +220,18 @@ class ReportAgentDockerTests(unittest.TestCase):
     def test_04_stop_ends_the_process_inside_the_container(self):
         pid = self.exec('cat', '/home/sandbox/.report-agent/agent.pid').stdout.strip()
         self.assertEqual(self.exec('test', '-d', f'/proc/{pid}').returncode, 0)
+        session, viewer = self.viewer()
+        session.agent.pty.write(b'child\n')  # a command the CLI started (review R8)
+        viewer.wait_for('CHILD ', timeout=20)
+        child = bytes(viewer.output).decode().split('CHILD ', 1)[1].split()[0]
+        session.agent.pty.detach(viewer)
+        self.assertEqual(self.exec('test', '-d', f'/proc/{child}').returncode, 0)
         self.assertEqual(self.hub.stop(self.manager, {'selector': self.sel})['state'], 'none')
-        deadline = time.time() + 15
-        while time.time() < deadline and self.exec('test', '-d', f'/proc/{pid}').returncode == 0:
-            time.sleep(0.2)
-        self.assertNotEqual(self.exec('test', '-d', f'/proc/{pid}').returncode, 0)
+        for gone in (pid, child):
+            deadline = time.time() + 15
+            while time.time() < deadline and self.exec('test', '-d', f'/proc/{gone}').returncode == 0:
+                time.sleep(0.2)
+            self.assertNotEqual(self.exec('test', '-d', f'/proc/{gone}').returncode, 0, gone)
         self.assertEqual(self.hub.info(self.manager, self.sel)['state'], 'none')
 
     def test_05_second_start_refused_and_reset_stops_the_agent(self):

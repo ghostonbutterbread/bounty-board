@@ -5,7 +5,8 @@ Prints what it was given (argv, cwd, the task file, selected env), makes one
 model request through the relay (127.0.0.1:3129 in a sandbox, or the
 ``BBTERM_TEST_MODEL_SOCK`` Unix socket with the local test backend) with
 credentials the relay must drop, then echoes input lines. Input ``spam``
-prints a line every 0.2 s for 3 s; ``quit`` exits with code 7.
+prints a line every 0.2 s for 3 s; ``child`` starts ``sleep 300`` and prints
+its pid; ``quit`` exits with code 7.
 """
 import json
 import os
@@ -68,6 +69,11 @@ def main():
         if line == 'quit':
             print('BYE', flush=True)
             sys.exit(7)
+        if line == 'child':  # like a tool call that started a long-running command
+            import subprocess
+            child = subprocess.Popen(['sleep', '300'])
+            print(f'CHILD {child.pid}', flush=True)
+            continue
         if line == 'spam':
             for i in range(15):
                 print(f'spam-{i}', flush=True)
