@@ -1608,6 +1608,18 @@
     return 'Saving to report unavailable. Edits are saved as browser drafts.';
   }
   function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
+  // Browser tab title, most specific first: "<report> · Reports · <program>[ / <lane>] · Bounty Board".
+  // Read after the view renders, because reports() may settle state.report on the first report.
+  function pageTitle() {
+    if(state.loading)return 'Bounty Board';
+    if(state.error)return 'Workspace unavailable · Bounty Board';
+    const views={dashboard:'Dashboard',recent:'Recent reports',recon:'Recon intel'};
+    if(views[state.view])return `${views[state.view]} · Bounty Board`;
+    const program=currentProgram();if(!program)return 'Programs · Bounty Board';
+    const report=state.section==='reports' && state.report ? reportById(state.report) : null;
+    const where=programLabel(program)+((list(program.lanes)||[]).length>1 && state.lane ? ` / ${state.lane}` : '');
+    return [report ? String(report.title || report.name || report.id) : '',(sections.find(([k])=>k===state.section)||[])[1],where,'Bounty Board'].filter(Boolean).join(' · ');
+  }
   function render() {
     const oldPath=app.querySelector('#saved-shared-path'), focus=oldPath && document.activeElement===oldPath ? {key:oldPath.dataset.recoveryKey,start:oldPath.selectionStart,end:oldPath.selectionEnd,direction:oldPath.selectionDirection} : null;
     const active=document.activeElement, focusKey=active && app.contains(active) ? ['data-sort','data-sort-menu','data-breakdown','data-dash-work','data-class-group','data-section'].map(attr=>active.hasAttribute(attr)?[attr,active.getAttribute(attr),!!active.closest('.tabs')]:null).find(Boolean) : null;
@@ -1629,6 +1641,7 @@
     if(state.loading) app.innerHTML=skeleton();
     else if(state.error) app.innerHTML=`<div class="panel empty error-state" role="alert">${icon('exclamation-circle')}<h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
     else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():state.view==='recon'?reconView():workspace();
+    document.title=pageTitle();
     for(const old of keptHosts){const fresh=app.querySelector(`#${old.id}`);if(fresh && ['family','program','lane','path','reportId'].every(k=>fresh.dataset[k]===old.dataset[k]))fresh.replaceWith(old);}
     const reportList=app.querySelector('.report-links');if(reportList && reportListScroll)reportList.scrollTop=reportListScroll;
     if(state.routeNotice && !state.loading)app.insertAdjacentHTML('afterbegin',`<div class="message warning" role="alert">${esc(state.routeNotice)} <button type="button" class="link-button" data-dismiss-route-notice>Dismiss</button></div>`);

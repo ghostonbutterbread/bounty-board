@@ -737,4 +737,24 @@ test('rationale editor and overwrite warning stay accessible on mobile themes', 
   await page.close();
 });
 
+test('browser tab title names the current view and open report', async () => {
+  const page=await browser.newPage();const data=structuredClone(fixture);
+  data.programs[0].lanes[0].reports.push({id:'r2',title:'Second synthetic report',content:'# Second',revision:'1'});
+  await page.route('**/api/data',route=>route.fulfill({json:data}));
+  const title=async expected=>{try {await page.waitForFunction(t=>document.title===t,expected,{timeout:5000});} catch {} assert.equal(await page.title(),expected);};
+  await page.goto(base);await title('Dashboard · Bounty Board');
+  await page.getByRole('link',{name:'Programs',exact:true}).click();await title('Findings · Example program · Bounty Board');
+  await page.getByRole('link',{name:'Reports',exact:true}).click();await title('Example report · Reports · Example program · Bounty Board');
+  await page.getByLabel('Report',{exact:true}).selectOption('r2');await title('Second synthetic report · Reports · Example program · Bounty Board');
+  await page.getByRole('link',{name:'Recent reports',exact:true}).click();await title('Recent reports · Bounty Board');
+  await page.goBack();await title('Second synthetic report · Reports · Example program · Bounty Board');
+  await page.goto(`${base}/#/recon`);await title('Recon intel · Bounty Board');
+  await page.goto(`${base}/#/programs/synthetic/Web/reports/r1`);await title('Example report · Reports · Example program · Bounty Board');
+  await page.goto(`${base}/#/programs/synthetic/Web/reports/gone`);await title('Reports · Example program · Bounty Board');
+  // The lane joins the title only when the program has more than one lane.
+  data.programs[0].lanes.push({name:'API',findings:[],coverage:[],map:[],gadgets:[],reports:[],warnings:[]});
+  await page.goto('about:blank');await page.goto(`${base}/#/programs/synthetic/API/coverage`);await title('Coverage · Example program / API · Bounty Board');
+  await page.close();
+});
+
 after(async()=>{if(browser) await browser.close(); await new Promise(resolve=>server.close(resolve));});
