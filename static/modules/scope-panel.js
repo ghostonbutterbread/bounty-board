@@ -59,7 +59,7 @@
   }
   const helpers = {parseQuery, buildQuery, pullCommand, rebuildCommand, ageText, shortAge, fmtDate, matchesKind, entryHas, changeSummary};
   if (typeof module === 'object' && module.exports) { module.exports = helpers; return; }
-  root.BoardScopePanel = helpers;
+
 
   // ---- DOM -----------------------------------------------------------------
   let ctx = null;
@@ -269,6 +269,9 @@
     if (host) fetchScope(host.dataset.family, host.dataset.program, {quiet: true});
   }
 
+  // Quiet refresh on demand (tests) and when the tab becomes visible again.
+  root.BoardScopePanel = {...helpers, refresh: poll};
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
   window.registerBoardModule({
     name: 'scope-panel',
     afterRender(context) {
