@@ -39,6 +39,9 @@ FINDINGS = [
     # Absolute evidence_path recorded on another host, matched by its lane segment.
     {'fid': 'F07', 'title': 'Trace on other host', 'severity': 'INFO', 'class_name': 'info', 'status': 'raw',
      'evidence_path': OTHER_HOST + '/reports/proof/F07-trace.md'},
+    # Absolute path with x/../ before reports/: both sides normalise before the lane-segment match.
+    {'fid': 'F09', 'title': 'Dotted path on other host', 'severity': 'INFO', 'class_name': 'info', 'status': 'raw',
+     'evidence_path': OTHER_HOST + '/x/../reports/proof/F09-notes.md'},
 ]
 REPORTS = {
     'F01-xss/demo-xss-F01.md': '# Submission F01\n\nStored xss in the bio.\n',
@@ -49,11 +52,12 @@ REPORTS = {
     'F03-loose/notes/deep/EVIDENCE.md': '# nested, no owner\n\nzebra\n',
     'proof/F04-capture.md': '# Capture F04\n\nzebra capture.\n',
     'proof/F07-trace.md': '# Trace F07\n\nzebra trace.\n',
+    'proof/F09-notes.md': '# Notes F09\n\nzebra dotted.\n',
     'F05/EVIDENCE.md': '# Registered F05\n\nzebra but a real report.\n',
     'notes.md': '# Notes\n\nzebra notes.\n',
 }
 EVIDENCE = {'F01-xss/EVIDENCE.md', 'F02-idor/EVIDENCE.md', 'F03-loose/evidence.md',
-            'F03-loose/notes/deep/EVIDENCE.md', 'proof/F04-capture.md', 'proof/F07-trace.md'}
+            'F03-loose/notes/deep/EVIDENCE.md', 'proof/F04-capture.md', 'proof/F07-trace.md', 'proof/F09-notes.md'}
 REPORT_FILES = {'F01-xss/demo-xss-F01.md', 'F05/EVIDENCE.md', 'notes.md'}
 
 
@@ -83,6 +87,8 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(rel('./reports/a/../F1/EVIDENCE.md'), 'F1/EVIDENCE.md')
         self.assertEqual(rel(str(self.lane / 'reports/F1/EVIDENCE.md')), 'F1/EVIDENCE.md')
         self.assertEqual(rel(OTHER_HOST + '/reports/F1/EVIDENCE.md'), 'F1/EVIDENCE.md', 'other host, by lane segment')
+        self.assertEqual(rel(OTHER_HOST + '/x/../reports/F1/EVIDENCE.md'), 'F1/EVIDENCE.md', 'normalised before the segment match')
+        self.assertEqual(rel('/../' + OTHER_HOST.lstrip('/') + '/reports/F1/EVIDENCE.md'), 'F1/EVIDENCE.md', '.. above the root is clamped')
         for value in (None, '', '  ', 'notes/x.md', 'reports/../ledgers/x.md', 'reports/', '/elsewhere/x/reports/a.md',
                       f'/srv/{FAMILY}/other/{LANE}/reports/a.md', 'reports/a\0.md', 12):
             self.assertIsNone(rel(value), value)
@@ -158,7 +164,7 @@ class SearchIndexTests(Base):
     def test_finding_hits_keep_matching_and_link_evidence(self):
         self.index.refresh()
         links = {}
-        for query in ('F01', 'F02', 'F04', 'F05', 'F07'):
+        for query in ('F01', 'F02', 'F04', 'F05', 'F07', 'F09'):
             hit = self.index.search(query, kinds=('finding',))['results']['findings'][0]
             self.assertEqual(hit['fid'], query)
             links[query] = hit['report'] and (hit['report']['path'], hit['report']['kind'], hit['report']['target'])
@@ -168,6 +174,7 @@ class SearchIndexTests(Base):
         self.assertEqual(links['F04'], ('proof/F04-capture.md', 'evidence', target('proof/F04-capture.md')))
         self.assertEqual(links['F05'], ('F05/EVIDENCE.md', 'report', target('F05/EVIDENCE.md')))
         self.assertEqual(links['F07'], ('proof/F07-trace.md', 'evidence', target('proof/F07-trace.md')))
+        self.assertEqual(links['F09'], ('proof/F09-notes.md', 'evidence', target('proof/F09-notes.md')))
         self.assertEqual(self.index.search('Evidence only idor')['results']['findings'][0]['report']['title'], 'Evidence')
 
     def test_evidence_costs_no_read_or_budget(self):

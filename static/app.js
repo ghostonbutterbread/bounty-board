@@ -775,9 +775,10 @@
   // report index: a .md file under reports/ is evidence when no finding's
   // report_path names it and either its name is EVIDENCE.md (any case) or a
   // finding's evidence_path names it.
-  const normalizeParts = value => {
+  // clamp: '..' above the start is dropped (absolute paths, like posixpath.normpath) instead of rejected.
+  const normalizeParts = (value, clamp=false) => {
     const out=[];
-    for(const part of String(value).split('/')){if(!part || part==='.')continue;if(part==='..'){if(!out.length)return null;out.pop();}else out.push(part);}
+    for(const part of String(value).split('/')){if(!part || part==='.')continue;if(part==='..'){if(!out.length){if(clamp)continue;return null;}out.pop();}else out.push(part);}
     return out.length ? out.join('/') : null;
   };
   // Ledger-recorded path -> path relative to the lane's reports/ (relative
@@ -786,8 +787,10 @@
     if(typeof recorded!=='string' || !program)return null;
     let value=recorded.trim();if(!value || /[\0\n]/.test(value))return null;
     if(value.startsWith('/')){
-      const marker=`/${program.family}/${program.name}/${laneName}/reports/`, at=value.lastIndexOf(marker);
-      if(at<0)return null;value=value.slice(at+marker.length);
+      // Normalise first, as report_evidence.reports_relative does, so both sides agree on x/../reports paths.
+      const normal='/'+(normalizeParts(value,true)||'');
+      const marker=`/${program.family}/${program.name}/${laneName}/reports/`, at=normal.lastIndexOf(marker);
+      if(at<0)return null;value=normal.slice(at+marker.length);
     } else {value=normalizeParts(value);if(!value || !value.startsWith('reports/'))return null;value=value.slice(8);}
     return normalizeParts(value);
   };
@@ -1136,7 +1139,9 @@
       // content meanwhile so a reload never flashes the view.
       if(!entry){entry={status:'loading'};evidenceCache.set(key,entry);while(evidenceCache.size>24)evidenceCache.delete(evidenceCache.keys().next().value);}
       const snapshot=state.data;entry.snapshot=snapshot;entry.loading=true;
-      const here=()=>state.view==='program' && state.section==='reports' && state.report===path && currentProgram()===program && currentLane()===lane;
+      // Compare by id and name: Refresh and the phased summary->full swap replace
+      // the program and lane objects while the fetch is in flight.
+      const here=()=>state.view==='program' && state.section==='reports' && state.report===path && String(currentProgram()?.id)===String(program.id) && currentLane()?.name===lane.name;
       BoardAPI.report(program,lane.name,path,snapshot?.portfolio_unloaded ? snapshot.root_instance : undefined).then(result=>{
         if(typeof result?.content!=='string')throw new Error('Invalid evidence');
         const changed=entry.status!=='loaded' || entry.content!==result.content;

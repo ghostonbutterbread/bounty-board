@@ -12,7 +12,7 @@ An evidence file belongs to its finding. It is never a row in a report list, a R
 
 One module, imported by both indexes (`app.reports()` for `/api/data` and `/api/lane-reports`; `search_index.SearchIndex` for `/api/search` and `/api/recent-reports`), like `report_publisher.generated_navigation`:
 
-- `reports_relative(recorded, lane)`: a ledger path to a path under `<lane>/reports/`. Relative paths are lane-relative (`reports/...`, normalized, no escape). Absolute paths match under this lane's own `reports/`, else by their last `/<family>/<program>/<lane>/reports/` segment (ledgers written on another host), as `report_artifacts.recorded_relative` does.
+- `reports_relative(recorded, lane)`: a ledger path to a path under `<lane>/reports/`. Relative paths are lane-relative (`reports/...`, normalized, no escape). Absolute paths are normalized first (`x/../` resolved, `..` above the root dropped, like `posixpath.normpath`), then match under this lane's own `reports/`, else by their last `/<family>/<program>/<lane>/reports/` segment (ledgers written on another host), as `report_artifacts.recorded_relative` does. `static/app.js` normalizes the same way before its segment match, so both sides agree.
 - `recorded_paths(findings, lane)`: the sets of paths named by any `report_path` and any `evidence_path`.
 - `is_evidence(relative, report_paths, evidence_paths)`: true when no `report_path` names the file and either its basename is `EVIDENCE.md` (case-insensitive, any depth) or an `evidence_path` names it. A `report_path` named `EVIDENCE.md` stays a report.
 
@@ -73,6 +73,13 @@ Runs (box shared and loaded; `TMPDIR=/home/ryushe/.hermes/cache/scratch/bb-evide
 - Broad browser suite (`node --test --test-concurrency=1 --test-skip-pattern='^browser metadata update reaches backend with a disposable synthetic writer$'` over `static/tests/*.test.cjs` minus `collaboration.synthetic` and `collaboration-combined.synthetic`, 46 files): 287 tests, 286 pass, 1 fail: `ui-redesign` "not-submitted filter, program search and explicit workspace target" (TimeoutError, load average about 13). `ui-redesign` alone: first 6/7 (this time the "multi-select filters" keyboard-focus assertion), then that test 6 of 7 targeted reruns, the same test on the base files 4/4, and the whole file again 7/7. Its fixture has no `evidence_path`, so no new code path runs there; recorded as a load flake, not a regression.
 
 Screenshots (synthetic fixture, `EVIDENCE_SCREENSHOT_DIR=/home/ryushe/.hermes/cache/scratch/bb-evidence/tmp/shots`): `evidence-view-light.png`, `evidence-view-dark.png`, `finding-rows-light.png`, `finding-rows-dark.png`, `dashboard-drill-light.png`, `submission-report-artifacts-light.png`.
+
+## Review
+
+- Independent review (Claude Code opus, read-only, detached tree at `37c6d6f`): ACCEPT, no blocker. Verified write safety (no editor, picker, live host, draft or N/A path reaches evidence), escaping of every new interpolation, no new server read path, and exclusion on every listed surface.
+- EV-1 (should-fix, fixed): the evidence view could stay on "Loading evidence…" when Refresh or the phased summary->full swap replaced the program and lane objects during the fetch, because the redraw check compared them by object identity. It now compares `program.id` and `lane.name`. Regression: browser test "evidence content appears when workspace data is replaced during its fetch (cold load, Refresh)" (300 ms delayed cold load, then a 2.5 s delayed fetch with Refresh in flight).
+- EV-2 (minor, fixed): the frontend matched absolute paths by the lane segment on the raw string while the backend normalized first, so `<root>/x/../reports/...` disagreed. Both now normalize, then search the segment on the normalized path. Regression: fixture finding F09 (`/srv/elsewhere/.../web/x/../reports/proof/F09-notes.md`) in the Python classifier, Recent/search and finding-link tests and in the browser finding-row test; classifier cases for `x/../` and `..` above the root.
+- Red on the reviewed SHA (only `static/app.js` and `report_evidence.py` swapped to `37c6d6f`): Python 6 of 11 fail, browser 3 of 4 fail. Green on the fix: Python 11/11, browser 4/4. The reviewer's repros (`EV-1/stale-loading`, `EV-1/control-300`, `EV-2/divergence`) pass against the fixed tree.
 
 ## Gaps
 

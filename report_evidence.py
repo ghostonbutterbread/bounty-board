@@ -39,10 +39,11 @@ def reports_relative(recorded, lane):
             rest = normal[len(base) + 1:]
         else:
             marker = f'/{lane.parent.parent.name}/{lane.parent.name}/{lane.name}/reports/'
-            index = value.rfind(marker)
+            # Search the normalised path, like the frontend, so x/../reports resolves on both sides.
+            index = normal.rfind(marker)
             if index < 0:
                 return None
-            rest = value[index + len(marker):]
+            rest = normal[index + len(marker):]
     else:
         normal = posixpath.normpath(value)
         if not normal.startswith('reports/'):

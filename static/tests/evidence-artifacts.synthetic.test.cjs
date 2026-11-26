@@ -11,7 +11,7 @@ const repo=path.resolve(__dirname,'../..');
 const shots=process.env.EVIDENCE_SCREENSHOT_DIR;
 const PROGRAM='web_bounty/demo';
 const route=(section,tail='')=>`#/programs/${encodeURIComponent(PROGRAM)}/web/${section}${tail?'/'+encodeURIComponent(tail):''}`;
-const EVIDENCE=['F01-xss/EVIDENCE.md','F02-idor/EVIDENCE.md','F03-loose/evidence.md','F03-loose/notes/deep/EVIDENCE.md','proof/F04-capture.md','proof/F07-trace.md'];
+const EVIDENCE=['F01-xss/EVIDENCE.md','F02-idor/EVIDENCE.md','F03-loose/evidence.md','F03-loose/notes/deep/EVIDENCE.md','proof/F04-capture.md','proof/F07-trace.md','proof/F09-notes.md'];
 const REPORTS=['F01-xss/demo-xss-F01.md','F05/EVIDENCE.md','notes.md'];
 
 async function withBoard(mode,fn){
@@ -104,6 +104,7 @@ test('finding rows link evidence with real anchors; old evidence URLs open the r
   assert.equal(await evidenceLink('F02').getAttribute('href'),route('reports','F02-idor/EVIDENCE.md'));
   assert.equal(await evidenceLink('F04').getAttribute('href'),route('reports','proof/F04-capture.md'));
   assert.equal(await evidenceLink('F07').getAttribute('href'),route('reports','proof/F07-trace.md'),'absolute path from another host');
+  assert.equal(await evidenceLink('F09').getAttribute('href'),route('reports','proof/F09-notes.md'),'x/../reports path normalised like the backend');
   assert.equal(await evidenceLink('F05').count(),0,'a report_path named EVIDENCE.md is the report');
   await evidenceLink('F02').hover();
   await page.getByRole('tooltip').getByText('Open evidence: F02-idor/EVIDENCE.md').waitFor();
@@ -173,6 +174,21 @@ test('finding rows link evidence with real anchors; old evidence URLs open the r
   assert.equal(await page.locator('[data-evidence-view]').count(),0);
   await page.goto(base+'/'+route('reports','gone/missing.md'));
   await page.locator('[data-report-missing]').waitFor();
+}));
+
+test('evidence content appears when workspace data is replaced during its fetch (cold load, Refresh)',{timeout:90000},()=>withBoard('plain',async({page,base})=>{
+  // Delay /api/report so the phased summary->full swap (cold load) or a Refresh
+  // replaces the program and lane objects while the evidence fetch is in flight.
+  const delays=[300];
+  await page.route('**/api/report?**',async r=>{const d=delays.shift();if(d)await new Promise(x=>setTimeout(x,d));await r.continue();});
+  await page.goto(base+'/'+route('reports','F01-xss/EVIDENCE.md'));
+  await (await evidenceView(page,'F01-xss/EVIDENCE.md')).locator('#evidence-preview h1',{hasText:'Evidence F01'}).waitFor({timeout:8000});
+  delays.push(2500);
+  await page.evaluate(hash=>{location.hash=hash;},route('reports','F02-idor/EVIDENCE.md'));
+  const view=await evidenceView(page,'F02-idor/EVIDENCE.md');
+  await view.locator('.state',{hasText:'Loading evidence'}).waitFor();
+  await page.locator('#refresh').click();
+  await view.locator('#evidence-preview h1',{hasText:'Evidence F02'}).waitFor({timeout:10000});
 }));
 
 test('live-edit mode: evidence opens the artifact view, never the live editor',{timeout:90000},()=>withBoard('live',async({page,base})=>{
