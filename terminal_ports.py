@@ -60,6 +60,7 @@ MAX_RESERVED = 16         # host port numbers remembered per session
 OPEN_TIMEOUT = 5
 HELLO_TIMEOUT = 5
 CONTROL_RATE = (10, 60)   # at most 10 control connections per 60 s per session
+REPORT_RATE = (10, 5)     # at most 10 ports reports per 5 s per control connection (the agent sends <= 1/s)
 ACTIVITY_EVERY = 5        # seconds between activity reports while bytes flow
 TAILSCALE_REFRESH = 60
 DEFAULT_RANGE = (9100, 9199)
@@ -115,7 +116,7 @@ def parse_tailscale_address(value):
 def _parse_line(line):
     try:
         msg = json.loads(line.decode('utf-8'), parse_constant=lambda name: (_ for _ in ()).throw(_Bad(name)))
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         raise _Bad('not json') from None
     if not isinstance(msg, dict) or not isinstance(msg.get('t'), str):
         raise _Bad('not an object')
@@ -351,6 +352,7 @@ class _Acceptor:
         self.closed = False
         self.wake_r, self.wake_w = socket.socketpair()
         self.wake_r.setblocking(False)
+        self.wake_w.setblocking(False)  # add() runs under the hub lock: it must never block
         self.selector.register(self.wake_r, selectors.EVENT_READ, None)
         self.thread = threading.Thread(target=self._loop, name='bbterm-ports-accept', daemon=True)
         self.thread.start()
@@ -364,7 +366,7 @@ class _Acceptor:
             self.selector.register(sock, selectors.EVENT_READ, callback)
         try:
             self.wake_w.send(b'x')
-        except OSError:
+        except OSError:  # BlockingIOError: a wake-up is already pending
             pass
 
     def remove(self, sock):
@@ -404,7 +406,10 @@ class _Acceptor:
             for key in list(self.selector.get_map().values()):
                 if key.data is not None:
                     key.fileobj.close()
-        self.wake_w.send(b'x')
+        try:
+            self.wake_w.send(b'x')
+        except OSError:
+            pass
         self.thread.join(timeout=3)
         self.selector.close()
         self.wake_r.close()
@@ -518,7 +523,12 @@ class SessionPorts:
                 conn.close()
                 return
             self.unidentified += 1
-        threading.Thread(target=self._agent_conn, args=(conn,), name='bbterm-ports-agent', daemon=True).start()
+        try:
+            threading.Thread(target=self._agent_conn, args=(conn,), name='bbterm-ports-agent', daemon=True).start()
+        except BaseException:
+            with self.hub.lock:
+                self.unidentified -= 1
+            conn.close()
 
     def _agent_conn(self, conn):
         try:
@@ -552,11 +562,18 @@ class SessionPorts:
             ctl = self.control
         if old is not None:
             old.kill()  # its own thread cleans up
+        reports = collections.deque()
         try:
             while not ctl.dead:
                 line, buf = _read_line(conn, buf)
                 msg = _parse_line(line)
                 if msg['t'] == 'ports' and set(msg) == {'t', 'ports'}:
+                    now, (limit, window) = time.monotonic(), REPORT_RATE
+                    while reports and now - reports[0] > window:
+                        reports.popleft()
+                    if len(reports) >= limit:
+                        raise _Bad('ports reports too fast')
+                    reports.append(now)
                     self._update(ctl, self._valid_ports(msg['ports']))
                 elif msg['t'] == 'fail' and set(msg) == {'t', 'id'} and _valid_id(msg['id']):
                     self._fail(ctl, msg['id'])
@@ -671,7 +688,13 @@ class SessionPorts:
             record = _Conn(client, via)
             self.conns.add(record)
             hub.total_conns += 1
-        threading.Thread(target=self._client, args=(fwd, record), name='bbterm-ports-client', daemon=True).start()
+        try:
+            threading.Thread(target=self._client, args=(fwd, record), name='bbterm-ports-client', daemon=True).start()
+        except BaseException:
+            with hub.lock:
+                self.conns.discard(record)
+                hub.total_conns -= 1
+            client.close()
 
     def _client(self, fwd, record):
         hub = self.hub
@@ -819,8 +842,13 @@ class PortsHub:
         lo, hi = self.range
         taken = {n for other in self.sessions for n in other.reserved.values()}
         known = sp.reserved.get(port)
+        # Free numbers first; when the range is full, numbers other sessions only
+        # remember for ports that stopped listening (their URLs change if they come back).
+        idle = [(other, p, n) for other in self.sessions if other is not sp
+                for p, n in other.reserved.items() if p not in other.forwards]
         candidates = ([known] if known is not None else []) + [
-            n for n in range(lo, hi + 1) if n not in taken and n not in self.exclude]
+            n for n in range(lo, hi + 1) if n not in taken and n not in self.exclude] + [n for _, _, n in idle]
+        owners = {n: (other, p) for other, p, n in idle}
         for number in candidates:
             try:
                 self._bound[(LOCAL_HOST, number)] = _bind_tcp(LOCAL_HOST, number)
@@ -828,6 +856,9 @@ class PortsHub:
                 if number == known:
                     del sp.reserved[port]  # someone else on the host took it; pick a new one
                 continue
+            if number in owners and number != known:
+                other, other_port = owners[number]
+                other.reserved.pop(other_port, None)
             sp.reserved[port] = number
             sp.reserved.move_to_end(port)
             while len(sp.reserved) > MAX_RESERVED:

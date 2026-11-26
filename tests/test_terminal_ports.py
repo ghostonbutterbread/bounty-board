@@ -554,6 +554,93 @@ class MaliciousAgentTests(HubCase):
         self.assertFalse(closed_by_peer(agents[-1].ctl, timeout=0.3), 'the current one stays')
 
 
+class ReviewFixTests(HubCase):
+    """Regression tests for the independent review of 1aa50ea."""
+
+    def test_wake_byte_never_blocks_under_the_hub_lock(self):
+        acceptor = self.hub.acceptor
+        self.assertFalse(acceptor.wake_w.getblocking())
+        with self.hub.lock:  # the accept thread cannot drain while we hold everything up
+            with contextlib.suppress(BlockingIOError):
+                while True:
+                    acceptor.wake_w.send(b'x' * 4096)
+            sock = socket.socket()
+            sock.bind(('127.0.0.1', 0))
+            sock.listen(1)
+            done = threading.Event()
+            threading.Thread(target=lambda: (acceptor.add(sock, lambda c: c.close()), done.set()), daemon=True).start()
+            self.assertTrue(done.wait(3), 'add() returned with a full wake-up pipe')
+        acceptor.remove(sock)
+        self.forward()  # still accepting
+
+    def test_ports_reports_are_rate_limited(self):
+        agent = Agent(self.sock_path)
+        limit, _ = tp.REPORT_RATE
+        with contextlib.suppress(OSError):
+            for i in range(limit + 1):
+                agent.ports([40000 + i % 2])
+        self.assertTrue(closed_by_peer(agent.ctl))
+
+    def test_deeply_nested_json_is_just_malformed(self):
+        agent = Agent(self.sock_path, hello=False)
+        agent.ctl.sendall(b'[' * 4000 + b'\n')
+        self.assertTrue(closed_by_peer(agent.ctl))
+        agent = Agent(self.sock_path)
+        agent.ctl.sendall(b'{"t": "ports", "ports": ' + b'[' * 4000 + b'\n')
+        self.assertTrue(closed_by_peer(agent.ctl))
+        wait(lambda: self.sp.unidentified == 0)
+
+    def test_thread_start_failure_does_not_leak_counters(self):
+        server, agent, item = self.forward()
+
+        class NoThread(threading.Thread):
+            def start(self):
+                raise RuntimeError("can't start new thread")
+        with mock.patch.object(tp.threading, 'Thread', NoThread):
+            client = tcp('127.0.0.1', item['host_port'])
+            self.assertTrue(closed_by_peer(client))
+            stranger = Agent(self.sock_path, hello=False)
+            self.assertTrue(closed_by_peer(stranger.ctl))
+        self.assertEqual((self.hub.total_conns, len(self.sp.conns), self.sp.unidentified), (0, 0, 0))
+
+    def test_idle_reservations_of_other_sessions_are_reused_when_the_range_is_full(self):
+        lo = self.range[0]
+        self.hub.range = (lo, lo)
+        server, agent, item = self.forward()
+        agent.ports([])
+        self.wait_items(0)
+        path2 = self.base / 'ports2.sock'
+        sp2 = self.hub.open_session(str(path2), FakeOwner())
+        other = self.server()
+        AutoAgent(path2).ports([other.port])
+        self.assertEqual(wait(lambda: sp2.items())[0]['host_port'], lo, 'took the idle number')
+        self.assertEqual(self.sp.reserved, {})
+        agent.ports([server.port])
+        time.sleep(0.3)
+        self.assertEqual(self.sp.items(), [], 'an active forward is never taken')
+
+
+class BackendOrderTests(unittest.TestCase):
+    def test_destroy_closes_ports_even_when_docker_rm_fails(self):
+        import subprocess
+        base = fx.tmp_base('destroy-order')
+        try:
+            backend = sb.DockerBackend(image='bbterm-test-none', state_dir=base, proxy=None)
+            closed = []
+
+            class Session:
+                id = 'abc123'
+
+                def close_ports(self):
+                    closed.append(True)
+            with mock.patch.object(backend, 'run', side_effect=subprocess.TimeoutExpired('docker', 60)):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    backend.destroy(Session())
+            self.assertEqual(closed, [True])
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+
 class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.base = fx.tmp_base('settings')

@@ -453,8 +453,8 @@ class DockerBackend:
         return None
 
     def destroy(self, session):
+        session.close_ports()  # first: a failing docker rm must not leave listeners behind
         self.run('rm', '-f', self.name(session), check=False, timeout=60)
-        session.close_ports()
         entry = self.handles.pop(session.id, None)
         if entry is not None:
             try:
