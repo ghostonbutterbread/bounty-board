@@ -110,6 +110,32 @@ Earlier suite results (2026-11-25, load average 15 to 21):
 - Recon node and browser files: 14/14. The finding-actions, ledger-actions, recent-actions, report-links-recent and dashboard-coverage browser files: 37/37.
 - `npm test -- --test-concurrency=1`: 214 tests, 213 pass. The one failure was in `sandbox-terminal.synthetic.test.cjs` (an unrelated file); rerun alone it passed 8/8 (recorded in `BUGFIXES.md`).
 
+## Scope in the URL browser (merge with scope-checked Recon intel, origin/beta 7c8c685)
+
+The URL browser follows the scope design in `docs/integrations/scope-check.md`:
+
+- **Verdicts from the cache only.** `GET /api/recon/urls` and `/api/recon/url` classify the URLs of the displayed page (at most 100) through `ReconIntel.annotate_urls`, which uses the existing `_scope_lookup` (cache-only `ScopeChecker.lookup`). URLs not yet classified are `unchecked` with `scope_summary.state` `pending` and are queued as one background `scope` job for the program, delta only and at the front of the queue. The client polls the page every 1.5 s while it is pending (at most 20 times). A request never starts BBH. Hosts are already classified by the program view; URLs are always decided exactly (`in` or `out`).
+- **Hidden by default.** Out-of-scope rows on the page are hidden unless `oos=1` is in the hash. A line reads "N out-of-scope URLs on this page hidden · Show", a real link that sets `oos=1` and keeps the URL filters; under `oos=1` it reads "… shown · Hide". Shown out-of-scope rows are muted and carry the same OOS pill (the tooltip is the reason). An "unchecked" row of a program that has a scope gets "Scope not checked". A page whose rows are all out of scope says so. Select all selects only the rows on screen.
+- **Copy gated.** The new per-row "URL" copy button uses the same rule as the other Recon lists: disabled with "out of scope" for `out`, with "scope not checked" for `unchecked` unless the program has no scope on file (`pending`, `failed` and `unconfigured` all block). Control characters still win. The copy action checks the rule again when clicked.
+- **Marking not gated.** An operator may record a review of an out-of-scope URL (for example dismiss it). `unchecked` and `pending` do not block Mark either, and the server's mark path never consults scope. The mark response item carries `scope`, so the row keeps its pill.
+- **Count links carry `oos`.** Every link into the URL browser is built from the current hash state, so `oos=1` travels with it, and so do the Close and paging links.
+- **Merge resolution.** `recon-intel.js` had 8 conflicting hunks, resolved as unions:
+  - `DEFAULTS` and `parseQuery` carry `oos` and the URL browser keys.
+  - The helper exports are merged.
+  - The depth tiles keep the count links, with "In-scope hosts/URLs" after Hosts.
+  - Host rows keep the URL browser links, the findings popover and the coverage link, plus the OOS class and pill.
+  - Hunt-next parameters keep the scope-gated example and copies, plus the link on the parameter name.
+  - Under-tested hosts keep the scope filter and gated copies, plus the host link.
+  - The dashboard card row stays one link and shows in-scope counts.
+
+  `recon-intel.css` and `BACKEND_API.md` keep both sides. The auto-merged `recon_intel.py` and `app.py` were reviewed: scope jobs (`('scope', program, 0)`) share the worker queue with the debounced mark refresh without key clashes.
+- **Tests:**
+  - `ScopeUrlTests` (3): a request with the worker not started queues the job and makes no BBH call; one call from the worker, then cache hits; items, history and the mark response carry scope; out-of-scope and failed-check URLs can still be marked.
+  - The node `scope` helper test.
+  - The browser test "scope in the URL browser", on a synthetic program whose scope excludes `static.example.test`: hidden line and Show link, `oos=1` muted rows with OOS pill and tooltip, copy blocked, Mark works, in-scope rows copyable, count links carry `oos`.
+  - In the writer-off test: "Scope not checked" with copy blocked for a program with a scope folder when the Board has no `--bbh`.
+  - Screenshot: `recon-urls-scope-light.png`.
+
 ## Gaps and open questions
 
 - The manual_hunter capability probe in the real-BBH test is stubbed: that script needs the `bounty_core` package the real `bbh` dispatcher provides. The `url_ingest.py mark` call itself is real.
