@@ -16,7 +16,7 @@ Ryu asked to pull in the JS store and the URL index "so I can see the immediate 
 
 ## Contract
 
-- Route `#/recon` (sidebar link "Recon intel", a real `<a href>`). Hash keys: `p` (`web_bounty/<program>`), `lane`, overview `sort`/`dir`/`q`, program `hsort`/`hdir`/`hq`/`under=1`/`hint=<lane>`. Unknown values fall back to defaults.
+- Route `#/recon` (sidebar link "Recon intel", a real `<a href>`). Hash keys: `p` (`web_bounty/<program>`), `lane`, overview `sort`/`dir`/`q`, program `hsort`/`hdir`/`hq`/`under=1`/`hint=<lane>`; both `oos=1` (show out-of-scope rows, see Scope check). Unknown values fall back to defaults.
 - Dashboard card `#dashboard-recon-host`, inserted by the module after the recent reports panel (no dashboard template change): totals across web programs and the five programs with the most surface per test run, linking into the view.
 - API: `GET /api/recon/overview`, `GET /api/recon/program?family=&program=&lane=[&refresh=1]`, documented in `BACKEND_API.md`. Each source (`url_index`, `js`, `aggregates`, `board`) carries its own state and error code (`missing`, `locked`, `changed`, `timeout`, `schema_mismatch`, `unavailable`, `invalid`); counts are `{value, approximate, method}`; responses carry `computed_at` and `partial`.
 - Flags: `--artifact-root PATH` (default `/mnt/bounty` when it is a mount point, else none), `--recon-query-budget SECONDS` (default 3, 0.1–120).
@@ -39,6 +39,10 @@ Ryu asked to pull in the JS store and the URL index "so I can see the immediate 
 - **Findings per host** use the raw ledger's `asset`/`url`/`endpoint` host (most findings carry `asset`); archived findings are excluded and counted separately.
 - **Target data.** Hosts/URLs are HTML-escaped; external links are http(s) only, `target="_blank" rel="noopener noreferrer"`; the browser test aborts any non-loopback request and asserts none happened. Copy commands are shell-quoted and refuse terminal-active characters (see "Security: nothing unsafe on the clipboard").
 - **Caps (review 9).** Grouped test-run and observation breakdowns, distinct lanes and per-host joins are fetched with `LIMIT 500` (largest first); the (lane, parameter) pairs that decide "untested" with `LIMIT 5000`, larger because a cut there can list a tested parameter as untested. Each capped section is named in `result.truncated` and shown in the UI. Headline recency and observation totals come from separate exact aggregates.
+
+## Scope check (v1.5)
+
+Every host and URL Recon intel lists carries a scope verdict from BBH, and out-of-scope rows are hidden unless `oos=1`; copy buttons are gated by scope. Design, contract and evidence: `docs/integrations/scope-check.md`.
 
 ## Security: reads leave no trace (review 9, blocker 1)
 
