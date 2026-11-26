@@ -148,6 +148,23 @@ class PayloadTests(Base):
         (self.root / 'scopes' / 'broken-demo').symlink_to(outside)
         self.assertEqual(self.inv.payload('web_bounty', 'broken-demo')['scope']['state'], 'failed')
 
+    def test_file_links_outside_scopes_are_refused(self):
+        secret = write(self.base / 'secret.md', '# private notes')
+        policy = self.scopes() / 'program-policy.md'
+        policy.unlink()
+        policy.symlink_to(secret)
+        (self.scopes() / 'scope-history.jsonl').unlink()
+        (self.scopes() / 'scope-history.jsonl').symlink_to(secret)
+        d = self.inv.payload('web_bounty', 'acme-demo')
+        self.assertIsNone(d['policy'])
+        self.assertIn('outside', d['files']['program-policy.md']['error'])
+        self.assertEqual(d['files']['scope-history.jsonl']['state'], 'unreadable')
+        self.assertNotIn('private notes', json.dumps(d))
+        # A link to another file inside <root>/scopes is followed.
+        policy.unlink()
+        policy.symlink_to(self.scopes('globex-demo') / 'program-policy.md')
+        self.assertIn('Globex policy', self.inv.payload('web_bounty', 'acme-demo')['policy']['text'])
+
     def test_malformed_files_give_per_file_errors(self):
         write(self.scopes() / 'scope-pull.json', '{nope')
         write(self.scopes() / 'scope-items.json', '[1, 2]')

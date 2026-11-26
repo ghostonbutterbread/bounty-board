@@ -109,8 +109,21 @@ def stat_sig(path):
         return None
 
 
-def read_capped(path, cap):
+OUTSIDE = {'state': 'unreadable', 'error': 'link points outside the scopes directory; ignored'}
+
+
+def outside(path, base):
+    """True when path is a link resolving outside base (the resolved <root>/scopes)."""
+    if base is None or not os.path.islink(path):
+        return False
+    real = os.path.realpath(path)
+    return not real.startswith(str(base) + os.sep)
+
+
+def read_capped(path, cap, base=None):
     """(bytes or None, file state dict). States: ok, missing, too_large, unreadable."""
+    if outside(path, base):
+        return None, dict(OUTSIDE)
     try:
         info = os.stat(path)
     except FileNotFoundError:
@@ -131,8 +144,8 @@ def read_capped(path, cap):
     return data, {'state': 'ok', 'size': len(data)}
 
 
-def read_json(path, cap):
-    data, state = read_capped(path, cap)
+def read_json(path, cap, base=None):
+    data, state = read_capped(path, cap, base)
     if data is None:
         return None, state
     try:
@@ -144,8 +157,8 @@ def read_json(path, cap):
     return value, state
 
 
-def read_rules(path):
-    data, state = read_capped(path, CAPS[path.name])
+def read_rules(path, base=None):
+    data, state = read_capped(path, CAPS[path.name], base)
     if data is None:
         return None, state
     lines = [line.strip() for line in data.decode('utf-8', 'replace').splitlines()]
@@ -158,10 +171,12 @@ def policy_text(data):
     return '\n'.join(escape_unsafe(line) for line in source.split('\n'))
 
 
-def read_tail(path, max_lines=HISTORY_LINES, max_bytes=HISTORY_TAIL_BYTES):
+def read_tail(path, max_lines=HISTORY_LINES, max_bytes=HISTORY_TAIL_BYTES, base=None):
     """Last max_lines lines of a JSONL file, newest first, reading at most max_bytes from the end.
 
     Returns (raw lines newest first, more: bool, file state)."""
+    if outside(path, base):
+        return [], False, dict(OUTSIDE)
     try:
         size = os.stat(path).st_size
     except FileNotFoundError:
@@ -266,14 +281,14 @@ class ScopeInventory:
     def signature(directory):
         return (str(directory), stat_sig(directory)) + tuple((name, stat_sig(directory / name)) for name in SIGNED_FILES)
 
-    def _parsed(self, program, directory, refresh=False):
+    def _parsed(self, program, directory, base, refresh=False):
         sig = self.signature(directory)
         with self.lock:
             entry = self.cache.get(program)
             if entry is not None and entry[0] == sig and not refresh:
                 self.cache.move_to_end(program)
                 return entry[1]
-        parsed = self._parse(directory)
+        parsed = self._parse(directory, base)
         with self.lock:
             self.cache[program] = (sig, parsed)
             self.cache.move_to_end(program)
@@ -282,15 +297,15 @@ class ScopeInventory:
         return parsed
 
     # -- parsing (files only; no time-dependent values) --------------------------
-    def _parse(self, directory):
+    def _parse(self, directory, base):
         self.parses += 1
         files = {}
-        pull, files['scope-pull.json'] = read_json(directory / 'scope-pull.json', CAPS['scope-pull.json'])
-        inventory, files['scope-items.json'] = read_json(directory / 'scope-items.json', CAPS['scope-items.json'])
-        in_rules, files['in-scope.txt'] = read_rules(directory / 'in-scope.txt')
-        out_rules, files['out-of-scope.txt'] = read_rules(directory / 'out-of-scope.txt')
-        policy_raw, files['program-policy.md'] = read_capped(directory / 'program-policy.md', CAPS['program-policy.md'])
-        tail, more, files['scope-history.jsonl'] = read_tail(directory / 'scope-history.jsonl')
+        pull, files['scope-pull.json'] = read_json(directory / 'scope-pull.json', CAPS['scope-pull.json'], base)
+        inventory, files['scope-items.json'] = read_json(directory / 'scope-items.json', CAPS['scope-items.json'], base)
+        in_rules, files['in-scope.txt'] = read_rules(directory / 'in-scope.txt', base)
+        out_rules, files['out-of-scope.txt'] = read_rules(directory / 'out-of-scope.txt', base)
+        policy_raw, files['program-policy.md'] = read_capped(directory / 'program-policy.md', CAPS['program-policy.md'], base)
+        tail, more, files['scope-history.jsonl'] = read_tail(directory / 'scope-history.jsonl', base=base)
 
         pull_info = None
         if pull is not None:
@@ -331,7 +346,7 @@ class ScopeInventory:
         policy = {'text': policy_text(policy_raw)} if policy_raw is not None else None
         mtimes = {}
         for name in ('assets.json', 'in-scope.txt'):
-            sig = stat_sig(directory / name)
+            sig = None if outside(directory / name, base) else stat_sig(directory / name)
             mtimes[name] = sig[2] / 1e9 if sig else None
         return {'files': files, 'pull': pull_info, 'inventory': inventory_info, 'rules': rules, 'assets': assets,
                 'history': history, 'policy': policy, 'mtimes': mtimes}
@@ -371,7 +386,8 @@ class ScopeInventory:
         if directory is None:
             result['scope'] = {'state': 'none' if reason == NO_SCOPE else 'failed', 'reason': text(reason, 200)}
             return result
-        parsed = self._parsed(program, directory, refresh)
+        # Files inside the scope dir may be links, but only to somewhere inside <root>/scopes.
+        parsed = self._parsed(program, directory, (Path(root) / 'scopes').resolve(), refresh)
         result['scope'] = {'state': 'loaded', 'alias': directory.name != program, 'reason': ''}
         result.update({k: parsed[k] for k in ('files', 'pull', 'inventory', 'rules', 'policy')})
 

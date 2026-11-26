@@ -285,7 +285,9 @@
       if (!p) return;
       const key = keyOf(p.family, p.name), entry = cache.get(key);
       const host = ctx.app.querySelector('#scope-panel-host');
-      if (host) paint(host);
+      // Normalize the query (unknown keys and values dropped) without a history entry.
+      if (host && (ctx.state.scopeQuery || '') !== buildQuery(state())) setQuery({});
+      else if (host) paint(host);
       badge();
       if (!entry || (!entry.loading && Date.now() - (entry.at || 0) > POLL_MS)) fetchScope(p.family, p.name, {quiet: !!entry?.data});
       if (host && !timer) timer = setInterval(poll, POLL_MS);

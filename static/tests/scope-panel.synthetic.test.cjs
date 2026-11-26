@@ -147,6 +147,12 @@ test('scope panel: section route, stale banner, rules, policy, assets, releases,
     await shot('scope-panel-dusk.png');
     await page.evaluate(() => localStorage.setItem('bounty-board-theme', 'light'));
 
+    // Unknown query keys and values are dropped from the URL.
+    await page.goto(origin + '/#/programs/web_bounty%2Facme-demo/web/scope?kind=bogus&rules=all&x=%3Cscript%3E');
+    await page.waitForFunction(() => location.hash === '#/programs/web_bounty%2Facme-demo/web/scope?rules=all', null, {timeout: 20000});
+    await loaded();
+    assert.equal(await host.locator('[data-sp-chips="in"] code.sp-chip').count(), 14);
+
     // Lane link opens the binaries lane in the app.
     await page.reload(); await loaded();
     await host.locator('[data-sp-asset="android_app"] a[data-sp-lane]').click();
