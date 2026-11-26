@@ -17,7 +17,10 @@
   'use strict';
   const OVERVIEW_SORTS = ['program', 'urls', 'hosts', 'parameters', 'js_files', 'js_bytes', 'tested_urls', 'tested_params', 'test_runs', 'findings', 'last_activity'];
   const HOST_SORTS = ['host', 'urls', 'routes', 'param_urls', 'js_files', 'js_bytes', 'test_runs', 'tested_urls', 'findings', 'coverage_reviewed', 'last_test', 'surface_score'];
-  const DEFAULTS = {p: '', lane: '', sort: 'urls', dir: 'desc', q: '', hsort: 'surface_score', hdir: 'desc', hq: '', under: false, hint: ''};
+  const DEFAULTS = {p: '', lane: '', sort: 'urls', dir: 'desc', q: '', hsort: 'surface_score', hdir: 'desc', hq: '', under: false, hint: '',
+    // URL browser (recon-urls.js): open flag, filters and keyset cursor.
+    u: false, uh: '', uq: '', ul: '', us: '', up: false, un: '', ua: 0, uo: ''};
+  const URL_STATUSES = ['untested', 'tested', 'discovered', 'surface_reviewed', 'deep_reviewed', 'validated_signal', 'dismissed'];
 
   // ---- pure helpers (exported for Node tests) ------------------------------
   const clean = value => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
@@ -37,6 +40,17 @@
     out.under = params.get('under') === '1';
     const hint = clean(params.get('hint'));
     if (/^[a-z][a-z-]{0,30}$/.test(hint)) out.hint = hint;
+    out.u = params.get('u') === '1';
+    out.uh = clean(params.get('uh')).slice(0, 300);
+    out.uq = String(params.get('uq') || '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 300);
+    const ul = clean(params.get('ul'));
+    if (/^[a-z][a-z0-9-]{0,39}$/.test(ul)) out.ul = ul;
+    if (URL_STATUSES.includes(params.get('us'))) out.us = params.get('us');
+    out.up = params.get('up') === '1';
+    out.un = clean(params.get('un')).slice(0, 200);
+    if (params.get('uo') === 'asc') out.uo = 'asc'; // oldest first; newest first is the default
+    const ua = params.get('ua') || '';
+    if (/^[0-9]{1,15}$/.test(ua)) out.ua = Number(ua);
     return out;
   }
   function buildQuery(state) {
@@ -48,6 +62,13 @@
       if (state.hq) params.set('hq', state.hq);
       if (state.under) params.set('under', '1');
       if (state.hint) params.set('hint', state.hint);
+      if (state.u) {
+        params.set('u', '1');
+        for (const [key, value] of [['uh', state.uh], ['uq', state.uq], ['ul', state.ul], ['us', state.us], ['un', state.un]]) if (value) params.set(key, value);
+        if (state.up) params.set('up', '1');
+        if (state.uo === 'asc') params.set('uo', 'asc');
+        if (state.ua > 0) params.set('ua', String(state.ua));
+      }
     } else {
       if (state.sort !== DEFAULTS.sort || state.dir !== DEFAULTS.dir) { params.set('sort', state.sort); params.set('dir', state.dir); }
       if (state.q) params.set('q', state.q);
@@ -108,7 +129,11 @@
     const urls = metric(row.urls) || 0, js = metric(row.js_files) || 0, runs = metric(row.test_runs) || 0;
     return (urls + 20 * js) / (1 + runs);
   };
-  const helpers = {parseQuery, buildQuery, sortRows, fmtNum, fmtBytes, shellQuote, isCopySafe, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap};
+  // URL browser filters <-> hash state.
+  const urlFilters = s => ({host: s.uh, q: s.uq, lane: s.ul, status: s.us, params: s.up, param: s.un, order: s.uo});
+  const urlState = (f, cursor = 0) => ({u: true, uh: f.host || '', uq: f.q || '', ul: f.lane || '', us: f.status || '', up: !!f.params, un: f.param || '',
+    uo: f.order === 'asc' ? 'asc' : '', ua: cursor});
+  const helpers = {parseQuery, buildQuery, urlFilters, urlState, sortRows, fmtNum, fmtBytes, shellQuote, isCopySafe, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap};
   if (typeof module === 'object' && module.exports) { module.exports = helpers; return; }
   root.BoardReconIntel = helpers;
 
@@ -151,6 +176,13 @@
   };
   const href = state => ctx.hrefFor({view: 'recon', query: buildQuery({...DEFAULTS, ...state})});
   const programName = id => String(id || '').split('/').slice(1).join('/');
+  // A number or name that opens the URL browser with filters: a real link (new tab works).
+  // Escaped values (unsafe_chars) are not real filter values, so they stay plain text.
+  const urlsHref = filters => href({...view.state, ...urlState(filters, 0)});
+  const urlsLink = (inner, filters, label, unsafe) => unsafe ? inner
+    : `<a class="ri-num-link" href="${esc(urlsHref(filters))}" data-ri-urls title="${esc(label || 'Show these URLs')}">${inner}</a>`;
+  const jumpLink = (inner, target, label) => `<a class="ri-num-link" href="#${esc(target)}" data-ri-jump="${esc(target)}" title="${esc(label)}">${inner}</a>`;
+  const boardLink = (inner, target, label) => `<a class="ri-num-link" href="${esc(ctx.hrefFor(target))}" title="${esc(label)}">${inner}</a>`;
 
   function writeUrl(push = false) {
     const query = buildQuery(view.state);
@@ -257,7 +289,10 @@
     return bits.length ? `<p class="hint ri-source-note" data-ri-source="${esc(key)}">${bits.join(' · ')}</p>` : '';
   }
   function stat(label, value, opts = {}) {
-    return `<div class="ri-stat${opts.warn ? ' ri-stat-warn' : ''}" ${opts.attr || ''}><strong>${opts.raw ?? num(value, opts.bytes)}</strong><span>${esc(label)}</span>${opts.sub ? `<small>${opts.sub}</small>` : ''}</div>`;
+    const inner = opts.raw ?? num(value, opts.bytes);
+    const known = opts.raw != null || metric(value) != null;
+    const strong = known && opts.link ? opts.link(inner) : inner;
+    return `<div class="ri-stat${opts.warn ? ' ri-stat-warn' : ''}" ${opts.attr || ''}><strong>${strong}</strong><span>${esc(label)}</span>${opts.sub ? `<small>${opts.sub}</small>` : ''}</div>`;
   }
   function emptyUrlIndex(d) {
     const src = d.sources?.url_index || {};
@@ -277,25 +312,26 @@
     const u = res(d, 'url_index') || {}, j = res(d, 'js') || {}, agg = res(d, 'aggregates') || {}, b = res(d, 'board') || {};
     const tr = u.tests_recent || {};
     const findings = b.findings || null, cov = b.coverage || null;
-    const sev = findings ? Object.entries(findings.by_severity || {}).sort((a, b2) => ui().severityRank(a[0]) - ui().severityRank(b2[0])) : [];
-    const cls = findings ? Object.entries(findings.by_class || {}).slice(0, 8) : [];
     const aggItems = Object.entries(agg.files || {}).concat(Object.entries(agg.js_lists || {}).map(([k, v]) => ['js/' + k, v]));
     return `<section class="panel panel-pad ri-section" id="ri-depth" aria-label="Depth summary"><div class="blockhead"><h2>Depth summary</h2></div>
       ${sourceNote(d, 'url_index', 'URL index')}${emptyUrlIndex(d)}
       <div class="ri-stats" data-ri-depth>
-        ${stat('URLs', u.urls)}${stat('Unique routes', u.routes)}${stat('Hosts', u.hosts)}${stat('Parameters', u.parameters)}
-        ${stat('URLs with params', u.param_urls)}${stat('Tested URLs', u.tested_urls)}${stat('Tested params', u.tested_params)}
-        ${stat('Test runs', u.test_runs, {sub: u.test_runs ? `${esc(tr.last_24h ?? 0)} in 24 h · ${esc(tr.last_7d ?? 0)} in 7 d` : ''})}
-        ${stat('URL observations', u.observations)}
-        ${stat('JS files', j.files)}${stat('JS bytes', j.bytes, {bytes: true})}${stat('Source maps', j.source_maps)}
-        ${stat('JS observations', j.observations, {sub: metric(j.open_observations) ? `${esc(metric(j.open_observations))} open with a next action` : ''})}${stat('JS leads', j.leads)}
-        ${stat('Findings', findings ? findings.total : null, {sub: findings?.archived ? `${esc(findings.archived)} archived not counted` : ''})}
-        ${stat('Coverage questions', cov ? cov.questions : null, {sub: cov?.by_status?.bounded_review ? `${esc(cov.by_status.bounded_review)} bounded reviews` : ''})}
-        ${stat('MapStore entries', b.map_entries ?? null)}
+        ${stat('URLs', u.urls, {link: x => urlsLink(x, {}, 'Browse all URLs')})}${stat('Unique routes', u.routes, {link: x => urlsLink(x, {}, 'Browse all URLs')})}
+        ${stat('Hosts', u.hosts, {link: x => jumpLink(x, 'ri-hosts', 'Go to the hosts table')})}${stat('Parameters', u.parameters, {link: x => urlsLink(x, {params: true}, 'Browse URLs with parameters')})}
+        ${stat('URLs with params', u.param_urls, {link: x => urlsLink(x, {params: true}, 'Browse URLs with parameters')})}
+        ${stat('Tested URLs', u.tested_urls, {link: x => urlsLink(x, {status: 'tested'}, 'Browse tested URLs')})}
+        ${stat('Tested params', u.tested_params, {link: x => urlsLink(x, {status: 'tested', params: true}, 'Browse tested URLs with parameters')})}
+        ${stat('Test runs', u.test_runs, {sub: u.test_runs ? `${esc(tr.last_24h ?? 0)} in 24 h · ${esc(tr.last_7d ?? 0)} in 7 d` : '', link: x => jumpLink(x, 'ri-looked', 'Go to what has been looked for')})}
+        ${stat('URL observations', u.observations, {link: x => jumpLink(x, 'ri-looked', 'Go to what has been looked for')})}
+        ${stat('JS files', j.files, {link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}${stat('JS bytes', j.bytes, {bytes: true, link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}
+        ${stat('Source maps', j.source_maps, {link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}
+        ${stat('JS observations', j.observations, {sub: metric(j.open_observations) ? `${esc(metric(j.open_observations))} open with a next action` : '', link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}
+        ${stat('JS leads', j.leads, {link: x => jumpLink(x, 'ri-hunt', 'Go to what to hunt next')})}
+        ${stat('Findings', findings ? findings.total : null, {sub: findings?.archived ? `${esc(findings.archived)} archived not counted` : '', link: x => jumpLink(x, 'ri-findings', 'Go to the findings panels')})}
+        ${stat('Coverage questions', cov ? cov.questions : null, {sub: cov?.by_status?.bounded_review ? `${esc(cov.by_status.bounded_review)} bounded reviews` : '', link: x => boardLink(x, {program: `${d.family}/${programName(view.state.p)}`, lane: d.lane, section: 'coverage'}, 'Open coverage for this lane')})}
+        ${stat('MapStore entries', b.map_entries ?? null, {link: x => boardLink(x, {program: `${d.family}/${programName(view.state.p)}`, lane: d.lane, section: 'map'}, 'Open MapStore for this lane')})}
       </div>
       <div class="ri-split">
-        <div><h3>Findings by severity</h3>${sev.length ? `<div class="ri-chips">${sev.map(([k, n]) => `${ui().severityBadge(k)} <span class="num">${esc(n)}</span>`).join(' ')}</div>` : '<p class="hint">No findings recorded for this lane.</p>'}
-        ${cls.length ? `<h3>Top classes</h3><ul class="ri-bars">${cls.map(([k, n]) => bar(k, n, cls[0][1])).join('')}</ul>` : ''}</div>
         <div><h3>Recon aggregates</h3>${aggItems.length ? `<ul class="ri-kv">${aggItems.map(([k, v]) => `<li><code>${esc(k)}</code><span>${v.error ? `<span class="ri-err">${esc(errorText({code: v.error}))}</span>` : num(v)} lines</span></li>`).join('')}</ul>` : '<p class="hint">No recon/aggregated files. BBH <code>url_ingest.py aggregate</code> writes them.</p>'}</div>
       </div></section>`;
   }
@@ -311,12 +347,14 @@
     const under = h.rows.filter(r => r.under_tested).length;
     const th = (label, key) => sortTh(label, key, s.hsort, s.hdir, 'data-ri-hsort');
     const cell = (v, approxFlag, bytes) => v == null ? '<span class="muted">—</span>' : approxFlag ? `<span class="ri-approx" title="Sample estimate">≈${esc(bytes ? fmtBytes(v) : fmtNum(v))}</span>` : esc(bytes ? fmtBytes(v) : fmtNum(v));
+    const linked = (inner, value, filters, row, label) => value ? urlsLink(inner, filters, label || `Browse URLs on ${row.host}`, row.unsafe_chars || !row.host) : inner;
     const body = rows.map(r => `<tr class="${r.under_tested ? 'ri-under' : ''}" data-ri-host="${esc(r.host)}">
-      <td class="ri-host"><span class="ri-mono">${esc(r.host || '(no host)')}</span>${r.under_tested ? ` ${badge('Under-tested', 'warning')}` : ''}</td>
-      <td class="num">${cell(r.urls, r.urls_approximate && !r.urls_exact)}</td><td class="num">${cell(r.routes, r.urls_approximate)}</td><td class="num">${cell(r.param_urls, r.urls_approximate)}</td>
-      <td class="num">${cell(r.js_files)}</td><td class="num">${cell(r.js_bytes, false, true)}</td>
-      <td class="num">${cell(r.test_runs)}</td><td class="num">${cell(r.tested_urls)}</td><td class="num">${cell(r.findings)}</td>
-      <td class="num" title="${esc(r.coverage_questions)} coverage questions">${cell(r.coverage_reviewed)}</td>
+      <td class="ri-host">${urlsLink(`<span class="ri-mono">${esc(r.host || '(no host)')}</span>`, {host: r.host}, `Browse URLs on ${r.host}`, r.unsafe_chars || !r.host || r.urls == null)}${r.under_tested ? ` ${badge('Under-tested', 'warning')}` : ''}</td>
+      <td class="num">${linked(cell(r.urls, r.urls_approximate && !r.urls_exact), r.urls, {host: r.host}, r)}</td><td class="num">${linked(cell(r.routes, r.urls_approximate), r.routes, {host: r.host}, r)}</td><td class="num">${linked(cell(r.param_urls, r.urls_approximate), r.param_urls, {host: r.host, params: true}, r, 'Browse URLs with parameters on this host')}</td>
+      <td class="num">${r.js_files ? jumpLink(cell(r.js_files), 'ri-js', 'Go to JavaScript') : cell(r.js_files)}</td><td class="num">${cell(r.js_bytes, false, true)}</td>
+      <td class="num">${linked(cell(r.test_runs), r.test_runs, {host: r.host, status: 'tested'}, r, 'Browse tested URLs on this host')}</td><td class="num">${linked(cell(r.tested_urls), r.tested_urls, {host: r.host, status: 'tested'}, r, 'Browse tested URLs on this host')}</td>
+      <td class="num">${r.findings && (r.finding_ids || []).length ? `<button type="button" class="ri-num-link ri-num-button" data-ri-host-findings="${esc(r.host)}" aria-haspopup="dialog" title="Show these findings">${cell(r.findings)}</button>` : cell(r.findings)}</td>
+      <td class="num" title="${esc(r.coverage_questions)} coverage questions">${r.coverage_reviewed ? boardLink(cell(r.coverage_reviewed), {program: d.family + '/' + programName(view.state.p), lane: d.lane, section: 'coverage'}, 'Open coverage for this lane') : cell(r.coverage_reviewed)}</td>
       <td class="date">${isoWhen(r.last_test)}</td>
       <td class="ri-actions">${r.host ? copyBtn(bbhStatus(d.program, r.host), 'status', 'Copy bbh url_ingest status command for this host', r.unsafe_chars || d.unsafe_chars) : ''}</td></tr>`).join('');
     return `<section class="panel ri-section" id="ri-hosts" aria-label="Hosts"><div class="panel-head"><div><h2>Hosts</h2><p class="hint">Per host: URL index surface, JS library files, test runs, findings and coverage reviews. ${esc(h.rule || '')}</p></div></div>
@@ -346,13 +384,13 @@
     const max = Math.max(1, ...groups.map(g => g.runs));
     const matrix = lanes.length ? `<div class="ri-scroll"><table class="ri-table ri-matrix" data-ri-matrix><thead><tr><th>Lane \\ test family</th>${fams.map(f => `<th class="num">${esc(f)}</th>`).join('')}<th class="num">Total</th></tr></thead><tbody>${lanes.map(lane => {
       const total = groups.filter(g => g.lane === lane).reduce((a, g) => a + g.runs, 0);
-      return `<tr><th scope="row">${esc(lane)}</th>${fams.map(f => {
+      return `<tr><th scope="row">${urlsLink(esc(lane), {lane}, `Browse URLs with ${lane} activity`)}</th>${fams.map(f => {
         const c = cellOf(lane, f); const runs = c.reduce((a, g) => a + g.runs, 0);
         if (!runs) return '<td class="num ri-cell-empty">·</td>';
         const last = c.map(g => g.last_run).sort().pop();
         const statuses = c.map(g => `${g.status}: ${g.runs}`).join(', ');
         const skills = [...new Set(c.map(g => g.skill))].join(', ');
-        return `<td class="num ri-cell" style="--ri-heat:${(0.15 + 0.85 * runs / max).toFixed(2)}" title="${esc(`${runs} runs · ${statuses} · skills ${skills} · last ${last || 'unknown'}`)}">${esc(fmtNum(runs))}</td>`;
+        return `<td class="num ri-cell" style="--ri-heat:${(0.15 + 0.85 * runs / max).toFixed(2)}" title="${esc(`${runs} runs · ${statuses} · skills ${skills} · last ${last || 'unknown'}`)}">${urlsLink(esc(fmtNum(runs)), {lane, status: 'tested'}, `Browse URLs tested for ${lane}`)}</td>`;
       }).join('')}<td class="num"><strong>${esc(fmtNum(total))}</strong></td></tr>`;
     }).join('')}</tbody></table></div>` : '';
     const detailRows = groups.slice().sort((a, b) => String(b.last_run || '').localeCompare(String(a.last_run || ''))).map(g => `<tr><td>${esc(g.lane)}</td><td>${esc(g.skill)}</td><td>${esc(g.test_family)}</td><td>${badge(g.status, statusKind(g.status))}</td><td class="num">${esc(g.runs)}</td><td class="num">${esc(g.urls)}</td><td class="num">${esc(g.last_24h)}</td><td class="num">${esc(g.last_7d)}</td><td class="date">${isoWhen(g.last_run)}</td></tr>`).join('');
@@ -379,12 +417,12 @@
     const lane = s.hint;
     const paramItems = shown.slice(0, 60).map(p => {
       const target = lane || p.untested_lanes[0];
-      return `<li class="ri-hunt-item" data-ri-hunt="param" data-param="${esc(p.param_key)}"><div class="ri-hunt-main"><strong class="ri-mono">${esc(p.param_key)}</strong> ${(p.untested_lanes || []).map(h => badge(h, 'warning')).join(' ')}
+      return `<li class="ri-hunt-item" data-ri-hunt="param" data-param="${esc(p.param_key)}"><div class="ri-hunt-main">${urlsLink(`<strong class="ri-mono">${esc(p.param_key)}</strong>`, {param: p.param_key, status: 'untested', lane: target}, `Browse URLs with ${p.param_key} not tested for ${target}`, p.unsafe_chars)} ${(p.untested_lanes || []).map(h => badge(h, 'warning')).join(' ')}
         <span class="hint">${esc(p.location || 'query')}${p.value_shape ? ` · ${esc(p.value_shape)}` : ''} · seen ${esc(p.observations_capped ? '1000+' : p.observations)}×</span>
         ${p.example_url ? `<div class="ri-url">${ext(p.example_url, null, p.unsafe_chars)}</div>` : ''}</div>
         <div class="ri-hunt-actions">${p.example_url ? copyBtn(p.example_url, 'URL', '', p.unsafe_chars) + copyBtn(curlCommand(p.example_url), 'curl', 'Copy a curl command for the example URL', p.unsafe_chars) : ''}${copyBtn(bbhNext(d.program, target, p.param_key), 'bbh next', `Copy bbh url_ingest next for lane ${target}`, p.unsafe_chars || d.unsafe_chars)}</div></li>`;
     }).join('');
-    const hosts = (d.hosts?.rows || []).filter(r => r.under_tested).slice(0, 10).map(r => `<li class="ri-hunt-item" data-ri-hunt="host"><div class="ri-hunt-main"><strong class="ri-mono">${esc(r.host)}</strong> <span class="hint">${r.urls != null ? `${r.urls_approximate && !r.urls_exact ? '≈' : ''}${esc(fmtNum(r.urls))} URLs · ` : ''}${esc(r.js_files)} JS files · ${esc(r.test_runs)} test runs</span></div><div class="ri-hunt-actions">${copyBtn(r.host, 'host', '', r.unsafe_chars)}${copyBtn(bbhStatus(d.program, r.host), 'bbh status', '', r.unsafe_chars || d.unsafe_chars)}</div></li>`).join('');
+    const hosts = (d.hosts?.rows || []).filter(r => r.under_tested).slice(0, 10).map(r => `<li class="ri-hunt-item" data-ri-hunt="host"><div class="ri-hunt-main">${urlsLink(`<strong class="ri-mono">${esc(r.host)}</strong>`, {host: r.host}, `Browse URLs on ${r.host}`, r.unsafe_chars || r.urls == null)} <span class="hint">${r.urls != null ? `${r.urls_approximate && !r.urls_exact ? '≈' : ''}${esc(fmtNum(r.urls))} URLs · ` : ''}${esc(r.js_files)} JS files · ${esc(r.test_runs)} test runs</span></div><div class="ri-hunt-actions">${copyBtn(r.host, 'host', '', r.unsafe_chars)}${copyBtn(bbhStatus(d.program, r.host), 'bbh status', '', r.unsafe_chars || d.unsafe_chars)}</div></li>`).join('');
     const jsOpen = (jsd.open_observations || []).slice(0, 20).map(o => `<li class="ri-hunt-item" data-ri-hunt="js"><div class="ri-hunt-main"><strong>${esc(o.title || 'Observation')}</strong> ${badge(o.lens || 'lens', 'accent')} ${badge(o.status || 'open', statusKind(o.status))} ${o.confidence ? `<span class="hint">confidence ${esc(o.confidence)}</span>` : ''}
         <div class="ri-next">${icon('arrow-right')} ${esc(o.next_action)}</div>${o.js_url ? `<div class="ri-url">${ext(o.js_url, null, o.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${o.js_url ? copyBtn(o.js_url, 'URL', '', o.unsafe_chars) : ''}${copyBtn(o.next_action, 'next action', '', o.unsafe_chars)}</div></li>`).join('');
     const leads = (jsd.leads || []).slice(0, 20).map(l => `<li class="ri-hunt-item" data-ri-hunt="lead"><div class="ri-hunt-main"><strong>${esc(l.related_endpoint || l.lead_id || 'Lead')}</strong> ${l.lane ? badge(l.lane, 'warning') : ''} ${l.confidence ? `<span class="hint">confidence ${esc(l.confidence)}</span>` : ''}<div class="ri-next">${icon('arrow-right')} ${esc(l.next_action || '')}</div>${l.js_url ? `<div class="ri-url">${ext(l.js_url, null, l.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${l.js_url ? copyBtn(l.js_url, 'URL', '', l.unsafe_chars) : ''}</div></li>`).join('');
@@ -423,8 +461,9 @@
   function programHtml() {
     const d = view.program;
     if (!d) return view.error ? '' : '<div class="state">Loading recon intel…</div>';
-    return `<nav class="ri-jump" aria-label="Recon sections"><a href="#ri-depth" data-ri-jump="ri-depth">Depth</a><a href="#ri-hosts" data-ri-jump="ri-hosts">Hosts</a><a href="#ri-looked" data-ri-jump="ri-looked">Looked for</a><a href="#ri-hunt" data-ri-jump="ri-hunt">Hunt next</a><a href="#ri-js" data-ri-jump="ri-js">JavaScript</a></nav>
-      ${depthHtml(d)}${hostsHtml(d)}${lookedForHtml(d)}${huntHtml(d)}${jsHtml(d)}
+    const s = view.state;
+    return `<nav class="ri-jump" aria-label="Recon sections"><a href="#ri-depth" data-ri-jump="ri-depth">Depth</a><a href="${esc(s.u ? '#ri-urls' : urlsHref({}))}" ${s.u ? 'data-ri-jump="ri-urls"' : 'data-ri-urls'}>URLs</a><a href="#ri-findings" data-ri-jump="ri-findings">Findings</a><a href="#ri-reports" data-ri-jump="ri-reports">Reports</a><a href="#ri-hosts" data-ri-jump="ri-hosts">Hosts</a><a href="#ri-looked" data-ri-jump="ri-looked">Looked for</a><a href="#ri-hunt" data-ri-jump="ri-hunt">Hunt next</a><a href="#ri-js" data-ri-jump="ri-js">JavaScript</a></nav>
+      ${depthHtml(d)}${s.u ? '<div data-ri-slot="urls"></div>' : ''}<div id="ri-findings" class="ri-anchor" data-ri-slot="findings"></div>${hostsHtml(d)}${lookedForHtml(d)}${huntHtml(d)}${jsHtml(d)}
       <p class="footnote">Read-only view over BBH stores. Counts from large stores are estimates where marked ≈ (MAX(id) for table sizes, rowid-window samples for distributions); "unique routes" counts distinct paths across hosts. Budget ${esc(d.budget?.query_seconds)} s per query.</p>`;
   }
 
@@ -464,18 +503,46 @@
     if (!box) return;
     const active = document.activeElement;
     const keep = active && host.contains(active) && active.id ? {id: active.id, start: active.selectionStart, end: active.selectionEnd} : null;
+    // The URL browser and the app-rendered findings/Reports block survive repaints.
+    const kept = {urls: box.querySelector('#ri-urls'), findings: ctx.app.querySelector('#recon-scope-panels')};
+    for (const node of Object.values(kept)) node?.remove();
     box.innerHTML = view.state.p ? programHtml() : overviewHtml();
+    placeSlots(box, kept);
     if (keep) { const el = host.querySelector('#' + CSS.escape(keep.id)); if (el) { el.focus({preventScroll: true}); try { if (keep.start != null) el.setSelectionRange(keep.start, keep.end); } catch {} } }
+  }
+  function placeSlots(box, kept) {
+    const d = view.program, s = view.state;
+    const findingsSlot = box.querySelector('[data-ri-slot="findings"]');
+    const panels = kept.findings;
+    if (findingsSlot && panels && panels.dataset.program === s.p) {
+      findingsSlot.append(panels);
+      const reports = panels.querySelector('#recon-reports-host');
+      if (reports && !reports.previousElementSibling?.matches?.('#ri-reports')) reports.insertAdjacentHTML('beforebegin', '<span id="ri-reports" class="ri-anchor"></span>');
+    } else if (panels) ctx.app.querySelector('.stack')?.append(panels); // keep it alive for the next paint
+    const urlsSlot = box.querySelector('[data-ri-slot="urls"]');
+    if (!urlsSlot || !d || !window.BoardReconUrls) return;
+    const node = kept.urls || Object.assign(document.createElement('section'), {id: 'ri-urls', className: 'panel ri-section ri-urls'});
+    node.setAttribute('aria-label', 'URLs');
+    urlsSlot.replaceWith(node);
+    const cap = ctx.state.data?.capabilities?.ledger_actions?.url_mark;
+    const lane = s.lane || d.lane;
+    window.BoardReconUrls.update(node, {ctx, program: s.p, programName: programName(s.p), lane, filters: urlFilters(s), cursor: s.ua,
+      hrefWith: (filters, cursor) => href({...s, ...urlState(filters, cursor)}), closeHref: href({...s, ...urlState({}, 0), u: false}),
+      onFilters: (filters, cursor) => { go({...urlState(filters, cursor)}, false); paint(); },
+      canMark: !!cap?.enabled, markOff: cap?.enabled ? '' : (window.BoardFindingActions?.OFF_HINT || 'Editing is off: the backend has not enabled the BBH writer.')});
   }
   function mountView(host) {
     const linked = parseQuery(ctx.state.reconQuery || '');
-    const changed = buildQuery(linked) !== buildQuery(view.state);
+    const before = view.state;
+    const changed = linked.p !== before.p || linked.lane !== before.lane || (!linked.p && buildQuery(linked) !== buildQuery(before));
+    const urlsMoved = linked.u && (!before.u || JSON.stringify(urlFilters(linked)) !== JSON.stringify(urlFilters(before)) || linked.ua !== before.ua);
     view.state = linked;
     if (view.state.p && !ctx.programs().some(p => String(p.id) === view.state.p)) { view.error = 'The linked program was not found in this Board root.'; }
     writeUrl();
     host.innerHTML = `<section class="panel ri-panel" aria-label="Recon intel"><div class="panel-pad" data-ri-controls>${controlsHtml()}</div><p class="hint ri-status" data-ri-status role="status">${statusHtml()}</p></section><div class="ri-body" data-ri-body></div>`;
     host.onclick = onClick; host.onchange = onChange; host.oninput = onInput;
     paint();
+    if (urlsMoved && view.program) requestAnimationFrame(() => ctx.app.querySelector('#ri-urls')?.scrollIntoView({block: 'start'}));
     const key = view.state.p ? `${view.state.p}|${view.state.lane || laneFor(view.state.p)}` : '';
     const have = view.state.p ? view.program && view.programKey === key : view.overview && Date.now() - view.overviewAt < 10000;
     if (changed || !have) { if (view.state.p && view.programKey !== key) view.program = null; view.polls = 0; load(); }
@@ -492,6 +559,7 @@
     const jump = event.target.closest('[data-ri-jump]');
     if (jump && event.button === 0 && !event.metaKey && !event.ctrlKey) { event.preventDefault(); ctx.app.querySelector('#' + CSS.escape(jump.dataset.riJump))?.scrollIntoView({block: 'start', behavior: 'smooth'}); return; }
     const t = event.target.closest('button'); if (!t) return;
+    if (t.dataset.riHostFindings != null) { openHostFindings(t); return; }
     if (t.dataset.riSort) { const k = t.dataset.riSort; go({sort: k, dir: view.state.sort === k && view.state.dir === 'desc' ? 'asc' : 'desc'}, false); paint(); }
     else if (t.dataset.riHsort) { const k = t.dataset.riHsort; go({hsort: k, hdir: view.state.hsort === k && view.state.hdir === 'desc' ? 'asc' : 'desc'}, false); paint(); }
     else if (t.dataset.riHint != null) { go({hint: t.dataset.riHint}, false); paint(); }
@@ -509,6 +577,22 @@
     view.state[id === 'ri-filter' ? 'q' : 'hq'] = clean(event.target.value).slice(0, 200);
     clearTimeout(view.qTimer);
     view.qTimer = setTimeout(() => { writeUrl(); paint(); }, 150);
+  }
+  // Findings whose asset, url or endpoint names this host: real links to each finding.
+  function openHostFindings(trigger) {
+    const d = view.program, row = d?.hosts?.rows?.find(r => r.host === trigger.dataset.riHostFindings);
+    if (!row) return;
+    const program = ctx.programs().find(p => String(p.id) === view.state.p);
+    const lane = (program?.lanes || []).find(l => String(l.name) === String(d.lane));
+    const byId = new Map((lane?.findings || []).map(f => [String(f.id ?? f.fid), f]));
+    const box = document.createElement('div');
+    const items = row.finding_ids.map(fid => {
+      const f = byId.get(String(fid));
+      return `<li><a class="link-button" href="${esc(ctx.hrefFor({program: view.state.p, lane: d.lane, section: 'findings', finding: fid}))}">${esc(f?.title || fid)}</a> <span class="id">${esc(fid)}</span> ${f ? ui().severityBadge(f.severity) : ''}</li>`;
+    }).join('');
+    box.innerHTML = `<div class="menu-label">Findings on ${esc(row.host)}</div><ul class="ri-host-findings">${items}</ul>${row.findings > row.finding_ids.length ? `<p class="hint">Showing ${row.finding_ids.length} of ${row.findings}.</p>` : ''}`;
+    ui().openPopover(trigger, box, {className: 'filter-popover ri-host-findings-popover', label: `Findings on ${row.host}`, trapTab: true});
+    box.querySelector('a')?.focus();
   }
   async function copyText(value) {
     if (!isCopySafe(value)) { ui().toast('Not copied: the value contains control characters.', 'warning'); return; }
@@ -531,7 +615,7 @@
     const anyApprox = rows.some(r => approx(r.urls));
     const withIndex = rows.filter(r => metric(r.urls) != null).length;
     const top = rows.filter(r => metric(r.urls) != null || metric(r.js_files) != null).sort((a, b) => depthGap(b) - depthGap(a)).slice(0, 5);
-    const list = top.map(r => `<li data-ri-card-row><a class="ri-program-link" href="${esc(href({p: r.id, lane: r.lane}))}">${esc(r.program)}</a> <span class="id">${esc(r.lane)}</span><span class="ri-card-meta">${num(r.urls)} URLs · ${num(r.js_files)} JS · ${num(r.test_runs)} tests</span></li>`).join('');
+    const list = top.map(r => `<li data-ri-card-row class="ri-card-row"><a class="ri-program-link ri-row-link" href="${esc(href({p: r.id, lane: r.lane}))}">${esc(r.program)}</a> <span class="id">${esc(r.lane)}</span><span class="ri-card-meta">${num(r.urls)} URLs · ${num(r.js_files)} JS · ${num(r.test_runs)} tests</span></li>`).join('');
     return `<section class="panel ri-card" aria-label="Recon depth">${head}<div class="ri-card-stats">
       <div><strong>${anyApprox ? '≈' : ''}${esc(fmtNum(sum('urls')))}</strong><span>URLs in ${esc(withIndex)} indexes</span></div>
       <div><strong>${esc(fmtNum(sum('js_files')))}</strong><span>JS files (${esc(fmtBytes(sum('js_bytes')))})</span></div>
@@ -574,6 +658,9 @@
     };
     card.timer = setTimeout(attempt, 0);
   }
+
+  // A URL mark recomputes the lane's summary on the server: fetch it again (polls while partial).
+  window.addEventListener('board-recon-marked', () => { if (ctx?.app.querySelector('#recon-intel-host') && view.state.p) { view.polls = 0; load({quiet: true}); } });
 
   setInterval(() => {
     if (!ctx || document.visibilityState !== 'visible') return;
