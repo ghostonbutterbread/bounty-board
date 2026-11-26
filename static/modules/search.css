@@ -1,12 +1,26 @@
 /* Global search: inline topbar field and command palette. Redesign tokens only. */
 #global-search-host{flex:0 1 340px}
-.search-inline{width:clamp(200px,26vw,340px)}
+/* The content column is a size container: a docked terminal narrows it without
+   changing the window, so the topbar sizes the field from the column (cqi). */
+.app>.body{container:board-body/inline-size}
+.search-inline{width:clamp(160px,calc(100cqi - 560px),340px)}
 .search-inline>input{min-height:30px;padding-right:58px;background:var(--surface-2);border-color:var(--border);font-size:var(--text-md);cursor:text}
 .search-inline>input::placeholder{color:var(--text-3)}
 .search-inline>input:hover{border-color:var(--border-strong)}
 .search-inline>input[aria-expanded="true"]{border-color:var(--accent)}
 .search-inline>input::-webkit-search-cancel-button{display:none}
 .search-inline>.search-kbd{position:absolute;right:8px;pointer-events:none}
+/* Narrow column: the field collapses to its search icon (a click or Ctrl+K still opens search). */
+@container board-body (max-width:720px){
+  #global-search-host{flex:none}
+  .search-inline{width:32px}
+  .search-inline>input{width:32px;min-width:0;padding:0;color:transparent;caret-color:transparent;cursor:pointer}
+  .search-inline>input::placeholder{color:transparent}
+  .search-inline>.search-kbd{display:none}
+  /* Leave the breadcrumb room: tighter padding, Refresh shows only its icon (the label stays for screen readers). */
+  .topbar{padding-inline:var(--space-4)}
+  #refresh>span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+}
 .search-overlay{position:fixed;inset:0;z-index:70;background:var(--overlay);display:flex;justify-content:center;align-items:flex-start;padding:12vh var(--space-4) var(--space-4)}
 .search-overlay[hidden]{display:none}
 .search-dialog{width:min(680px,100%);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;padding:0;background:var(--surface-raised);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);animation:pop-in var(--dur) var(--ease)}

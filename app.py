@@ -748,6 +748,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     recon = ReconIntel(recon_root, lambda r: discover(r, inventory_only=True),
                        read_file, ledger, coverage, map_entries, artifact_root=artifact_root,
                        query_budget=recon_query_budget or QUERY_BUDGET, scope=ScopeChecker(recon_root, writer))
+    # Scope panel (scope_inventory.py): read-only scope inventory, pull state and change log per program.
+    from scope_inventory import ScopeInventory
+    scope_inventory = ScopeInventory(recon_root, FAMILIES['binaries'])
     collaboration_lock = threading.RLock()
     portfolio_scan = threading.BoundedSemaphore(1)
     lane_reads = threading.BoundedSemaphore(8)
@@ -1576,6 +1579,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if url.path in ('/api/recon/overview', '/api/recon/program', '/api/recon/urls', '/api/recon/url'):
                 from recon_intel import handle_request
                 return handle_request(self, url, recon)
+            if url.path == '/api/scope':
+                from scope_inventory import handle_request as scope_request
+                return scope_request(self, url, scope_inventory, FAMILIES)
             if url.path == '/api/archive-state':
                 return self.archive_state_request(url)
             if url.path == '/api/collaboration':
@@ -2583,6 +2589,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     server.live = live
     server.search_index = search_index
     server.recon = recon
+    server.scope_inventory = scope_inventory
     # Artifact uploads (artifact_uploads.py): None unless --artifact-uploads.
     from artifact_uploads import Uploads
     server.artifact_uploads = Uploads() if artifact_uploads else None
