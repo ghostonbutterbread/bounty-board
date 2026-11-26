@@ -45,7 +45,7 @@
   }
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
   // window.BoardModules and mount into host elements after every render.
-  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, hrefFor, api:window.BoardAPI, ui:window.BoardUI, reload:()=>load(), reportIdFor});
+  const moduleContext = () => ({app, state, esc, markdown, display, programs, currentProgram, currentLane, rows, reportById, render, navigate:moduleNavigate, hrefFor, api:window.BoardAPI, ui:window.BoardUI, reload:()=>load(), reportIdFor, evidenceIdFor});
   // ---- Real links (feat/board-report-links-recent) ----
   // Every in-app destination is an <a href> in the hash route format, so
   // middle-click, Ctrl/Cmd/Shift+click and "Open link in new tab" work
@@ -769,6 +769,56 @@
     const path=typeof finding?.report_path==='string' && finding.report_path.startsWith('reports/') ? finding.report_path.slice(8) : '';
     return path.toLowerCase().endsWith('.md') && !path.split('/').some(part=>!part || part==='.' || part==='..') ? path : null;
   };
+  // ---- Evidence artifacts (feat/board-evidence-artifacts) ----
+  // Evidence files are artifacts of a finding, not reports. Mirrors the
+  // backend classifier (report_evidence.py) that keeps them out of every
+  // report index: a .md file under reports/ is evidence when no finding's
+  // report_path names it and either its name is EVIDENCE.md (any case) or a
+  // finding's evidence_path names it.
+  const normalizeParts = value => {
+    const out=[];
+    for(const part of String(value).split('/')){if(!part || part==='.')continue;if(part==='..'){if(!out.length)return null;out.pop();}else out.push(part);}
+    return out.length ? out.join('/') : null;
+  };
+  // Ledger-recorded path -> path relative to the lane's reports/ (relative
+  // "reports/..." paths, or absolute ones by their /<family>/<program>/<lane>/reports/ segment).
+  const reportsRelative = (program, laneName, recorded) => {
+    if(typeof recorded!=='string' || !program)return null;
+    let value=recorded.trim();if(!value || /[\0\n]/.test(value))return null;
+    if(value.startsWith('/')){
+      const marker=`/${program.family}/${program.name}/${laneName}/reports/`, at=value.lastIndexOf(marker);
+      if(at<0)return null;value=value.slice(at+marker.length);
+    } else {value=normalizeParts(value);if(!value || !value.startsWith('reports/'))return null;value=value.slice(8);}
+    return normalizeParts(value);
+  };
+  const evidenceSets = new WeakMap();
+  const recordedSets = (program, lane) => {
+    const findings=list(lane?.findings)||[];
+    let cached=evidenceSets.get(findings);
+    if(!cached || cached.key!==`${program?.id}|${lane?.name}`){
+      cached={key:`${program?.id}|${lane?.name}`,reports:new Set(),evidence:new Map()};
+      for(const f of findings){
+        const r=reportsRelative(program,lane?.name,f?.report_path);if(r)cached.reports.add(r);
+        const e=reportsRelative(program,lane?.name,f?.evidence_path);if(e){if(!cached.evidence.has(e))cached.evidence.set(e,[]);cached.evidence.get(e).push(f);}
+      }
+      evidenceSets.set(findings,cached);
+    }
+    return cached;
+  };
+  const isEvidencePath = (program, lane, path) => {
+    if(typeof path!=='string' || !path.toLowerCase().endsWith('.md'))return false;
+    const sets=recordedSets(program,lane);
+    return !sets.reports.has(path) && (path.split('/').pop().toLowerCase()==='evidence.md' || sets.evidence.has(path));
+  };
+  // Evidence path (relative to reports/) for a finding row's evidence icon, or null.
+  const evidenceIdFor = (program, lane, finding) => {
+    const path=reportsRelative(program,lane?.name,finding?.evidence_path);
+    return path && isEvidencePath(program,lane,path) ? path : null;
+  };
+  const evidenceIcon = (program, lane, finding, extra='') => {
+    const path=evidenceIdFor(program,lane,finding);if(!path)return '';
+    return `<a class="row-icon evidence-icon evidence-report" href="${esc(hrefFor({program:program.id,lane:lane.name,section:'reports',report:path}))}" data-goto-evidence="${esc(path)}" ${extra} aria-label="Evidence: ${esc(path)}" data-tip="Open evidence: ${esc(path)}">${icon('paperclip')}</a>`;
+  };
   function workspaceTarget() {
     if(state.dashboardProgram){const p=programs().find(p=>String(p.id)===state.dashboardProgram);if(p)return {program:p,lane:String(p.id)===state.program?state.lane:(list(p.lanes)||[])[0]?.name,why:'Dashboard filter'};}
     const p=currentProgram();if(!p)return null;
@@ -823,7 +873,7 @@
       // right: severity and submission pills together (.frow-pills), report/evidence icon links (.row-links).
       const sub=[`<span class="id">${esc(f.id??'')}</span>`, f.status!=null && f.status!=='' && !isArchived(f) ? `<span>${esc(f.status)}</span>` : '', isArchived(f)?'<span class="badge outline">archive</span>':'', kind!=='class' && f.class?`<span class="frow-class">${esc(f.class)}</span>`:''].filter(Boolean).join('');
       const reportNa=report && (l.reports||[]).some(r=>String(r.id)===String(report) && r.na===true);
-      return `<li data-finding-row class="frow" data-finding-id="${esc(f.id??'')}" data-program="${esc(p.id)}" data-lane="${esc(l.name)}" data-sev="${sevKey(f.severity)}"><span class="frow-main"><a class="link-button frow-title truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta frow-sub">${sub}</span></span><span class="frow-pills"><span class="frow-sev">${pickButton('sev',`Severity ${f.severity==null||f.severity===''?'not recorded':f.severity}. Change severity`,sevBadge(f.severity))}</span><span class="frow-subm">${window.BoardFindingActions?pickButton('submission',`Submission: ${submissionLabel(f)}. Change submission`,submissionBadge(f)):submissionBadge(f)}</span></span><span class="row-links">${report?`<a class="row-icon report-icon${reportNa?' is-na-link':''}" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target} aria-label="Report${reportNa?' (marked N/A)':''}: ${esc(report)}" data-tip="${reportNa?'Report (marked N/A on the Board)':'Open report'}: ${esc(report)}">${icon('file-text-o')}</a>`:''}</span></li>`;
+      return `<li data-finding-row class="frow" data-finding-id="${esc(f.id??'')}" data-program="${esc(p.id)}" data-lane="${esc(l.name)}" data-sev="${sevKey(f.severity)}"><span class="frow-main"><a class="link-button frow-title truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta frow-sub">${sub}</span></span><span class="frow-pills"><span class="frow-sev">${pickButton('sev',`Severity ${f.severity==null||f.severity===''?'not recorded':f.severity}. Change severity`,sevBadge(f.severity))}</span><span class="frow-subm">${window.BoardFindingActions?pickButton('submission',`Submission: ${submissionLabel(f)}. Change submission`,submissionBadge(f)):submissionBadge(f)}</span></span><span class="row-links">${report?`<a class="row-icon report-icon${reportNa?' is-na-link':''}" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target} aria-label="Report${reportNa?' (marked N/A)':''}: ${esc(report)}" data-tip="${reportNa?'Report (marked N/A on the Board)':'Open report'}: ${esc(report)}">${icon('file-text-o')}</a>`:''}${evidenceIcon(p,l,f,target)}</span></li>`;
     }).join('')}</ul></div>`).join('')}</div>`;
   }
   function breakdown(kind, groups, total) {
@@ -977,7 +1027,7 @@
     const f=state.filters, query=f.query.trim().toLowerCase();
     const filtered=sortFindings(all.filter(r=>FILTERS.every(([k])=>!(f[k]||[]).length || f[k].includes(filterValue(r,k))) && (!query||[r.title,r.id,r.class,r.status,r.severity].some(v=>String(v??'').toLowerCase().includes(query)))));
     const program=currentProgram(), laneName=state.lane;
-    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}" data-sev="${sevKey(r.severity)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${(rid=>rid?`<a class="report-ref" href="${esc(hrefFor({program:program?.id,lane:laneName,section:'reports',report:rid}))}" title="Open report ${esc(rid)}">${icon('file-text-o')}<span>Report</span></a>`:'')(reportIdFor(currentLane(),r))}${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : pickButton('submission',`Submission: ${submissionLabel(r)}. Change submission`,submissionBadge(r))}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="date">${seenCell(r)}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
+    const body=filtered.map(r=>`<tr data-finding-id="${esc(r.id??'')}" data-program="${esc(program?.id??'')}" data-lane="${esc(laneName)}" data-sev="${sevKey(r.severity)}"${r.id!=null && String(r.id)===state.highlight?' class="highlight"':''}><td><span class="finding-title">${esc(r.title||'Untitled finding')}</span><div class="finding-meta"><span class="id">${esc(r.id??'ID unavailable')}</span>${(rid=>rid?`<a class="report-ref" href="${esc(hrefFor({program:program?.id,lane:laneName,section:'reports',report:rid}))}" title="Open report ${esc(rid)}">${icon('file-text-o')}<span>Report</span></a>`:'')(reportIdFor(currentLane(),r))}${(eid=>eid?`<a class="evidence-ref evidence-report" href="${esc(hrefFor({program:program?.id,lane:laneName,section:'reports',report:eid}))}" aria-label="Evidence: ${esc(eid)}" data-tip="Open evidence: ${esc(eid)}">${icon('paperclip')}<span>Evidence</span></a>`:'')(evidenceIdFor(program,currentLane(),r))}${r.submission_status || r.platform_outcome ? `${r.submission_status ? `<span class="hint">Submission: ${esc(r.submission_status)}</span>` : ''}${r.platform_outcome ? `<span class="hint">Platform outcome: ${esc(r.platform_outcome)}</span>` : ''}` : pickButton('submission',`Submission: ${submissionLabel(r)}. Change submission`,submissionBadge(r))}</div></td><td>${metadataCell(r,'severity')}${severityNote(r)}${rationale(r)}</td><td>${metadataCell(r,'class')}${classNote(r)}</td><td>${metadataCell(r,'status')}</td><td class="date">${seenCell(r)}</td><td class="actions"><button type="button" class="button ghost icon-only sm" data-row-menu="${esc(r.id??'')}" aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${esc(r.title||r.id||'finding')}" title="Actions">${icon('ellipsis-v')}</button></td></tr>`).join('');
     const cap=BoardAPI.capability(state.data,'findingMetadata');
     const chips=FILTERS.flatMap(([k,label])=>(f[k]||[]).map(v=>`<span class="chip" data-filter-chip><span class="chip-key">${esc(label)}</span><span>${esc(v)}</span><button type="button" data-remove-filter="${k}" data-value="${esc(v)}" aria-label="Remove filter ${esc(label)} ${esc(v)}">${icon('times')}</button></span>`));
     const anyFilter=chips.length || query;
@@ -1059,7 +1109,58 @@
     if(!state.data?.capabilities?.collaboration)return '';
     return `<section class="panel panel-pad"><h2>Recover saved drafts</h2><p class="hint">Deleted or renamed reports disappear from the picker. Enter the original path relative to this lane's reports folder. Find saved local drafts and pending requests in this browser, or look up a previously observed shared draft. Local recovery leaves the original intact; if the source is unavailable, it waits for the source to return. None of this saves a report file.</p><label for="saved-shared-path">Original report path</label> <input id="saved-shared-path" type="text" autocomplete="off" value="${esc(recoveryPaths.get(recoveryPathKey())?.value || '')}"><button type="button" class="button" data-discard-current-path>Discard path</button><button type="button" class="button" data-find-shared>Find saved shared draft</button><button type="button" class="button" data-find-local>Find saved local drafts</button><div data-shared-recovery role="status"></div><div data-local-recovery></div></section>`;
   }
+  // Read-only evidence artifact view inside the Reports section, for any
+  // route whose report path is evidence (finding-row icon, old links, search
+  // hits). Taken before every report branch: no editor, picker, live or
+  // collaborative editing, N/A toggle, not-found warning or report fallback.
+  const evidenceCache=new Map();
+  const PACKET_FOLDER=/^([A-Za-z][0-9]{2,})(?:-.*)?$/;
+  function evidenceView() {
+    const program=currentProgram(), lane=currentLane(), path=state.report;
+    if(state.section!=='reports' || !program || !lane || !path)return '';
+    const byName=path.split('/').pop().toLowerCase()==='evidence.md';
+    if(!Array.isArray(lane.findings) && lane.unscanned && !lane._failed)
+      return byName ? '<section class="panel panel-pad evidence-view" data-evidence-view><h2>Evidence</h2><div class="state">Loading evidence…</div></section>' : '';
+    if(!isEvidencePath(program,lane,path))return '';
+    const findingsList=list(lane.findings)||[];
+    let owners=recordedSets(program,lane).evidence.get(path)||[], packet=false;
+    if(!owners.length){
+      const folder=path.includes('/') ? path.split('/')[0].match(PACKET_FOLDER) : null;
+      const matches=folder ? findingsList.filter(f=>f?.id!=null && String(f.id).toUpperCase()===folder[1].toUpperCase()) : [];
+      if(matches.length===1){owners=matches;packet=true;}
+    }
+    const key=`${program.id}\n${lane.name}\n${path}`;
+    let entry=evidenceCache.get(key);
+    if(!entry || (entry.snapshot!==state.data && !entry.loading)){
+      // Reload when the workspace data changes (Refresh); keep showing the last
+      // content meanwhile so a reload never flashes the view.
+      if(!entry){entry={status:'loading'};evidenceCache.set(key,entry);while(evidenceCache.size>24)evidenceCache.delete(evidenceCache.keys().next().value);}
+      const snapshot=state.data;entry.snapshot=snapshot;entry.loading=true;
+      const here=()=>state.view==='program' && state.section==='reports' && state.report===path && currentProgram()===program && currentLane()===lane;
+      BoardAPI.report(program,lane.name,path,snapshot?.portfolio_unloaded ? snapshot.root_instance : undefined).then(result=>{
+        if(typeof result?.content!=='string')throw new Error('Invalid evidence');
+        const changed=entry.status!=='loaded' || entry.content!==result.content;
+        entry.content=result.content;entry.status='loaded';return changed;
+      }).catch(()=>{const changed=entry.status!=='error';entry.status='error';return changed;})
+        .then(changed=>{entry.loading=false;if(changed && here())render();});
+    }
+    const fidLink=f=>`<a href="${esc(hrefFor({program:program.id,lane:lane.name,section:'findings',finding:f.id}))}" data-evidence-finding="${esc(f.id)}">${esc(f.id)}</a>`;
+    const heading=owners.length ? `Evidence for finding ${owners.map(fidLink).join(', ')}` : 'Evidence file';
+    const hint=!owners.length ? 'No finding records this file as its evidence. Shown read-only as an artifact, not as a report.'
+      : packet ? 'Matched by its packet folder; the ledger does not record this file. Read-only artifact, not a separate report.'
+      : 'Read-only artifact of the finding. It is not a separate report.';
+    const ownerRows=owners.map(f=>{
+      const report=reportIdFor(lane,f);
+      return `<li data-evidence-owner="${esc(f.id)}"><span class="id">${esc(f.id)}</span><span class="evidence-owner-title truncate">${esc(f.title||'Untitled finding')}</span><a class="button sm" href="${esc(hrefFor({program:program.id,lane:lane.name,section:'findings',finding:f.id}))}" data-evidence-show-finding>${icon('crosshairs')}<span>Show finding</span></a>${report?`<a class="button sm" href="${esc(hrefFor({program:program.id,lane:lane.name,section:'reports',report}))}" data-evidence-report aria-label="Open report: ${esc(report)}" data-tip="Open report: ${esc(report)}">${icon('file-text-o')}<span>Open report</span></a>`:'<span class="hint">No report yet</span>'}</li>`;
+    }).join('');
+    const body=entry.status==='loaded' ? `<div id="evidence-preview" class="preview evidence-preview" aria-label="Evidence content">${markdown(entry.content)}</div>`
+      : entry.status==='error' ? '<div class="message warning" role="status" data-evidence-error>Evidence could not be loaded. It may have been moved or deleted. Refresh the workspace to retry.</div>'
+      : '<div class="state">Loading evidence…</div>';
+    const all=rows('reports');
+    return `<section class="panel panel-pad report-panel evidence-view" data-evidence-view data-evidence-path="${esc(path)}"><div class="blockhead"><div><h2>${icon('paperclip')} ${heading}</h2><p class="hint">${esc(hint)}</p></div></div><p class="hint record-value evidence-path"><span class="badge outline">Evidence</span> <span>Path: <code>${esc(path)}</code></span></p>${ownerRows?`<ul class="evidence-owners" aria-label="Finding">${ownerRows}</ul>`:''}<div class="report-workspace"><div class="report-main">${body}</div><aside class="report-side" aria-label="Evidence folder files">${artifactsHost({path,id:path})}</aside></div>${Array.isArray(all) && all.length?reportBrowser(all):''}</section>`;
+  }
   function reports() {
+    const evidence=evidenceView();if(evidence)return evidence;
     const partial=reportsIncomplete(currentLane()) && Array.isArray(rows('reports'));
     return savedSharedRecovery()+(partial ? '<div class="message warning">Report list is incomplete; some reports may be unavailable.</div>' : '')+reportEditor();
   }
@@ -1074,7 +1175,7 @@
     const naCount=all.filter(r=>r.id!=null && (showNav || r.kind!=='generated_navigation') && r.na===true).length;
     const items=all.filter(r=>r.id!=null && (showNav || r.kind!=='generated_navigation') && !(hideNa && r.na===true)).sort((a,b)=>(typeof b.modified==='number'?b.modified:-1)-(typeof a.modified==='number'?a.modified:-1) || String(a.path??a.id).localeCompare(String(b.path??b.id)));
     const open=readStore('bounty-board-report-list-open',true)!==false;
-    const kinds={registered_report:'Registered',generated_report:'Generated',generated_evidence:'Evidence',generated_navigation:'Navigation',unregistered:'Unregistered'};
+    const kinds={registered_report:'Registered',generated_report:'Generated',generated_navigation:'Navigation',unregistered:'Unregistered'};
     const rowsHtml=items.map(r=>{
       const name=String(r.title || r.name || r.id), path=String(r.path ?? ''), owners=Array.isArray(r.owner_fids) ? r.owner_fids.map(String) : [];
       const when=relativeTime(r.modified);
@@ -1101,7 +1202,7 @@
     state.linkedReport='';
     if(!all.some(r=>String(r.id)===state.report)) state.report=String(all[0].id??'');
     const report=reportById(state.report); if(!report || report.id==null)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports need stable IDs before they can be opened.</div></section>';
-    const kindNames={registered_report:'Registered report',generated_report:'Generated report',generated_evidence:'Generated evidence',generated_navigation:'Generated navigation',unregistered:'Unregistered artifact',unknown:'Ownership unknown'};
+    const kindNames={registered_report:'Registered report',generated_report:'Generated report',generated_navigation:'Generated navigation',unregistered:'Unregistered artifact',unknown:'Ownership unknown'};
     const kind=report.kind == null ? 'Ownership not provided' : (kindNames[report.kind] || String(report.kind));
     const owner=Array.isArray(report.owner_fids) && report.owner_fids.length ? `Finding owner IDs: ${report.owner_fids.map(display).join(', ')}` : '';
     const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>${reportBrowser(all)}`;

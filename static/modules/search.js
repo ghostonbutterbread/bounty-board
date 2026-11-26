@@ -117,7 +117,7 @@
         if (entry.subtitle) body.append(el('div', 'search-sub hint', entry.subtitle));
         if (entry.snippet) { const snippet = el('div', 'search-snippet'); snippet.append(highlighted(entry.snippet, entry.snippetRanges)); body.append(snippet); }
         row.append(body);
-        if (entry.reportTarget) { const b = el('a', 'button subtle search-open-report', 'Open report'); b.href = ctx.hrefFor ? ctx.hrefFor(entry.reportTarget) : '#'; b.tabIndex = -1; b.dataset.action = 'report'; row.append(b); }
+        if (entry.reportTarget) { const b = el('a', 'button subtle search-open-report', entry.reportLabel || 'Open report'); b.href = ctx.hrefFor ? ctx.hrefFor(entry.reportTarget) : '#'; b.tabIndex = -1; b.dataset.action = 'report'; row.append(b); }
         group.append(row);
       }
       list.append(group);
@@ -165,7 +165,7 @@
     const place = x => `${x.program_name || x.program} / ${x.lane}`;
     const groups = [
       ['Programs', (r.programs || []).map(p => ({ icon: 'fa-folder-o', title: p.name, ranges: p.title_ranges, subtitle: `${p.family} · ${p.finding_count} findings · ${p.report_count} reports`, target: p.target }))],
-      ['Findings', (r.findings || []).map(f => ({ icon: 'fa-bug', title: f.title, ranges: f.title_ranges, severity: f.severity, subtitle: `${f.fid} · ${f.class || 'no class'} · ${f.status || 'no status'} · ${place(f)}${f.report ? '' : ' · no linked report'}`, target: f.target, reportTarget: f.report?.target, finding: f }))],
+      ['Findings', (r.findings || []).map(f => ({ icon: 'fa-bug', title: f.title, ranges: f.title_ranges, severity: f.severity, subtitle: `${f.fid} · ${f.class || 'no class'} · ${f.status || 'no status'} · ${place(f)}${f.report ? (f.report.kind === 'evidence' ? ' · evidence, no report yet' : '') : ' · no linked report'}`, target: f.target, reportTarget: f.report?.target, reportLabel: f.report?.kind === 'evidence' ? 'Open evidence' : 'Open report', finding: f }))],
       ['Reports', (r.reports || []).map(x => ({ icon: 'fa-file-text-o', title: x.title, ranges: x.title_ranges, subtitle: `${x.path} · ${place(x)}${x.owner_fids?.length ? ` · finding ${x.owner_fids[0]}` : ''}`, snippet: x.snippet, snippetRanges: x.snippet_ranges, target: x.target, report: x }))],
     ];
     const state = data.index_state;
@@ -190,7 +190,7 @@
     close(false);
     if (!ctx.navigate(target)) { announce('That item is no longer available. Refresh the board and search again.'); return; }
     if (entry.finding && !openReport) {
-      announce(`Showing finding ${entry.finding.fid}.`, entry.reportTarget ? { label: 'Open report', target: entry.reportTarget } : null, entry.reportTarget ? '' : 'No linked report.');
+      announce(`Showing finding ${entry.finding.fid}.`, entry.reportTarget ? { label: entry.reportLabel || 'Open report', target: entry.reportTarget } : null, entry.reportTarget ? '' : 'No linked report.');
     } else if (entry.report && !openReport && entry.report.owner_fids?.length) {
       const fid = entry.report.owner_fids[0];
       announce(`Report for finding ${fid}.`, { label: 'Show finding', target: { program: target.program, lane: target.lane, section: 'findings', finding: fid } });

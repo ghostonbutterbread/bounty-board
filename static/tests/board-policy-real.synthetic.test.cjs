@@ -25,12 +25,14 @@ test('real report policy allows owned and unregistered files but rejects generat
     for(let i=0;i<100;i++){try{const response=await fetch(base+'/api/data');if(response.ok){data=await response.json();break;}}catch{} await new Promise(r=>setTimeout(r,100));}
     assert.ok(data,'CLI server must become ready');
     const entries=Object.fromEntries(data.programs[0].lanes[0].reports.map(x=>[x.path,x]));
-    assert.equal(entries['registered.md'].kind,'registered_report');assert.equal(entries['evidence.md'].kind,'generated_evidence');assert.equal(entries['unregistered.md'].kind,'unregistered');
-    for(const name of ['registered.md','unregistered.md','evidence.md'])assert.equal(entries[name].editable,true,name);
+    assert.equal(entries['registered.md'].kind,'registered_report');assert.equal(entries['unregistered.md'].kind,'unregistered');
+    // evidence.md (named by evidence_path) is an artifact of SYN-1, not a report: never listed.
+    assert.equal(entries['evidence.md'],undefined);
+    for(const name of ['registered.md','unregistered.md'])assert.equal(entries[name].editable,true,name);
     assert.equal(entries['navigation.md'].editable,false);
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN||'/usr/bin/google-chrome',args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
     const page=await browser.newPage();page.setDefaultTimeout(15000);await page.goto(base);await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByRole('link',{name:'Reports',exact:true}).click();
-    for(const name of ['registered.md','unregistered.md','evidence.md']){
+    for(const name of ['registered.md','unregistered.md']){
       await page.locator('#report-select').selectOption(name);await page.getByText(/Shared draft ready/).waitFor();
       await page.locator('.CodeMirror textarea').focus();await page.keyboard.press('Control+A');await page.keyboard.insertText(`saved ${name}\n`);
       await page.getByText(/Markdown file saved/).waitFor();assert.equal(fs.readFileSync(path.join(reports,name),'utf8'),`saved ${name}\n`);

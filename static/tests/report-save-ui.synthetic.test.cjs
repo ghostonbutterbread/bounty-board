@@ -135,7 +135,7 @@ test('a saved notice is invalidated when reload observes a later external change
 // Adapter injects the policy that the sibling backend will advertise.
 test('backend editability disables collaborative editor and source writes only for denied reports', {timeout:30000},()=>fixture(async({browser,base,report})=>{
   const page=await browser.newPage();page.setDefaultTimeout(6000);let posts=0;
-  const classify=items=>{for(const item of items || [])item.kind=item.path==='example.md'?'generated_navigation':'generated_evidence';};
+  const classify=items=>{for(const item of items || [])item.kind=item.path==='example.md'?'generated_navigation':'unregistered';};
   await page.route('**/api/data*',async route=>{const response=await route.fetch(),body=await response.json();for(const program of body.programs || [])for(const lane of program.lanes || [])classify(lane.reports);await route.fulfill({response,json:body});});
   await page.route('**/api/lane-reports?*',async route=>{const response=await route.fetch(),body=await response.json();classify(body.reports);await route.fulfill({response,json:body});});
   await page.route('**/api/report?*',async route=>{const response=await route.fetch(),body=await response.json();body.editable=!route.request().url().includes('example.md');body.collaboration_editable=body.editable;await route.fulfill({response,json:body});});
@@ -146,7 +146,7 @@ test('backend editability disables collaborative editor and source writes only f
   assert.equal(await page.evaluate(()=>document.querySelector('.CodeMirror')?.CodeMirror.getOption('readOnly') ?? document.querySelector('#report-source')?.readOnly),true);
   assert.equal(await page.locator('.editor-toolbar').count(),0,'read-only editor must not expose write commands');
   assert.equal(await page.getByRole('button',{name:'Save merged report'}).count(),0);assert.equal(posts,0);assert.equal(fs.readFileSync(report,'utf8'),'original\n');
-  await page.locator('#report-select').selectOption('second.md');await page.getByText(/Shared draft ready/).waitFor();assert.match(await page.locator('#app').innerText(),/Generated evidence/);await edit(page,'editable report\n');
+  await page.locator('#report-select').selectOption('second.md');await page.getByText(/Shared draft ready/).waitFor();assert.match(await page.locator('#app').innerText(),/Unregistered artifact/);await edit(page,'editable report\n');
   await page.getByText(/Markdown file saved/).waitFor();assert.equal(fs.readFileSync(path.join(path.dirname(report),'second.md'),'utf8'),'editable report\n');
 }));
 
