@@ -10,6 +10,7 @@ MODE is a comma list (always tailnet identity):
   noconnect  the service runs without --agent-connect
   down       the Board has --terminal-url but no terminal service answers
   nolive     the Board runs without live editing (the non-live report view)
+  notokenflag  the service runs without --report-agent-token-file (login not editable)
 
 The service runs in this process with the TEST-ONLY local backend, the fake CLI
 (tests/fake_agent_cli.py) as "claude", a fake TLS model upstream (never
@@ -79,7 +80,7 @@ def main():
         upstream = fu.FakeUpstream(cert, key)
         if 'agentoff' not in modes:
             hub = ra.ReportAgentHub(enabled=True, root=root, state_dir=target / 'term-state', clis={'claude': str(FAKE_CLI)},
-                                    token_file=token, relay_upstream=('127.0.0.1', upstream.port),
+                                    token_file=None if 'notokenflag' in modes else token, relay_upstream=('127.0.0.1', upstream.port),
                                     relay_ssl_context=fu.client_context(cert), stop_grace=1.0)
         if 'noconnect' not in modes:
             env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'FAKE_HERDR_STATE': str(herdr_state),

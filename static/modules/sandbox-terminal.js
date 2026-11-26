@@ -392,7 +392,7 @@
 
   async function connect() {
     clearTimeout(connectTimer); connectTimer = null;
-    if (!sel || !prefs.open || !drawer || drawer.hidden) return;
+    if (!sel || !prefs.open || !drawer || drawer.hidden || blocked()) return;
     // The shell attaches once its tab is shown (a drawer opened on an Agent or
     // connect tab does not start a shell viewer until Terminal is picked).
     if (activeTab === 'terminal') shellWanted = true;
@@ -745,9 +745,12 @@
   // Opening focuses the terminal; closing returns focus to where it was before
   // opening (if that element still exists), else to the report editor.
   let returnFocus = null, wantFocus = false;
-  function toggle(force) {
-    if (!sel || (blocked() && force !== false)) return;
+  // allowBlocked: a registered tab (agent connect) may open the drawer for a report
+  // outside a finding folder; the shell itself never attaches there.
+  function toggle(force, allowBlocked) {
+    if (!sel) return;
     const next = force === undefined ? !prefs.open : force;
+    if (next && blocked() && !allowBlocked) return;
     if (next && !prefs.open) {
       const active = document.activeElement;
       returnFocus = active && active !== document.body && !drawer?.contains(active) ? active : null;
@@ -903,8 +906,11 @@
     tab.el?.remove();
     tabs.delete(id);
     delete notes[id];
-    if (activeTab === id) selectTab('terminal');
-    else paintTabs();
+    if (activeTab !== id) { paintTabs(); return; }
+    // Outside a finding folder there is no shell: show another tab, or close the drawer.
+    const next = blocked() ? [...tabs.keys()][0] : 'terminal';
+    if (next) selectTab(next);
+    else { activeTab = 'terminal'; paintTabs(); toggle(false); }
   }
   function clearTabs() {
     for (const id of [...tabs.keys()]) { const tab = tabs.get(id); detachTab(tab); tab.el?.remove(); tabs.delete(id); delete notes[id]; }
@@ -963,10 +969,10 @@
   }
   // Opens the drawer (if the report has a terminal) on that tab and focuses it.
   function openTab(id) {
-    if (!sel || blocked() || (id !== 'terminal' && !tabs.has(id))) return false;
+    if (!sel || (id === 'terminal' ? blocked() : !tabs.has(id))) return false;
     if (!drawer || drawer.hidden || !prefs.open) {
       activeTab = id;   // showDrawer attaches the active tab
-      toggle(true);
+      toggle(true, id !== 'terminal');
     }
     selectTab(id);
     focusActive();
@@ -995,6 +1001,7 @@
       button.tabIndex = tab.id === activeTab ? 0 : -1;
       button.dataset.termTabSelect = tab.id;
       if (tab.title) button.title = tab.title;
+      if (tab.id === 'terminal' && blocked()) { button.disabled = true; button.title = mount.message; }
       if (tab.status && tab.status.state !== 'idle') {
         const dot = document.createElement('span');
         dot.className = 'term-tab-dot';
@@ -1182,7 +1189,7 @@
     if (!base || !isToggleKey(event) || event.target?.closest?.('[data-shortcut-recorder]')) return;
     event.preventDefault();
     event.stopPropagation();
-    if (!event.repeat && sel && !blocked()) toggle();
+    if (!event.repeat && sel && (!blocked() || (drawer && !drawer.hidden))) toggle();
   }, true);
   window.addEventListener('focus', () => { if (sel) loadChecks(); });
 
@@ -1220,7 +1227,7 @@
       button.title = message || `Sandbox terminal (${shortcutText()})`;
     });
     document.querySelectorAll('[data-term-reason]').forEach(el => { el.textContent = message; el.hidden = !message; });
-    if (message && drawer && !drawer.hidden) showDrawer(false);
+    if (message && drawer && !drawer.hidden && activeTab === 'terminal') showDrawer(false);
     else if (!message && prefs.open && drawer?.hidden && sel) showDrawer(true);
   }
   async function loadMount() {

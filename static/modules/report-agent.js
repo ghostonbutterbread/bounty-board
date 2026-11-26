@@ -22,7 +22,8 @@
   const FORMAT_LABEL = Object.fromEntries(FORMATS);
   const LANG_RE = /^[A-Za-z0-9_+.#-]{0,32}$/;
   const CUSTOM_RE = /^[a-z0-9]([a-z0-9.-]{0,62}[a-z0-9])?$/;
-  const MAX_ASK = 8 * 1024, MAX_BLOCK = 64 * 1024;
+  const SETUP_TOKEN_RE = /^sk-ant-oat[A-Za-z0-9_-]{20,500}$/;   // same shape the service accepts
+  const MAX_ASK = 8 * 1024, MAX_NOTE = 2 * 1024, MAX_BLOCK = 64 * 1024;
   const STATE_LABEL = {starting: 'Starting', working: 'Working', waiting: 'Waiting for you', exited: 'Exited'};
   const LIVE = new Set(['starting', 'working', 'waiting']);
   const KIND_LABEL = {claude: 'Claude', omp: 'OMP', codex: 'Codex', opencode: 'OpenCode'};
@@ -115,6 +116,8 @@
     if (!config.login?.ready) return 'No sandbox login on Hoster yet.';
     return '';
   }
+  // Agent connect needs no sandbox: it works for any report while the service flag is on.
+  const connectAvailable = () => !!base && !configError && status?.agent_connect === true;
   const hasSession = () => session && session.state && session.state !== 'none';
   const running = () => LIVE.has(session?.state);
 
@@ -173,10 +176,13 @@
   function paintButton() {
     const button = document.querySelector('[data-agent-toggle]');
     if (!button) return;
-    const reason = hasSession() ? '' : unavailable();
+    const agentReason = unavailable();
+    // Disabled only when neither the report agent nor agent connect can be used here.
+    const reason = hasSession() || !agentReason || connectAvailable() ? '' : agentReason;
     const loading = !configError && !config && !!base;
     button.disabled = !!reason;
-    button.title = reason || (hasSession() ? `Agent: ${STATE_LABEL[session.state] || session.state}. Open the session.` : 'Report agent: change the PoC format or ask a question');
+    button.title = reason || (hasSession() ? `Agent: ${STATE_LABEL[session.state] || session.state}. Open the session.`
+      : agentReason ? `Running agents on Hoster. ${agentReason}` : 'Report agent: change the PoC format or ask a question');
     const reasonEl = document.querySelector('[data-agent-reason]');
     if (reasonEl) { reasonEl.textContent = loading ? '' : reason; reasonEl.hidden = loading || !reason; }
     const stateEl = button.querySelector('[data-agent-state]');
@@ -259,7 +265,10 @@
       hasSession() ? statePill(session.state) : null);
     const parts = [head];
     if (hasSession()) parts.push(liveSection());
-    if (!live) parts.push(startForm());
+    // Without a usable report agent (outside a finding folder, no login, feature off) the
+    // popover offers only the running agents, with one muted line saying why.
+    const startReason = unavailable();
+    if (!live) parts.push(startReason ? h('p', {className: 'hint ra-start-off', dataset: {agentStartOff: ''}, text: startReason}) : startForm());
     parts.push(connectSection());
     pop.replaceChildren(...parts);
     paintConnect();
@@ -291,15 +300,24 @@
     const chips = h('div', {className: 'ra-chips', role: 'group', 'aria-label': 'Change PoC format'},
       FORMATS.map(([id, label]) => h('button', {type: 'button', className: 'ra-chip', dataset: {agentFormat: id}, 'aria-pressed': String(form.format === id),
         onclick: () => { form.format = form.format === id ? null : id; form.error = ''; syncChips(); paintHint(); }}, label)));
-    const syncChips = () => chips.querySelectorAll('[data-agent-format]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.agentFormat === form.format)));
-    const area = h('textarea', {name: 'agent-ask', className: 'ra-ask', rows: 3, placeholder: 'Ask the agent...', 'aria-label': 'Ask the agent', value: form.text,
-      oninput: event => { form.text = event.target.value; form.error = ''; if (form.format) { form.format = null; syncChips(); } paintHint(); }});
+    // With a chip picked the textarea holds optional extra instructions (sent as task.note);
+    // without one it is the ask box.
+    const areaLabel = h('div', {className: 'ra-label', dataset: {agentAreaLabel: ''}});
+    const area = h('textarea', {name: 'agent-ask', className: 'ra-ask', rows: 3, value: form.text,
+      oninput: event => { form.text = event.target.value; form.error = ''; paintHint(); }});
+    const syncChips = () => {
+      chips.querySelectorAll('[data-agent-format]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.agentFormat === form.format)));
+      areaLabel.textContent = form.format ? 'Anything else? (optional)' : 'Or ask the agent';
+      area.placeholder = form.format ? 'Anything else? (optional)' : 'Ask the agent...';
+      area.setAttribute('aria-label', form.format ? 'Extra instructions for the format change (optional)' : 'Ask the agent');
+    };
+    syncChips();
     const fields = modelFields(form, quiet => { form.error = ''; if (quiet) paintHint(); else paintPopover(); }, 'agent');
     const hint = h('p', {className: 'hint ra-hint', dataset: {agentHint: ''}, role: 'status', 'aria-live': 'polite'});
     const start = h('button', {type: 'button', className: 'button primary sm', dataset: {agentAction: 'start'}, onclick: () => startFromForm()}, icon('play'), ' Start');
     const wrap = h('div', {className: 'ra-form'},
       h('div', {className: 'ra-label', text: 'Change PoC format'}), chips,
-      h('div', {className: 'ra-label', text: 'Or ask the agent'}), area,
+      areaLabel, area,
       h('div', {className: 'ra-models'}, fields),
       hint,
       h('div', {className: 'ra-actions'}, h('span', {className: 'ra-where hint', text: 'Runs in this report\'s sandbox.'}), start));
@@ -317,8 +335,13 @@
   function formProblem() {
     const model = effectiveModel(form);
     if (model === null) return {ready: false, bad: true, text: 'Custom model ids use lowercase letters, digits, dots and dashes.'};
-    if (form.format) return {ready: true, bad: false, text: form.text.trim() ? 'A format change starts on its own. Ask your question in the Agent tab afterwards.' : ''};
     const text = form.text.replace(/\r\n?/g, '\n');
+    if (form.format) {
+      if (!text.trim()) return {ready: true, bad: false, text: ''};
+      if (unsafe(text)) return {ready: false, bad: true, text: UNSAFE_TEXT};
+      if (bytes(text) > MAX_NOTE) return {ready: false, bad: true, text: 'The extra instructions are too long (2 KiB at most).'};
+      return {ready: true, bad: false, text: 'Sent with the format change as your extra instructions.'};
+    }
     if (!text.trim()) return {ready: false, bad: false, text: 'Pick a format or type a question.'};
     if (unsafe(text)) return {ready: false, bad: true, text: UNSAFE_TEXT};
     if (bytes(text) > MAX_ASK) return {ready: false, bad: true, text: 'The question is too long (8 KiB at most).'};
@@ -364,7 +387,8 @@
   async function startFromForm() {
     const problem = formProblem();
     if (!problem.ready || problem.bad || form.busy) return;
-    const task = form.format ? {kind: 'poc_format', format: form.format} : {kind: 'ask', text: form.text.replace(/\r\n?/g, '\n')};
+    const text = form.text.replace(/\r\n?/g, '\n');
+    const task = !form.format ? {kind: 'ask', text} : text.trim() ? {kind: 'poc_format', format: form.format, note: text} : {kind: 'poc_format', format: form.format};
     form.busy = true; form.error = ''; paintPopover();
     const error = await start(task, overrides(form.cli, effectiveModel(form)));
     form.busy = false;
@@ -401,23 +425,23 @@
     window.BoardUI?.toast?.('Agent stopped. Its edits stay in the report folder.', 'success', {timeout: 4000});
   }
   // Same dialog as finding-actions.js confirmDialog(), through BoardLedgerActions.dialog.
-  function confirmStop() {
+  function confirmDialog({title, lines, confirm, id}) {
     const LA = window.BoardLedgerActions;
-    if (typeof LA?.dialog !== 'function') return Promise.resolve(window.confirm('Stop the agent?'));
+    if (typeof LA?.dialog !== 'function') return Promise.resolve(window.confirm(title));
     return new Promise(resolve => {
-      const node = LA.dialog('Stop the agent?', 'report-agent-stop-text');
+      const node = LA.dialog(title, `report-agent-${id}-text`);
       node.classList.add('ra-dialog');
       let answer = false;
-      const yes = h('button', {type: 'button', className: 'button danger-button', dataset: {agentConfirm: 'stop'}, text: 'Stop agent', onclick: () => { answer = true; node.close(); }});
+      const yes = h('button', {type: 'button', className: 'button danger-button', dataset: {agentConfirm: id}, text: confirm, onclick: () => { answer = true; node.close(); }});
       const no = h('button', {type: 'button', className: 'button subtle', text: 'Cancel', onclick: () => node.close()});
-      node.append(h('div', {id: 'report-agent-stop-text'},
-        h('p', {className: 'hint', text: 'The agent stops now, even in the middle of a step.'}),
-        h('p', {className: 'hint', text: 'Edits it already made stay in the report folder. The Agent tab closes.'})),
-      h('div', {className: 'ledger-dialog-actions'}, yes, no));
+      node.append(h('div', {id: `report-agent-${id}-text`}, lines.map(text => h('p', {className: 'hint', text}))),
+        h('div', {className: 'ledger-dialog-actions'}, yes, no));
       node.addEventListener('close', () => resolve(answer));
       node.showModal(); no.focus();
     });
   }
+  const confirmStop = () => confirmDialog({title: 'Stop the agent?', confirm: 'Stop agent', id: 'stop',
+    lines: ['The agent stops now, even in the middle of a step.', 'Edits it already made stay in the report folder. The Agent tab closes.']});
 
   // -- Agent tab (kind=agent) ------------------------------------------------------
   function ensureAgentTab() {
@@ -667,7 +691,7 @@
 
   // -- Settings: Agent section ------------------------------------------------------
   function renderSettings(host) {
-    const state = {cli: null, model: null, custom: '', saving: false, message: '', tone: ''};
+    const state = {cli: null, model: null, custom: '', saving: false, message: '', tone: '', replacing: false, loginBusy: false, loginMsg: '', loginTone: ''};
     let alive = true;
     const paint = () => {
       if (!alive) return;
@@ -689,11 +713,7 @@
           h('div', {className: 'set-controls ra-set-controls'}, modelFields(state, quiet => { state.message = ''; if (quiet) paintSave(); else paint(); }, 'set-agent'), save)));
         parts.push(h('p', {className: `hint ra-set-msg${state.tone ? ` ${state.tone}` : ''}`, dataset: {agentSettingsMsg: ''}, role: 'status', 'aria-live': 'polite',
           text: state.message || (model === null ? 'Custom model ids use lowercase letters, digits, dots and dashes.' : '')}));
-        const login = config.login || {};
-        parts.push(h('div', {className: 'set-row'},
-          h('div', {className: 'set-text'}, h('span', {className: 'set-label', text: 'Sandbox login'}),
-            login.ready ? h('p', {className: 'hint', text: 'The agent signs in through the host relay. The token never enters the sandbox.'}) : h('p', {className: 'hint', dataset: {agentLoginHint: ''}, text: LOGIN_HINT})),
-          h('span', {className: `badge ${login.ready ? 'success' : 'warning'}`, dataset: {agentLogin: login.ready ? 'ready' : 'missing'}, text: login.ready ? 'Sandbox login ready' : 'No sandbox login on Hoster yet'})));
+        parts.push(...loginRow());
       }
       const connectOn = status ? !!status.agent_connect : null;
       parts.push(h('div', {className: 'set-row'},
@@ -701,6 +721,77 @@
           h('p', {className: 'hint', text: 'A terminal service setting (--agent-connect), not changed here. When on, the Agent button lists agents running on Hoster.'}))));
       host.replaceChildren(...parts);
     };
+    // "Sandbox login (Claude)": saved on Hoster through POST /api/agent/login. The token
+    // lives only in the password field until Save, which clears it whatever happens.
+    function loginRow() {
+      const login = config.login || {};
+      const pill = h('span', {className: `badge ${login.ready ? 'success' : 'warning'}`, dataset: {agentLogin: login.ready ? 'ready' : 'missing'},
+        text: login.ready ? 'Sandbox login ready' : 'No sandbox login on Hoster yet'});
+      if (!login.editable) {
+        return [h('div', {className: 'set-row'},
+          h('div', {className: 'set-text'}, h('span', {className: 'set-label', text: 'Sandbox login'}),
+            login.ready ? h('p', {className: 'hint', text: 'The agent signs in through the host relay. The token never enters the sandbox.'}) : h('p', {className: 'hint', dataset: {agentLoginHint: ''}, text: LOGIN_HINT})),
+          pill)];
+      }
+      const text = [h('span', {className: 'set-label', text: 'Sandbox login (Claude)'})];
+      let controls;
+      if (login.ready && !state.replacing) {
+        if (login.saved_at) text.push(h('p', {className: 'hint', dataset: {agentLoginSaved: ''}, text: `Saved ${ago(login.saved_at)}`}));
+        text.push(h('p', {className: 'hint', text: 'The agent signs in through the host relay. The token never enters the sandbox.'}));
+        controls = [pill,
+          h('button', {type: 'button', className: 'button sm subtle', dataset: {agentLoginAction: 'remove'}, disabled: state.loginBusy, onclick: removeLogin}, 'Remove'),
+          h('button', {type: 'button', className: 'button sm', dataset: {agentLoginAction: 'replace'}, disabled: state.loginBusy,
+            onclick: () => { state.replacing = true; state.loginMsg = ''; paint(); host.querySelector('input[name="set-agent-token"]')?.focus(); }}, 'Replace')];
+      } else {
+        if (!state.replacing) text.push(h('div', {className: 'ra-login-status'}, pill));
+        text.push(h('p', {className: 'hint', dataset: {agentLoginHelp: ''}, text: 'Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board\'s user.'}));
+        const input = h('input', {type: 'password', name: 'set-agent-token', className: 'ra-token', autocomplete: 'off', spellcheck: 'false',
+          autocapitalize: 'off', placeholder: 'sk-ant-oat...', 'aria-label': 'Claude setup token', disabled: state.loginBusy,
+          onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); saveLogin(); } }});
+        input.spellcheck = false;
+        controls = [
+          state.replacing ? h('button', {type: 'button', className: 'button sm ghost', dataset: {agentLoginAction: 'cancel'}, onclick: () => { state.replacing = false; state.loginMsg = ''; paint(); }}, 'Cancel') : null,
+          input,
+          h('button', {type: 'button', className: 'button sm primary', dataset: {agentLoginAction: 'save'}, disabled: state.loginBusy, onclick: saveLogin}, state.loginBusy ? 'Saving' : 'Save')];
+      }
+      const problem = !login.ready && login.reason && login.reason !== 'missing' ? login.message : '';
+      return [h('div', {className: 'set-row ra-login-row', dataset: {agentLoginRow: ''}},
+        h('div', {className: 'set-text'}, text), h('div', {className: 'set-controls ra-login-controls'}, controls)),
+      h('p', {className: `hint ra-set-msg${state.loginTone ? ` ${state.loginTone}` : ''}`, dataset: {agentLoginMsg: ''}, role: 'status', 'aria-live': 'polite', text: state.loginMsg || problem || ''})];
+    }
+    async function saveLogin() {
+      const input = host.querySelector('input[name="set-agent-token"]');
+      if (!input || state.loginBusy) return;
+      let value = input.value.trim();
+      input.value = '';
+      if (!value) { state.loginMsg = 'Paste the token first.'; state.loginTone = 'ra-error'; paint(); return; }
+      if (!SETUP_TOKEN_RE.test(value)) {
+        value = '';
+        state.loginMsg = 'That is not a Claude setup token. Run claude setup-token on Hoster and paste the whole token.'; state.loginTone = 'ra-error'; paint(); return;
+      }
+      state.loginBusy = true; state.loginMsg = ''; paint();
+      try {
+        const result = await api('api/agent/login', {cli: 'claude', token: value});
+        config = {...config, login: result.login}; configAt = Date.now();
+        state.replacing = false; state.loginMsg = 'Saved on Hoster.'; state.loginTone = '';
+      } catch (error) { state.loginMsg = `Not saved: ${error.message}`; state.loginTone = 'ra-error'; }
+      value = '';
+      state.loginBusy = false;
+      paint(); paintButton(); BT()?.refreshBlocks?.();
+    }
+    async function removeLogin() {
+      const ok = await confirmDialog({title: 'Remove the sandbox login?', confirm: 'Remove login', id: 'logout',
+        lines: ['The report agent cannot start until a new login is saved.', 'A running agent loses access to the model at its next call.']});
+      if (!ok) return;
+      state.loginBusy = true; paint();
+      try {
+        const result = await api('api/agent/logout', {cli: 'claude'});
+        config = {...config, login: result.login}; configAt = Date.now();
+        state.loginMsg = 'Login removed.'; state.loginTone = '';
+      } catch (error) { state.loginMsg = `Not removed: ${error.message}`; state.loginTone = 'ra-error'; }
+      state.loginBusy = false;
+      paint(); paintButton(); BT()?.refreshBlocks?.();
+    }
     const paintSave = () => {
       const model = effectiveModel(state);
       const button = host.querySelector('[data-agent-save]');

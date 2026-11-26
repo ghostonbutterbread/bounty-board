@@ -118,7 +118,7 @@ test('settings: Agent section loads and saves the CLI and model; login and conne
   for(const [mode,check] of [
     ['nologin',async section=>{
       assert.equal(await section.locator('[data-agent-login]').textContent(),'No sandbox login on Hoster yet');
-      assert.match(await section.locator('[data-agent-login-hint]').textContent(),/claude setup-token.*report-agent\.token.*0600/);
+      assert.match(await section.locator('[data-agent-login-help]').textContent(),/Run claude setup-token on Hoster and paste the token here/);
     }],
     ['agentoff,noconnect',async section=>{
       assert.match(await section.locator('[data-agent-settings-off]').textContent(),/The report agent is off on this Board/);
@@ -138,14 +138,89 @@ test('settings: Agent section loads and saves the CLI and model; login and conne
   }
 });
 
-test('Agent button: disabled with the reason (no packet, feature off, no login, service down); connect off is one muted line',{timeout:240000},async()=>{
+test('settings: sandbox login saved from Settings; Replace, Remove; the token never stays in the page',{timeout:240000},async()=>{
+  const SENTINEL='sk-ant-oat01-SENTINELbrowserZ8q-FAKEFAKEFAKE_0123456789';
+  const MARK=/SENTINEL|FAKEFAKEFAKE|Z8q/;
+  await withFixture('nologin',async({base,newPage,token})=>{
+    const page=await newPage();
+    const requests=[];
+    page.on('request',r=>requests.push({url:r.url(),body:r.postData()||'',headers:JSON.stringify(r.headers())}));
+    await page.goto(`${base}/#/settings`);
+    const row=page.locator('[data-agent-login-row]');
+    await row.waitFor({timeout:15000});
+    assert.equal(await row.locator('.set-label').textContent(),'Sandbox login (Claude)');
+    assert.equal(await row.locator('[data-agent-login-help]').textContent(),"Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board's user.");
+    const input=row.locator('input[name="set-agent-token"]');
+    assert.deepEqual(await input.evaluate(i=>({type:i.type,autocomplete:i.getAttribute('autocomplete'),spellcheck:i.spellcheck,inForm:!!i.closest('form')})),{type:'password',autocomplete:'off',spellcheck:false,inForm:false});
+    assert.equal(await row.locator('[data-agent-login]').textContent(),'No sandbox login on Hoster yet');
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`login-field-${t}`,row);}
+    await theme(page,'light');
+    // A value that is not a setup token is refused in the page: nothing sent, field cleared.
+    await input.fill('hunter2-not-a-token');
+    await row.locator('[data-agent-login-action="save"]').click();
+    await page.locator('[data-agent-login-msg]').filter({hasText:'not a Claude setup token'}).waitFor();
+    assert.equal(await input.inputValue(),'');
+    assert.equal(requests.filter(r=>r.url.endsWith('/api/agent/login')).length,0);
+    // Save.
+    await input.fill(SENTINEL);
+    await row.locator('[data-agent-login-action="save"]').click();
+    await page.locator('[data-agent-login-msg]').filter({hasText:'Saved on Hoster.'}).waitFor({timeout:15000});
+    assert.equal(fs.readFileSync(token,'utf8'),SENTINEL+'\n');
+    assert.equal(fs.statSync(token).mode&0o777,0o600);
+    assert.equal(await row.locator('[data-agent-login]').textContent(),'Sandbox login ready');
+    assert.match(await row.locator('[data-agent-login-saved]').textContent(),/^Saved (under a minute|\d+ min) ago$/);
+    assert.equal(await row.locator('input[name="set-agent-token"]').count(),0,'the field is gone once saved');
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`login-saved-${t}`,row);}
+    await theme(page,'light');
+    const leaks=await page.evaluate(()=>{
+      const values=[...document.querySelectorAll('input,textarea')].map(i=>i.value).join('|');
+      return {dom:document.documentElement.outerHTML,values,local:JSON.stringify({...localStorage}),session:JSON.stringify({...sessionStorage}),url:location.href};
+    });
+    for(const [where,text] of Object.entries(leaks))assert.doesNotMatch(text,MARK,`token in ${where}`);
+    const carrying=requests.filter(r=>MARK.test(r.url+r.body+r.headers));
+    assert.equal(carrying.length,1,'only the one POST carries the token');
+    assert.match(carrying[0].url,/\/terminal\/api\/agent\/login$/);
+    assert.deepEqual(JSON.parse(carrying[0].body),{cli:'claude',token:SENTINEL});
+    // The Agent button now works (the login came from Settings).
+    // Replace opens the field again; Cancel keeps the saved login.
+    await row.locator('[data-agent-login-action="replace"]').click();
+    await row.locator('input[name="set-agent-token"]').waitFor();
+    await row.locator('[data-agent-login-action="cancel"]').click();
+    assert.equal(await row.locator('[data-agent-login]').textContent(),'Sandbox login ready');
+    // Remove asks first.
+    await row.locator('[data-agent-login-action="remove"]').click();
+    const dialog=page.locator('dialog.ledger-dialog');
+    await dialog.waitFor();
+    assert.equal(await dialog.locator('h2').textContent(),'Remove the sandbox login?');
+    await dialog.getByRole('button',{name:'Cancel'}).click();
+    assert.equal(fs.existsSync(token),true,'Cancel keeps it');
+    await row.locator('[data-agent-login-action="remove"]').click();
+    await dialog.getByRole('button',{name:'Remove login'}).click();
+    await page.locator('[data-agent-login-msg]').filter({hasText:'Login removed.'}).waitFor({timeout:15000});
+    assert.equal(fs.existsSync(token),false);
+    assert.equal(await row.locator('[data-agent-login]').textContent(),'No sandbox login on Hoster yet');
+    await row.locator('input[name="set-agent-token"]').waitFor();
+    assert.deepEqual(page.errors,[]);
+  });
+  await withFixture('notokenflag',async({base,newPage})=>{
+    const page=await newPage();
+    await page.goto(`${base}/#/settings`);
+    const section=page.locator('[data-settings-section="agent"]');
+    await section.locator('[data-agent-login-hint]').waitFor({timeout:15000});
+    assert.match(await section.locator('[data-agent-login-hint]').textContent(),/claude setup-token.*report-agent\.token.*0600/);
+    assert.equal(await section.locator('input[type="password"]').count(),0,'not editable: the manual hint instead of the field');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+test('Agent button: disabled only when neither the agent nor connect can be used; outside a packet it offers running agents only',{timeout:300000},async()=>{
   const reasonOf=async page=>{
     const button=agentButton(page);
     await button.waitFor({timeout:15000});
     await page.waitForFunction(()=>{const b=document.querySelector('[data-agent-toggle]');return b&&!/Checking/.test(b.title);},null,{timeout:15000});
     return {disabled:await button.isDisabled(),title:await button.getAttribute('title'),text:(await page.locator('[data-agent-reason]').textContent())||'',hidden:await page.locator('[data-agent-reason]').isHidden()};
   };
-  await withFixture('',async({base,newPage})=>{
+  await withFixture('noconnect',async({base,newPage})=>{
     const page=await newPage();
     await openReport(page,base,{report:'active.md'});
     await page.locator('[data-term-toggle]').waitFor();
@@ -161,7 +236,43 @@ test('Agent button: disabled with the reason (no packet, feature off, no login, 
     await page.waitForFunction(()=>document.querySelector('[data-agent-toggle]')&&!document.querySelector('[data-agent-toggle]').disabled,null,{timeout:15000});
     assert.deepEqual(page.errors,[]);
   });
-  for(const [mode,reason] of [['nologin','No sandbox login on Hoster yet.'],['agentoff','The report agent is off on this Board.'],['down','Terminal service unavailable.']]){
+  // Outside a finding packet, with connect on: enabled; the popover has only the running agents.
+  await withFixture('',async({base,newPage})=>{
+    const page=await newPage();
+    await openReport(page,base,{report:'active.md'});
+    await page.waitForFunction(()=>{const b=document.querySelector('[data-agent-toggle]');return b&&!b.disabled&&/finding folder/.test(b.title);},null,{timeout:20000});
+    assert.equal(await page.locator('[data-agent-reason]').isHidden(),true);
+    assert.equal(await page.locator('[data-term-toggle]').isDisabled(),true,'the Terminal button stays disabled');
+    await barToTop(page);
+    await agentButton(page).click();
+    const pop=popover(page);
+    await pop.locator('[data-agent-list] .ra-row').first().waitFor({timeout:15000});
+    assert.equal(await pop.locator('[data-agent-start-off]').textContent(),'This report is not inside a finding folder (reports/<FID>-…/).');
+    assert.equal(await pop.locator('[data-agent-format], textarea, [data-agent-action="start"]').count(),0,'no chips, ask box or Start');
+    assert.deepEqual(await pop.locator('.ra-row').evaluateAll(rs=>rs.map(r=>r.dataset.agentPane)),['w1:p2','w1:p4','w1:p1'],'matched by the report\'s lane and program');
+    await pop.locator('[data-agent-action="show-all"]').waitFor();
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`popover-outside-packet-${t}`,pop);}
+    await theme(page,'light');
+    await pop.locator('.ra-row[data-agent-pane="w1:p1"]').click();
+    const id=await page.evaluate(()=>window.BoardTerminal.activeTab());
+    assert.match(id,/^connect-/);
+    await waitTab(page,id,/ATTACHED w1:p1/,'the attach from a report outside a packet');
+    assert.equal(await page.locator('[data-term-tab-select="terminal"]').isDisabled(),true,'no shell outside a packet');
+    assert.equal(await page.evaluate(()=>window.BoardTerminal.status),'idle');
+    await page.locator(`[data-term-tab-close="${id}"]`).click();
+    await page.waitForFunction(()=>!window.BoardTerminal.open,null,{timeout:5000});
+    assert.deepEqual(page.errors,[]);
+  });
+  // No login, connect on: enabled, the popover says why it cannot start.
+  await withFixture('nologin',async({base,newPage})=>{
+    const page=await newPage();
+    await openReport(page,base);
+    await page.waitForFunction(()=>{const b=document.querySelector('[data-agent-toggle]');return b&&!b.disabled&&/No sandbox login/.test(b.title);},null,{timeout:20000});
+    await agentButton(page).click();
+    await popover(page).locator('[data-agent-start-off]').filter({hasText:'No sandbox login on Hoster yet.'}).waitFor();
+    assert.deepEqual(page.errors,[]);
+  });
+  for(const [mode,reason] of [['nologin,noconnect','No sandbox login on Hoster yet.'],['agentoff,noconnect','The report agent is off on this Board.'],['down','Terminal service unavailable.']]){
     await withFixture(mode,async({base,newPage})=>{
       const page=await newPage();
       await openReport(page,base);
@@ -169,7 +280,7 @@ test('Agent button: disabled with the reason (no packet, feature off, no login, 
       const r=await reasonOf(page);
       assert.equal(r.disabled,true,`${mode}: disabled`);
       assert.equal(r.text,reason,`${mode}: visible reason`);
-      if(mode==='nologin')await shot(page,'disabled-nologin-light',page.locator('#live-report-host .live-bar'));
+      if(mode==='nologin,noconnect')await shot(page,'disabled-nologin-light',page.locator('#live-report-host .live-bar'));
       assert.deepEqual(page.errors,[]);
     });
   }
@@ -221,10 +332,14 @@ test('popover start, Agent tab output and typing through the filter, status dot,
     await pop.locator('[data-agent-format="python"]').click();
     assert.equal(await pop.locator('[data-agent-format="python"]').getAttribute('aria-pressed'),'true');
     assert.match(await start.textContent(),/Convert to Python/);
+    // Under a picked chip the textarea is optional extra instructions, sent as note.
+    assert.equal(await pop.locator('[data-agent-area-label]').textContent(),'Anything else? (optional)');
+    await pop.locator('textarea[name="agent-ask"]').fill('Keep the curl as a fallback.');
+    assert.match(await start.textContent(),/Convert to Python/);
     await pop.locator('select[name="agent-model"]').selectOption('opus');   // per-run override
     await start.click();
     await page.locator('#term-drawer [data-term-tabs]').waitFor({timeout:15000});
-    assert.deepEqual(page.starts[0],{selector:{family:'web_bounty',program:'synthetic-term',lane:'web',path:REPORT},task:{kind:'poc_format',format:'python'},cli:'claude',model:'opus'});
+    assert.deepEqual(page.starts[0],{selector:{family:'web_bounty',program:'synthetic-term',lane:'web',path:REPORT},task:{kind:'poc_format',format:'python',note:'Keep the curl as a fallback.'},cli:'claude',model:'opus'});
     assert.equal(await pop.count(),0,'popover closes after start');
     // Drawer on the Agent tab.
     assert.deepEqual(await page.locator('[data-term-tab-select]').allTextContents(),['Terminal','Agent']);
@@ -233,6 +348,7 @@ test('popover start, Agent tab output and typing through the filter, status dot,
     assert.match(text,/FAKE-CLI-START/);
     assert.match(text,/ARGV .*"--model", ?"opus"/);
     assert.match(text,/standalone Python PoC/,'the rendered task reached the CLI');
+    assert.match(text,/Ryu's extra instructions for this change[^]*Keep the curl as a fallback\./,'the note reached the task');
     assert.match(text,/TOKEN_IS_DUMMY True/);
     assert.match(text,/MODEL-REPLY FAKE-REPLY-OK/,'model calls go through the relay to the fake upstream');
     assert.equal(await page.evaluate(()=>window.BoardTerminal.status),'idle','the shell is not attached while only the Agent tab was shown');

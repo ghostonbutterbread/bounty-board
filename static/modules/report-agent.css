@@ -72,3 +72,8 @@
   .ra-set-controls{max-width:none;justify-content:flex-start}
   .ra-set-msg{text-align:left}
 }
+/* Sandbox login row: password field, then Save (rightmost). */
+.ra-login-controls{flex-wrap:wrap;justify-content:flex-end;max-width:520px}
+.ra-token{width:260px;max-width:100%;font-family:var(--font-mono);font-size:var(--text-sm)}
+.ra-start-off{margin:var(--space-2) 0 0}
+.ra-login-status{margin:4px 0 2px}
