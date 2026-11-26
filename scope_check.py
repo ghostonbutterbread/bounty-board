@@ -46,6 +46,34 @@ def failed(reason):
     return f'scope check failed: {reason}'
 
 
+def resolve_scope_dir(root, program):
+    """(resolved <root>/scopes/<program> or None, reason). Shared with scope_inventory.py.
+
+    An alias symlink is followed only when it resolves inside <root>/scopes; a broken
+    or escaping link is refused with a reason other than NO_SCOPE."""
+    if root is None:
+        return None, 'board root unavailable'
+    if not isinstance(program, str) or not program or program in ('.', '..') or '/' in program or '\0' in program:
+        return None, 'invalid program name'
+    base = Path(root) / 'scopes'
+    try:
+        base_real = base.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None, NO_SCOPE
+    candidate = base / program
+    try:
+        if not os.path.lexists(candidate):
+            return None, NO_SCOPE
+        real = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None, 'scope link is broken; ignored'
+    if real != base_real and not real.is_relative_to(base_real):
+        return None, 'scope link points outside the scopes directory; ignored'
+    if not real.is_dir():
+        return None, NO_SCOPE
+    return real, ''
+
+
 def _short(value, limit=240):
     if not isinstance(value, str):
         return None
@@ -71,28 +99,7 @@ class ScopeChecker:
     # -- scope directory and signature (stat only) ---------------------------
     def scope_dir(self, program):
         """(resolved scope dir or None, reason). An alias symlink must resolve inside <root>/scopes."""
-        root = self.root_fn()
-        if root is None:
-            return None, 'board root unavailable'
-        if not isinstance(program, str) or not program or program in ('.', '..') or '/' in program or '\0' in program:
-            return None, 'invalid program name'
-        base = Path(root) / 'scopes'
-        try:
-            base_real = base.resolve(strict=True)
-        except (OSError, RuntimeError):
-            return None, NO_SCOPE
-        candidate = base / program
-        try:
-            if not os.path.lexists(candidate):
-                return None, NO_SCOPE
-            real = candidate.resolve(strict=True)
-        except (OSError, RuntimeError):
-            return None, 'scope link is broken; ignored'
-        if real != base_real and not real.is_relative_to(base_real):
-            return None, 'scope link points outside the scopes directory; ignored'
-        if not real.is_dir():
-            return None, NO_SCOPE
-        return real, ''
+        return resolve_scope_dir(self.root_fn(), program)
 
     def signature(self, program):
         directory, reason = self.scope_dir(program)
