@@ -661,7 +661,10 @@ test('docks: each side reserves its space, sizes persist per orientation, maximi
     await handle.focus();await page.keyboard.press('ArrowLeft');
     assert.equal((await stored(page)).width,width+32);
     // The new size reaches the shell (refit sends it to the server).
-    const size=await page.evaluate(()=>`${window.BoardTerminal.term.rows} ${window.BoardTerminal.term.cols}`);
+    // Let the refit settle (it runs on the next frame), then compare with what the shell sees.
+    const termSize=()=>page.evaluate(()=>`${window.BoardTerminal.term.rows} ${window.BoardTerminal.term.cols}`);
+    let size=await termSize();
+    for(let i=0;i<20;i++){await page.waitForTimeout(150);const next=await termSize();if(next===size)break;size=next;}
     await typeLine(page,'stty size');
     await waitScreen(page,l=>l.some(x=>x.trim()===size),`stty size ${size}`);
     await picker.locator('[data-dock="bottom"]').click();

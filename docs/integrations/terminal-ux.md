@@ -1,0 +1,118 @@
+# Terminal UX: copy and paste, toggle shortcut, docking, Settings
+
+- Branch: `feat/board-terminal-ux`; base `18089f4` (origin/beta).
+- Owner surfaces: `static/modules/sandbox-terminal.js|css` (drawer), new `static/modules/settings.js|css` (Settings page and registry), the `#/settings` route in `static/app.js`, `static/index.html` tags, `static/tests/sandbox-terminal*.cjs`.
+- Ryu's request, short: copying is annoying (Ctrl+Shift+C opens the inspector in Firefox on Windows), so copy on highlight; a Settings area, for the terminal first; a hotkey (Ctrl+E) to open and close the terminal; dock it right, left, top or bottom.
+- The design, security rules and threat model of the terminal itself stay in `docs/integrations/sandbox-terminal.md`. Nothing here changes the service, the sandbox or the typing filter.
+
+## What changed for the user
+
+- **Copy on select** (on by default). Finishing a mouse selection in the terminal (drag, double click for a word, triple click for a line) copies it with `navigator.clipboard.writeText` inside that click's user activation. If the API is missing or refuses, a hidden-textarea `execCommand('copy')` is tried. A small "Copied" flash appears next to the status pill for 1.6 s ("Copy blocked by the browser" if both fail). Empty selections are never copied.
+- **Ctrl+C**: with a selection it copies, clears the selection and sends nothing to the shell; without one it sends ^C as before. Ctrl+Shift+C copies (and never sends ^C). Ctrl+Insert copies.
+- **Ctrl+V / Ctrl+Shift+V / Shift+Insert paste.** The xterm key handler returns false for them, so the browser fires its native `paste` event and xterm handles it (bracketed paste when the shell has it on).
+- **Paste guard.** A capture-phase `paste` listener on the screen container sees every paste (keys, context menu Paste, Linux middle click) before xterm's own listeners. It runs the existing filter (`unsafeText`, the `UNSAFE_MESSAGE` area) on the clipboard text; unsafe text is cancelled (`preventDefault` + `stopImmediatePropagation`) and the note line says "Paste refused: the clipboard text contains control characters." Nothing is stripped. The only adaptation: CRLF counts as a newline (`unsafePaste` maps CRLF to LF before calling `unsafeText`), because Windows clipboards end lines with CRLF and xterm turns CRLF and LF into the same Enter anyway. A lone CR is still refused.
+- The preview `copy` handler is unchanged: controls never end up in copied report text.
+- **Toggle shortcut**: Ctrl+E (configurable) and the fixed Ctrl+` toggle the drawer for the current report from anywhere in the Board, including inside the terminal and the report editor. Opening focuses the terminal; closing returns focus to the element focused before opening (if it still exists), else the editor. With no terminal for the report (dashboard, Settings, a disabled Terminal button) nothing happens. Whenever the Board has a terminal the keys are kept from the browser (`preventDefault`), so Firefox does not focus its search bar. When the primary shortcut is not Ctrl+E, Ctrl+E reaches the shell again (bash end of line; tested).
+- Every tooltip names the current shortcut: "Sandbox terminal (Ctrl+E)" on the Terminal button, "Close terminal (Ctrl+E)" on the close button.
+- **Docking**: bottom (default, as before), top, left, right, plus maximize (fills the content column; the sidebar stays) that restores the previous dock. Side docks are full-height columns beside the content; top and bottom are full-width rows of the content column. Phones (700 px and below) always get the bottom sheet and the picker hides.
+- **Dock picker** in the drawer header: four dock icons and a maximize/restore icon, each a button with a tooltip, keyboard reachable, `aria-pressed` on the current one. It saves the choice.
+- **Resize** on the inner edge (drag or arrow keys; the key pointing away from the docked edge grows it). Height (top/bottom) and width (left/right) are remembered separately. Clamp: at least 160 px, and at least about 320 px of content stays (phones keep the tall sheet, 96 px free as before). The drag follows the pointer from where the handle was grabbed, so grabbing it never jumps.
+- **Settings page** at `#/settings`, from a "Settings" sidebar link (gear icon, real `<a href="#/settings">`, above the sidebar footer; on phones it shows in the top bar). Tab title "Settings · Bounty Board". The Terminal card ("Saved in this browser.") has: Copy on select, Ctrl+C copies a selection, Ctrl+V pastes (switches), Toggle shortcut (press-a-key recorder plus "Reset to Ctrl+E"), Default dock (Bottom/Top/Left/Right). Without `capabilities.terminal_url` the card shows only "The sandbox terminal is not enabled on this Board." Changes apply live to an open drawer in other tabs (`storage` event) and to the drawer in the same tab the next time it shows (the drawer is hidden while Settings is open).
+
+## Design
+
+### Preferences (`localStorage` `bounty-board-terminal:v1`)
+
+```json
+{"open": false, "height": 320, "width": 520, "dock": "bottom", "maximized": false,
+ "copyOnSelect": true, "ctrlCCopy": true, "ctrlVPaste": true,
+ "shortcut": {"ctrl": true, "alt": false, "shift": false, "code": "KeyE"}}
+```
+
+- `open` and `height` keep their meaning, so old values load unchanged. Every field is validated on read; a corrupt or unknown value falls back to its default (tested with `{"dock":"diagonal","height":"tall","shortcut":{"ctrl":true,"code":"KeyT"},"copyOnSelect":"yes"}`). Unknown fields written by a newer Board are preserved on save.
+- Another tab's change (`storage` event) applies everything except `open` (closing the drawer in one tab does not close it in another).
+- Stored sizes are the user's wish; the clamp is applied when laying out, so a temporarily small window does not shrink the saved size.
+
+### Shortcut rules
+
+- Ctrl or Alt (not both: Ctrl+Alt is AltGr on many keyboards), optionally Shift, plus one key: a letter, a digit, or `; ' , . /`. Letters match by the typed letter (keyboard layouts), other keys by position (`event.code`).
+- Refused with a short reason: Ctrl+T/W/N/Q/L/R, Ctrl+Tab, Ctrl+Shift+C, plain Ctrl+C/V/D/Z, Ctrl+H/I/J/M (the terminal reads them as Backspace, Tab, Enter), Ctrl+0..9 and Alt+1..9 (tabs, zoom), Ctrl+Shift+T/N/P/W/Q/V, Ctrl+Shift+I/J/K/E/M (developer tools), Ctrl+K (the Board's own search shortcut), Ctrl+` (already the fixed one), Ctrl+[ (Esc), Ctrl+\ (quit), Ctrl+-/= (zoom), Meta combinations, keys without Ctrl or Alt.
+- The recorder: click it, press the combination; Esc cancels, Tab leaves. A refused combination keeps recording and says why ("Ctrl+T is not available. Browsers open a new tab with it.").
+- The global listener is on `window` in the capture phase with `stopPropagation`, so neither CodeMirror nor xterm sees the toggle keys; xterm's custom key handler also returns false for them.
+
+### Docking
+
+- The drawer stays `position: fixed`. `layout()` sets `html.term-dock-<side>` (or `html.term-max`), `--term-space-<side>` (the drawer size on the docked side, `0px` elsewhere) and `--term-drawer-space` (kept for compatibility), and positions the drawer from the sidebar's right edge.
+- Reserved space: bottom pads `.page` (as before); top pads `.app > .body` and moves the sticky topbar down; left and right give `.app > .body` a margin, so the whole content column (topbar included) narrows. Maximize reserves nothing (it covers the content on purpose). Sticky `.report-side` and toasts move clear of the drawer.
+- EasyMDE full screen and side by side (`position: fixed` over the window): the toolbar, editor and preview are offset by `--term-space-*` and the two halves split the remaining width, for every dock (tested: no overlap with the drawer or each other).
+- After every dock change and resize xterm is refit, which sends the new size to the server (tested with `stty size`).
+
+### Settings registry (`window.BoardSettings`)
+
+```js
+window.BoardSettings.register({
+  id: 'ports',             // unique; registering the same id again replaces it
+  group: 'terminal',       // 'terminal' renders inside the Terminal card, after the built-in controls
+  title: 'Ports',          // shown as a sub-heading when it differs from the group title
+  order: 50,               // sort order inside the group (built-in terminal controls use 0)
+  render(host) {           // host: an empty element; may return a cleanup function
+    host.innerHTML = '...';
+    return () => {};
+  },
+});                        // returns an unregister function
+```
+
+- Known groups render in their order (`terminal` only, today; it is shown only when the Board has `capabilities.terminal_url`). Any other group gets its own card after them, titled by its first section's title.
+- Registering while the page is open re-renders it; cleanups run before every re-render and when the page is left.
+- Load order: `settings.js` loads before modules that register (it is listed before `sandbox-terminal.js` in `index.html`). Setting rows can reuse `.set-row`, `.set-text`, `.set-label`, `.set-controls` and `.set-switch` (a checkbox with `role="switch"`) from `settings.css`.
+
+### Drawer slot and events (`window.BoardTerminal`)
+
+```js
+const el = window.BoardTerminal.slot('ports');   // stable [data-term-slot="ports"] in the header
+const stop = window.BoardTerminal.on('session', ({selector, session}) => {});
+window.BoardTerminal.on('message', message => { if (message.type === 'ports') {} });
+window.BoardTerminal.off('session', handler);
+window.BoardTerminal.selector();                  // {family, program, lane, path} or null
+window.BoardTerminal.session();                   // the hello `session` object while the drawer is open, else null
+```
+
+- `slot(name)` (`[a-z][a-z0-9-]*`, up to 32 chars) returns the same element every time, created on first use and placed between the status text and the dock picker; it is hidden while empty (`:empty`).
+- `session` fires `{selector, session}` on hello (attach) and on a sandbox reset, and `{selector: null, session: null}` once when the drawer closes or the report changes.
+- `message` fires with every parsed server text message object (after the drawer's own handling), so a later module can handle new types such as `{"type": "ports", ...}` without editing this file.
+- `on` returns an unsubscribe function; a throwing listener is logged and does not affect others.
+- The other `BoardTerminal` members (`term`, `status`, `checks`, `prefs`, `unsafeText`, `unsafePaste`, `shortcutProblem`, ...) are for tests and diagnostics only.
+
+## Decisions
+
+- The dock picker and Settings "Default dock" are one stored value: picking a side in the drawer changes the default too, and Settings says so. Maximize is a separate flag and persists.
+- Shortcut keys are kept from the browser whenever the Board has a terminal, even on pages without one (Ctrl+E "does nothing" there rather than opening Firefox's search bar). Plain browser behavior returns when the Board has no terminal configured.
+- Ctrl+Shift+V and Shift+Insert always paste; the "Ctrl+V pastes" switch only governs Ctrl+V (off: ^V reaches the shell, for `quoted-insert`).
+- Ctrl+Shift+C never sends ^C, even without a selection. Ctrl+Insert keeps the selection; Ctrl+C clears it (as specified).
+- CRLF is read as a newline by the paste guard (see above). It is still the one filter function.
+- Ctrl+K is refused as a shortcut because the Board's global search owns it (found by the browser test).
+- Toasts move clear of a drawer docked bottom or right (previously the "Resumed" toast sat on the terminal).
+- `docs/integrations/sandbox-terminal.md` is not edited here (the ports branch owns backend docs and edits it); its Drawer bullet still says "Ctrl+`" and "bottom drawer". Fold this dossier's summary in at integration.
+
+## Evidence
+
+Run on Ghost (shared box, load 10 to 15), `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome`, serially:
+
+- `node --test static/tests/sandbox-terminal-filter.test.cjs`: 5 pass, 0 fail (3 existing; new: paste filter incl. CRLF/lone CR, shortcut rules).
+- `node --test --test-concurrency=1 static/tests/sandbox-terminal.synthetic.test.cjs`: 12 pass, 0 fail (8 existing tests unchanged, 4 new):
+  - `clipboard: ...`: double click copies the word (clipboard read back), a drag copies, the Copied flash shows; turning Copy on select off in a Settings tab applies live and the clipboard keeps its sentinel; Ctrl+C with a selection copies, clears it and `sleep 3; echo SURVIVED-$((1+1))` still prints `SURVIVED-2`; Ctrl+C without a selection interrupts `sleep 30; echo NOT-INTERRUPTED`; Ctrl+V pastes and runs `pasted-25`; clipboards with `ESC[201~`, a bidi isolate (RLI/PDI) and a lone CR are refused with the message, xterm's `onData` saw nothing and no marker file exists; synthetic paste events (the context menu and middle-click route) are refused for RLO text and a CRLF paste types one bracketed line.
+  - `toggle shortcut: ...`: Ctrl+E from the editor opens and focuses the terminal; Ctrl+E inside the terminal closes it and focus is back in the editor, the report text unchanged; Ctrl+` both ways; the close button returns focus to the Terminal button; the dashboard ignores Ctrl+E; in a Settings tab Ctrl+T, Ctrl+Shift+C, Ctrl+D, Ctrl+Alt+K, Shift+K are refused with their reason; Alt+T is saved, applies live in the report tab (tooltips updated), Ctrl+E no longer toggles and reaches bash (`echo xyz`, Ctrl+A, Ctrl+E, `Q` prints `xyzQ`); Reset to Ctrl+E works. The `ports` slot is stable, sits between the steps text and the dock picker, hidden while empty; `session` fired with the folder and selector on attach and nulls on close; `message` saw `hello`.
+  - `docks: ...`: for right, left, top, bottom the drawer box is on that edge of the content column, the report host and the topbar do not overlap it (bottom checked scrolled to the end); in EasyMDE full-screen side by side the toolbar, editor and preview do not overlap the drawer or each other for every dock; width drag (+100 px) and arrow keys (+32 px) on a side dock and height arrows on bottom are stored separately and restored after reload (dock too); `stty size` in the shell equals xterm's rows and cols after a dock change; maximize fills the content column with the sidebar visible and the handle hidden, Restore goes back to top with its height; a 390 px phone with `dock: right, maximized: true` stored gets the bottom sheet (x 0, width 390, 60% height) and no picker.
+  - `settings page: ...`: the sidebar link is an `<a href="#/settings">` with `aria-current`, middle click opens a new tab on `#/settings`, tab title and breadcrumb; switches default on; a registered fake `group: 'terminal'` section renders inside the Terminal card after the built-in controls with its "Ports" heading; another group gets its own card and the first section's cleanup ran on re-render; persistence across reload; live apply across two tabs both ways (Settings dock to drawer, drawer picker to Settings, Ctrl+V switch); corrupt stored values fall back to defaults; with `noterm` the card says "The sandbox terminal is not enabled on this Board."
+
+- `npm test` (whole suite, run once in the background on the loaded box): 237 tests, 234 pass, 3 fail. Each failing test was rerun alone and passed: `non-live report view gets controls` (3 of 3 alone; under load bash redrew the line before the Enter landed), `ui-redesign: not-submitted filter, program search...` (the program picker focus check; file 7 of 7 alone; not touched by this branch), and my `docks` test (a race in its `stty size` check, read before the refit frame; fixed by waiting for the size to settle, then 12 of 12 for the file alone).
+
+Screenshots (`TERMINAL_SCREENSHOT_DIR=$TMPDIR/screens`, here `/tmp/bbt-ux/screens/`, synthetic fixture data only, not committed): `drawer-right-copied-{light,dark}.png`, `dock-picker-{light,dark}.png`, `drawer-head-right-{light,dark}.png`, `settings-{light,dark}.png`, `phone-sheet-{light,dark}.png`, plus `dock-{right,left,top,bottom}-light.png` and `side-by-side-{right,left,top,bottom}-light.png`.
+
+## Gaps
+
+- Firefox is not in the test matrix (Chromium only). Firefox on Windows over HTTPS supports `navigator.clipboard.writeText` in a click handler; Ctrl+Shift+C may still open Firefox's inspector there (the browser takes it first), which is why copy on select and Ctrl+C exist.
+- Copy on select copies after each finished mouse selection; there is no "copy on keyboard selection" (xterm has none).
+- The `execCommand` fallback was not exercised in a browser without the Clipboard API.
+- Settings has only the Terminal card today; app-wide settings (theme and so on) stay where they are.
+- The drawer in the same tab shows Settings changes when it next opens (it is hidden while Settings is open); other tabs apply them immediately.
