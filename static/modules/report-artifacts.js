@@ -399,10 +399,11 @@
             item.sensitive ? el('span', {class: 'artifact-badge', title: 'May contain credentials or raw traffic. Not previewed.'}, icon('fa-exclamation-triangle'), ' Sensitive') : null),
           el('div', {class: 'artifact-meta hint', text: `${size(item.size)} | Modified ${when(item.modified)}${outside ? ' | Outside the report folder' : ''}`}),
           el('div', {class: 'artifact-reason hint', text: reasons})),
-        el('div', {class: 'artifact-buttons'}, toggle,
+        // Optional buttons go left (Delete, then Preview) so Download stays in
+        // the same right-edge column on every row.
+        el('div', {class: 'artifact-buttons'}, deleteButton(panel, item, busy), toggle,
           el('a', {class: 'button', href: `/api/report-artifact?${params}`, download: item.name, 'data-artifact-download': item.relative,
-            'aria-label': `Download ${item.name}`, 'aria-disabled': busy ? 'true' : null, tabindex: busy ? '-1' : null}, icon('fa-download'), ' Download'),
-          deleteButton(panel, item, busy))),
+            'aria-label': `Download ${item.name}`, 'aria-disabled': busy ? 'true' : null, tabindex: busy ? '-1' : null}, icon('fa-download'), ' Download'))),
       preview);
   }
 
