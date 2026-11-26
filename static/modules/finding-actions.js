@@ -381,13 +381,13 @@
     const reports = Array.isArray(lane.reports) ? lane.reports : null;
     const fid = String(row.id), pattern = new RegExp(`(^|[^a-z0-9])${escapeRe(fid)}([^a-z0-9]|$)`, 'i');
     const linked = ctx.reportIdFor?.(lane, row);
-    // Evidence beside a linked report (BBH packets hold both) when it is a different file.
-    if (linked) return {linked, evidence: reports?.find(r => r.kind === 'generated_evidence' && String(r.id) !== String(linked) && pattern.test(String(r.path || ''))) || null};
+    // Evidence files are artifacts, not reports: app.js renders their icon
+    // (evidenceIdFor) beside the report link, so nothing here looks for them.
+    if (linked) return {linked};
     if (!reports || (Array.isArray(lane.warnings) && lane.warnings.some(w => typeof w === 'string' && w.startsWith('reports_')))) return null;
     const possible = reports.find(r => POSSIBLE_KINDS.has(r.kind) && pattern.test(String(r.path || '')));
-    const evidence = reports.find(r => r.kind === 'generated_evidence' && pattern.test(String(r.path || '')));
     const recorded = typeof row.report_path === 'string' && row.report_path.trim();
-    return {possible, evidence, reason: recorded ? 'No report: the ledger has a report path, but that file is not among this lane\'s reports (missing or moved).' : 'No report: the ledger has no report_path for this finding.'};
+    return {possible, reason: recorded ? 'No report: the ledger has a report path, but that file is not among this lane\'s reports (missing or moved).' : 'No report: the ledger has no report_path for this finding.'};
   }
 
   // ----------------------------------------------------------- context menu
@@ -555,13 +555,6 @@
         const tip = `Unlinked: ${info.possible.path} is a report file in this lane with this finding ID in its path. The ledger does not link it.`;
         meta.insertAdjacentHTML('beforeend', `<a class="possible-report" href="${esc(ctx.hrefFor({program, lane, section: 'reports', report: info.possible.id ?? info.possible.path}))}" data-tip="${esc(tip)}" aria-label="Possible report, unlinked: ${esc(info.possible.path)}"><i class="fa fa-question-circle-o" aria-hidden="true"></i>Possible report</a>`);
       }
-    }
-    if (info?.evidence) {
-      const tip = `Generated evidence file for this finding: ${info.evidence.path}. The ledger links it as evidence, not as the report.`;
-      const href = esc(ctx.hrefFor({program, lane, section: 'reports', report: info.evidence.id ?? info.evidence.path}));
-      (links || meta).insertAdjacentHTML('beforeend', links
-        ? `<a class="evidence-report row-icon" href="${href}" data-tip="${esc(tip)}" aria-label="Evidence: ${esc(info.evidence.path)}"><i class="fa fa-paperclip" aria-hidden="true"></i></a>`
-        : `<a class="evidence-report" href="${href}" data-tip="${esc(tip)}" aria-label="Evidence: ${esc(info.evidence.path)}"><i class="fa fa-file-text-o" aria-hidden="true"></i>Evidence</a>`);
     }
   }
   function decorateLists() {

@@ -12,7 +12,7 @@ Fast search across programs, findings and reports, with direct navigation, and a
 - `limit`: 1..50 per group (default 8). `program`: `family/name` or bare name. `kind`: comma list of `program,finding,report`, no duplicates.
 - Duplicate or unknown params, bad UTF-8 and bad values give `400 invalid_search`. Four concurrent searches max, else `503 search_busy` with `Retry-After`.
 - Response: `{query, index_state: building|partial|ready, root_instance, limit, counts, results:{programs,findings,reports}, warnings, took_ms}`.
-- Every result has `target` (`program` id, `lane`, `section`, plus `finding` or `report`). Findings carry `report: {path, title, kind: report|evidence, target}` or `null`. Reports carry `owner_fids`, `report_kind`, `snippet` (plain text) and `snippet_ranges` / `title_ranges` (offsets for highlighting).
+- Every result has `target` (`program` id, `lane`, `section`, plus `finding` or `report`). Findings carry `report: {path, title, kind: report|evidence, target}` or `null` (`kind: evidence` links the finding's evidence file, title `Evidence`, when it has no indexed report; the palette labels it "Open evidence"). Evidence files are never report hits and do not count toward `report_count` (feat/board-evidence-artifacts). Reports carry `owner_fids`, `report_kind`, `snippet` (plain text) and `snippet_ranges` / `title_ranges` (offsets for highlighting).
 - All terms must match (AND). Terms match fid/title/class/severity/status for findings, path/title/full text for reports, name/id for programs.
 - Ranking: exact > prefix > word-prefix > substring per field; title and path beat content; whole-query title bonus; severity tiebreak for findings; recency (60 day decay) and "owned by a finding" bonus for reports.
 - Generated navigation stubs are not searchable.
@@ -23,7 +23,7 @@ Fast search across programs, findings and reports, with direct navigation, and a
 - Each lane snapshot is replaced atomically, so searches never wait for a refresh. Only refreshes share a lock.
 - Bounds: 60,000 chars indexed per report, 24M chars total, 60,000 reports. When a bound is hit the report stays searchable by title/path and `index_state` becomes `partial`.
 - Dropped and rebuilt when the root instance (canonical path + dev/inode) changes, including mid-pass.
-- Finding to report ownership repeats the `reports()` rule (`report_path`, then `evidence_path`, resolved against the lane). It is a small separate helper so `reports()` is untouched; if that rule changes, update `SearchIndex._ownership`.
+- Finding to report ownership repeats the `reports()` rule (`report_path`, resolved against the lane). It is a small separate helper so `reports()` is untouched; if that rule changes, update `SearchIndex._ownership`. Evidence classification is not repeated: both import `report_evidence.is_evidence`, and the index keeps evidence by path only (lstat, no read, no budget).
 
 ### Frontend (`static/modules/search.js`, `search.css`)
 - `#global-search-host` in the topbar holds a trigger button; Ctrl/Cmd+K opens the palette (capture phase, so it also works inside the editor).

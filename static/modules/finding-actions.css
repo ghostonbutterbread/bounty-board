@@ -45,4 +45,3 @@ td.has-select>.row-select{position:absolute;left:12px;top:13px}
 .breakdown-row .label .placeholder-badge{flex:none}
 .has-selection-bar .toasts{bottom:calc(var(--space-4) + var(--selection-bar-offset,0px))}
 .has-selection-bar .page{padding-bottom:calc(var(--selection-bar-offset,0px) + var(--space-6))}
-.evidence-report{display:inline-flex;align-items:center;gap:4px;font-size:var(--text-xs);white-space:nowrap;color:var(--text-2);text-decoration:underline dotted}

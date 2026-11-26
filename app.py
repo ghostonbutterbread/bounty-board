@@ -233,6 +233,7 @@ def coverage(lane, warnings):
 def reports(lane, warnings, findings=None, report_autosave=False):
     import os
     from report_publisher import generated_navigation
+    from report_evidence import is_evidence, recorded_paths
     base = lane / 'reports'
     if not base.exists():
         warnings.append('reports_missing')
@@ -253,6 +254,9 @@ def reports(lane, warnings, findings=None, report_autosave=False):
             fid = finding.get('fid')
             if fid:
                 ownership.setdefault(candidate, {'report_path': [], 'evidence_path': []})[field].append(fid)
+    # Evidence files are artifacts of their finding, not reports: skipped
+    # before their content is read (report_evidence.is_evidence).
+    report_paths, evidence_paths = recorded_paths(findings, lane)
     def onerror(_error):
         warnings.append('reports_unavailable_or_invalid')
     for directory, dirs, files in os.walk(base, followlinks=False, onerror=onerror):
@@ -261,6 +265,8 @@ def reports(lane, warnings, findings=None, report_autosave=False):
             file = Path(directory) / name
             if file.suffix.lower() == '.md' and not file.is_symlink():
                 rel = file.relative_to(base).as_posix()
+                if is_evidence(rel, report_paths, evidence_paths):
+                    continue
                 owners = ownership.get(file.absolute(), {'report_path': [], 'evidence_path': []})
                 try:
                     text = read_file(lane, 'reports/' + rel).decode('utf-8')
@@ -274,9 +280,6 @@ def reports(lane, warnings, findings=None, report_autosave=False):
                 elif owners['report_path']:
                     kind = 'registered_report'
                     fids = owners['report_path']
-                elif owners['evidence_path']:
-                    kind = 'generated_evidence'
-                    fids = owners['evidence_path']
                 elif text is None:
                     kind, fids = 'unknown', []
                 elif '<!-- generated: bounty-core-finding-report -->' in text:

@@ -16,6 +16,8 @@ import threading
 import time
 from pathlib import Path
 
+from report_evidence import is_evidence, recorded_paths, reports_relative
+
 SEVERITY_RANK = {'EXCEPTIONAL': 6, 'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'INFO': 1}
 KINDS = ('program', 'finding', 'report')
 MAX_TERMS = 6
@@ -230,9 +232,17 @@ class SearchIndex:
                 warnings.add('ledger_unavailable')
         old_reports = old['reports'] if old is not None else {}
         reports = {}
+        # Evidence files (report_evidence.is_evidence) are artifacts of their
+        # finding, not reports: kept by path only (no read, no budget) so a
+        # finding hit can still link its evidence.
+        evidence = {}
+        report_paths, evidence_paths = recorded_paths(raw_findings, lane)
         base = lane / 'reports'
         if base.is_dir() and not base.is_symlink():
             for rel, filename, stat in self._walk(base, warnings):
+                if is_evidence(rel, report_paths, evidence_paths):
+                    evidence[rel] = {'mtime': stat.st_mtime}
+                    continue
                 if budget['reports'] >= self.max_reports:
                     warnings.add('report_limit')
                     break
@@ -261,26 +271,29 @@ class SearchIndex:
             if fid is None:
                 continue
             link = None
-            for field, kind in (('report_path', 'report'), ('evidence_path', 'evidence')):
-                target = self._relative_report(lane, base, f.get(field))
-                if target in reports and not reports[target]['nav']:
-                    link = {'path': target, 'kind': kind}
-                    break
+            target = self._relative_report(lane, base, f.get('report_path'))
+            if target in reports and not reports[target]['nav']:
+                link = {'path': target, 'kind': 'report'}
+            else:
+                target = reports_relative(f.get('evidence_path'), lane)
+                if target in evidence:
+                    link = {'path': target, 'kind': 'evidence'}
             title = plain(str(f.get('title') or ''))
             fields = {'fid': plain(str(fid)), 'title': title, 'class': plain(str(f.get('class_name') or '')),
                       'severity': plain(str(f.get('severity') or '')), 'status': plain(str(f.get('status') or ''))}
             findings.append({**fields, 'low': {k: fold(v) for k, v in fields.items()}, 'link': link})
         unique = self._unique_fids(raw_findings)
         for rel, entry in reports.items():
+            # A file an evidence_path names is evidence (never in `reports`),
+            # so ownership here comes from report_path only.
             registered = owners['report_path'].get(rel, [])
-            evidence = owners['evidence_path'].get(rel, [])
-            entry['owner_fids'] = [str(x) for x in registered or evidence]
-            entry['report_kind'] = ('registered_report' if registered else 'generated_evidence' if evidence
+            entry['owner_fids'] = [str(x) for x in registered]
+            entry['report_kind'] = ('registered_report' if registered
                                     else 'generated_report' if entry['generated'] else 'unregistered')
             entry['finding_fid'], entry['finding_match'] = (None, None) if entry['nav'] else \
-                self._map_finding(rel, registered, evidence, unique)
+                self._map_finding(rel, registered, [], unique)
         return {'family': family, 'program': program, 'lane': name, 'ledger_sig': ledger_sig,
-                'raw_findings': raw_findings, 'findings': findings, 'reports': reports}
+                'raw_findings': raw_findings, 'findings': findings, 'reports': reports, 'evidence': evidence}
 
     @staticmethod
     def _walk(base, warnings):
@@ -495,7 +508,7 @@ class SearchIndex:
                         link = f['link']
                         report = None
                         if link:
-                            r = l['reports'][link['path']]
+                            r = l['reports'][link['path']] if link['kind'] == 'report' else {'title': 'Evidence'}
                             report = {'path': link['path'], 'title': r['title'], 'kind': link['kind'],
                                       'target': {'program': pid, 'lane': l['lane'], 'section': 'reports', 'report': link['path']}}
                         item = {'kind': 'finding', 'fid': f['fid'], 'title': f['title'] or 'Untitled finding',

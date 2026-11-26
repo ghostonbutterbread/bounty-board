@@ -22,10 +22,12 @@ def small_root(root):
          'report_path': 'reports/confirmed/xss-profile.md'},
         {'fid': 'AC-2', 'title': 'IDOR on invoices', 'severity': 'CRITICAL', 'class_name': 'idor', 'status': 'raw'},
         {'fid': 'AC-3', 'title': 'Open redirect', 'severity': 'LOW', 'class_name': 'redirect', 'status': 'raw',
-         'evidence_path': 'reports/raw/redirect-evidence.md'},
+         'evidence_path': 'reports/raw/redirect/EVIDENCE.md'},
     ], {
         'confirmed/xss-profile.md': '# Profile XSS\n\nThe bio field renders <img src=x onerror=alert(1)> unescaped.\n',
+        # An unregistered note (a report) and AC-3's evidence file (an artifact, never a report).
         'raw/redirect-evidence.md': '# Redirect notes\n\nlogin?next= accepts absolute URLs.\n',
+        'raw/redirect/EVIDENCE.md': '# Redirect evidence\n\nlogin?next= request and response, zebra.\n',
         'raw/unowned.md': '# Scratch\n\nnothing about invoices here, only the word zebra.\n',
         'index/xss.md': '# Xss\n',
     })
