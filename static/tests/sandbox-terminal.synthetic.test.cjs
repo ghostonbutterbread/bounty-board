@@ -947,7 +947,10 @@ test('BoardTerminal session events across report switches: D1, D10, then a repor
       window.BoardTerminal.on('message',m=>{if(m.type==='hello')window.__ev.push('hello:'+window.BoardTerminal.selector().path);});});
     await openDrawer(page);
     assert.equal((await page.evaluate(()=>window.BoardTerminal.session()))?.folder,'reports/D1-sqli-login');
-    await page.locator('#report-select').selectOption('findings/confirmed/D10 - HIGH - stored xss.md');
+    // One report per packet: the legacy copy is an Older copies packet file of D10's main
+    // report, so it is opened by its link, not the picker (as in the legacy-report test above).
+    await page.evaluate(()=>{location.hash=location.hash.replace(/\/reports\/.*$/,'/reports/'+encodeURIComponent('findings/confirmed/D10 - HIGH - stored xss.md'));});
+    await page.locator('[data-packet-note]').waitFor();
     await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:30000});
     await page.waitForFunction(()=>window.BoardTerminal.session()?.folder==='reports/D10-xss',null,{timeout:20000});
     assert.equal(await page.evaluate(()=>window.BoardTerminal.selector().path),'findings/confirmed/D10 - HIGH - stored xss.md');
