@@ -10,13 +10,13 @@
 - **Copy on select** (on by default). Finishing a mouse selection in the terminal (drag, double click for a word, triple click for a line) copies it with `navigator.clipboard.writeText` inside that click's user activation. If the API is missing or refuses, a hidden-textarea `execCommand('copy')` is tried. A small "Copied" flash appears next to the status pill for 1.6 s ("Copy blocked by the browser" if both fail). Empty selections are never copied.
 - **Ctrl+C**: with a selection it copies, clears the selection and sends nothing to the shell; without one it sends ^C as before. Ctrl+Shift+C copies (and never sends ^C). Ctrl+Insert copies.
 - **Ctrl+V / Ctrl+Shift+V / Shift+Insert paste.** The xterm key handler returns false for them, so the browser fires its native `paste` event and xterm handles it (bracketed paste when the shell has it on).
-- **Paste guard.** A capture-phase `paste` listener on the screen container sees every paste (keys, context menu Paste, Linux middle click) before xterm's own listeners. It runs the existing filter (`unsafeText`, the `UNSAFE_MESSAGE` area) on the clipboard text; unsafe text is cancelled (`preventDefault` + `stopImmediatePropagation`) and the note line says "Paste refused: the clipboard text contains control characters." Nothing is stripped. The only adaptation: CRLF counts as a newline (`unsafePaste` maps CRLF to LF before calling `unsafeText`), because Windows clipboards end lines with CRLF and xterm turns CRLF and LF into the same Enter anyway. A lone CR is still refused.
+- **Paste guard.** Routes covered, all by capture-phase listeners on the screen container that run before xterm's own listeners: (1) `paste` events, which is how Ctrl+V, Ctrl+Shift+V, Shift+Insert, the context menu Paste and the Linux middle click arrive; (2) `beforeinput` and `input` events with `inputType` `insertText`, `insertFromPaste`, `insertReplacementText` or `insertFromDrop` (phone keyboards' clipboard chips, IME commits, drops), where a multi-character insertion is cancelled if it fails the filter or contains a newline (review round 1, F2; single characters and `insertCompositionText` pass as typing); (3) the play and Run buttons, which call the filter before `term.paste`. Routes not covered: keys typed one at a time, which is ordinary typing. It runs the existing filter (`unsafeText`, the `UNSAFE_MESSAGE` area) on the clipboard text; unsafe text is cancelled (`preventDefault` + `stopImmediatePropagation`) and the note line says "Paste refused: the clipboard text contains control characters." Nothing is stripped. The only adaptation: CRLF counts as a newline (`unsafePaste` maps CRLF to LF before calling `unsafeText`), because Windows clipboards end lines with CRLF and xterm turns CRLF and LF into the same Enter anyway. A lone CR is still refused.
 - The preview `copy` handler is unchanged: controls never end up in copied report text.
 - **Toggle shortcut**: Ctrl+E (configurable) and the fixed Ctrl+` toggle the drawer for the current report from anywhere in the Board, including inside the terminal and the report editor. Opening focuses the terminal; closing returns focus to the element focused before opening (if it still exists), else the editor. With no terminal for the report (dashboard, Settings, a disabled Terminal button) nothing happens. Whenever the Board has a terminal the keys are kept from the browser (`preventDefault`), so Firefox does not focus its search bar. When the primary shortcut is not Ctrl+E, Ctrl+E reaches the shell again (bash end of line; tested).
 - Every tooltip names the current shortcut: "Sandbox terminal (Ctrl+E)" on the Terminal button, "Close terminal (Ctrl+E)" on the close button.
 - **Docking**: bottom (default, as before), top, left, right, plus maximize (fills the content column; the sidebar stays) that restores the previous dock. Side docks are full-height columns beside the content; top and bottom are full-width rows of the content column. Phones (700 px and below) always get the bottom sheet and the picker hides.
 - **Dock picker** in the drawer header: four dock icons and a maximize/restore icon, each a button with a tooltip, keyboard reachable, `aria-pressed` on the current one. It saves the choice.
-- **Resize** on the inner edge (drag or arrow keys; the key pointing away from the docked edge grows it). Height (top/bottom) and width (left/right) are remembered separately. Clamp: at least 160 px, and at least about 320 px of content stays (phones keep the tall sheet, 96 px free as before). The drag follows the pointer from where the handle was grabbed, so grabbing it never jumps.
+- **Resize** on the inner edge (drag or arrow keys; the key pointing away from the docked edge grows it). Height (top/bottom) and width (left/right) are remembered separately. Clamp: at least 160 px; top and bottom leave about 320 px of window height (phones keep the tall sheet, 96 px free as before); side docks leave at least 560 px of content. When the window cannot fit 560 px of content beside a 320 px drawer (for example 1024 px wide with the sidebar open) a side dock falls back to the bottom dock, and the left and right picker buttons say "(needs a wider window; using the bottom dock)"; the stored choice comes back on a wider window. The side width defaults to min(520 px, 40% of the content column) until the user resizes it. The drag follows the pointer from where the handle was grabbed, so grabbing it never jumps.
 - **Settings page** at `#/settings`, from a "Settings" sidebar link (gear icon, real `<a href="#/settings">`, above the sidebar footer; on phones it shows in the top bar). Tab title "Settings · Bounty Board". The Terminal card ("Saved in this browser.") has: Copy on select, Ctrl+C copies a selection, Ctrl+V pastes (switches), Toggle shortcut (press-a-key recorder plus "Reset to Ctrl+E"), Default dock (Bottom/Top/Left/Right). Without `capabilities.terminal_url` the card shows only "The sandbox terminal is not enabled on this Board." Changes apply live to an open drawer in other tabs (`storage` event) and to the drawer in the same tab the next time it shows (the drawer is hidden while Settings is open).
 
 ## Design
@@ -24,7 +24,7 @@
 ### Preferences (`localStorage` `bounty-board-terminal:v1`)
 
 ```json
-{"open": false, "height": 320, "width": 520, "dock": "bottom", "maximized": false,
+{"open": false, "height": 320, "width": null, "dock": "bottom", "maximized": false,
  "copyOnSelect": true, "ctrlCCopy": true, "ctrlVPaste": true,
  "shortcut": {"ctrl": true, "alt": false, "shift": false, "code": "KeyE"}}
 ```
@@ -94,6 +94,29 @@ window.BoardTerminal.session();                   // the hello `session` object 
 - Toasts move clear of a drawer docked bottom or right (previously the "Resumed" toast sat on the terminal).
 - `docs/integrations/sandbox-terminal.md` is not edited here (the ports branch owns backend docs and edits it); its Drawer bullet still says "Ctrl+`" and "bottom drawer". Fold this dossier's summary in at integration.
 
+### Topbar in a narrow content column (review round 1, F1)
+
+- `.app > .body` is a size container (`board-body`, in `search.css`). The search field is sized from the column (`clamp(160px, calc(100cqi - 560px), 340px)`), not the window.
+- Below 720 px of content width the field collapses to its search icon (a click or Ctrl+K still opens search), the "Ctrl K" chip hides, the topbar padding tightens and Refresh shows only its icon (its label stays for screen readers). Phones get the same collapsed field.
+- The program tabs fade at the right edge while more are hidden (scroll-driven animation; Chromium has it, other browsers just scroll as before).
+
+## Review round 1
+
+The reviewer of `f2b969e` returned ACCEPT with two should-fixes. Red/green: the changed source files (`sandbox-terminal.js`, `sandbox-terminal.css`, `search.css`) were swapped back to `f2b969e`, the new tests run, then restored.
+
+| Finding | Fix | Regression test | f2b969e → now |
+|---|---|---|---|
+| F1 layout: side docks squeezed the content column to 320 px; the "Ctrl K" chip wrapped over Refresh, the breadcrumb and tabs were cut | Container queries on the content column (search sized from the column, collapses to an icon below 720 px, chip hidden, Refresh icon-only); side docks keep 560 px of content, fall back to bottom when the window is too narrow (tooltip says so); default side width min(520, 40%); tab edge fade | `side docks keep the topbar intact at 1024, 1280 and 1440 wide (review F1)`: left and right docks, default and maximum drag width; chip one line and clear of Refresh, last breadcrumb item visible, no topbar control overlaps another, 1024 falls back to bottom | red (problems at 1024 and 1280 for both docks and both sizes, e.g. "1024 right default: chip wraps (35px)", "1280 right max: content column 320px") → green |
+| F2 security: text arriving as `input`/`insertText` (phone keyboards) reached the shell without the paste guard | Capture-phase `beforeinput` and `input` guard on the screen for `insertText`, `insertFromPaste`, `insertReplacementText`, `insertFromDrop`: multi-character text that fails the filter or contains a newline is cancelled, the note says "Paste refused..." | `typing filter: multi-character input-event insertions are refused unless safe and single-line (review F2)`: ESC[201~, bidi isolate, newline, lone CR, drop via DataTransfer all cancelled, nothing reaches xterm, no marker file; a single character and a composed safe string (`keyboard.insertText`) still reach the shell | red → green |
+| Test gap: session events across report switches | Contract test (no source change needed) | `BoardTerminal session events across report switches: D1, D10, then a report without a packet`: exact sequence session D1, hello, null, session D10, hello, null; no session for `active.md`; `session()` null at the end, `selector()` follows the report | green on both (contract) |
+
+Round 1 runs (Ghost, serially, after commit `7ac9992`):
+
+- `static/tests/sandbox-terminal-filter.test.cjs`: 5 pass, 0 fail.
+- `static/tests/sandbox-terminal.synthetic.test.cjs` (alone): 15 pass, 0 fail (12 earlier tests plus the 3 above).
+- Reviewer repros `review_builder.test.cjs` (`REPO=$PWD`): 5 pass, 0 fail (layout matrix, typing filter, ctrl+c, session events, prefs).
+- `static/tests/ui-redesign.synthetic.test.cjs`: 7 pass, 0 fail. `static/tests/search.synthetic.test.cjs`: 5 pass, 0 fail (both cover the topbar and search field changed here).
+
 ## Evidence
 
 Run on Ghost (shared box, load 10 to 15), `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome`, serially:
@@ -107,10 +130,12 @@ Run on Ghost (shared box, load 10 to 15), `NODE_PATH=$PWD/node_modules CHROME_BI
 
 - `npm test` (whole suite, run once in the background on the loaded box): 237 tests, 234 pass, 3 fail. Each failing test was rerun alone and passed: `non-live report view gets controls` (3 of 3 alone; under load bash redrew the line before the Enter landed), `ui-redesign: not-submitted filter, program search...` (the program picker focus check; file 7 of 7 alone; not touched by this branch), and my `docks` test (a race in its `stty size` check, read before the refit frame; fixed by waiting for the size to settle, then 12 of 12 for the file alone).
 
-Screenshots (`TERMINAL_SCREENSHOT_DIR=$TMPDIR/screens`, here `/tmp/bbt-ux/screens/`, synthetic fixture data only, not committed): `drawer-right-copied-{light,dark}.png`, `dock-picker-{light,dark}.png`, `drawer-head-right-{light,dark}.png`, `settings-{light,dark}.png`, `phone-sheet-{light,dark}.png`, plus `dock-{right,left,top,bottom}-light.png` and `side-by-side-{right,left,top,bottom}-light.png`.
+Screenshots (`TERMINAL_SCREENSHOT_DIR=$TMPDIR/screens`, here `/tmp/bbt-ux/screens/`, synthetic fixture data only, not committed): `drawer-right-copied-{light,dark}.png`, `dock-picker-{light,dark}.png`, `drawer-head-right-{light,dark}.png`, `settings-{light,dark}.png`, `phone-sheet-{light,dark}.png`, plus `dock-{right,left,top,bottom}-light.png` and `side-by-side-{right,left,top,bottom}-light.png`. Review round 1: `topbar-1280-{left,right}-{default,max}-{light,dark}.png` (full page) and `topbar-strip-1280-{left,right}-{default,max}-{light,dark}.png` (topbar close-up); `drawer-right-copied-*`, `dock-picker-*` and `drawer-head-right-*` refreshed with the new default side width. The reviewer's matrix screenshots are in `/tmp/bbt-ux/rev1/screens/`.
 
 ## Gaps
 
+- The F2 guard was tested with synthetic input events and Playwright's `insertText`; it was not checked on a real Android keyboard (neither was the original bypass).
+- The tab edge fade needs scroll-driven animations (Chromium); Firefox shows plain scrolling tabs.
 - Firefox is not in the test matrix (Chromium only). Firefox on Windows over HTTPS supports `navigator.clipboard.writeText` in a click handler; Ctrl+Shift+C may still open Firefox's inspector there (the browser takes it first), which is why copy on select and Ctrl+C exist.
 - Copy on select copies after each finished mouse selection; there is no "copy on keyboard selection" (xterm has none).
 - The `execCommand` fallback was not exercised in a browser without the Clipboard API.
