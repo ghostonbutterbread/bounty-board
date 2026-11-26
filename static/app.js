@@ -1723,8 +1723,11 @@
     if(views[state.view])return `${views[state.view]} · Bounty Board`;
     const program=currentProgram();if(!program)return 'Programs · Bounty Board';
     const report=state.section==='reports' && state.report ? reportById(state.report) : null;
+    // The evidence view is not a report: name its finding instead (feat/board-evidence-artifacts).
+    const lane=currentLane(), evidence=!report && state.section==='reports' && state.report && lane && isEvidencePath(program,lane,state.report)
+      ? (owners=>owners.length ? `Evidence for ${owners.map(f=>f.id).join(', ')}` : 'Evidence')(recordedSets(program,lane).evidence.get(state.report)||[]) : '';
     const where=programLabel(program)+((list(program.lanes)||[]).length>1 && state.lane ? ` / ${state.lane}` : '');
-    return [report ? String(report.title || report.name || report.id) : '',(sections.find(([k])=>k===state.section)||[])[1],where,'Bounty Board'].filter(Boolean).join(' · ');
+    return [report ? String(report.title || report.name || report.id) : evidence,(sections.find(([k])=>k===state.section)||[])[1],where,'Bounty Board'].filter(Boolean).join(' · ');
   }
   function render() {
     const oldPath=app.querySelector('#saved-shared-path'), focus=oldPath && document.activeElement===oldPath ? {key:oldPath.dataset.recoveryKey,start:oldPath.selectionStart,end:oldPath.selectionEnd,direction:oldPath.selectionDirection} : null;

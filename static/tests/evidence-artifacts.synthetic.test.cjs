@@ -136,6 +136,7 @@ test('finding rows link evidence with real anchors; old evidence URLs open the r
   await page.goto(base+'/'+route('reports','F01-xss/EVIDENCE.md'));
   const view=await evidenceView(page,'F01-xss/EVIDENCE.md');
   assert.match(await view.locator('h2').innerText(),/Evidence for finding F01/);
+  await until(async()=>/^Evidence for F01 · Reports · .+ · Bounty Board$/.test(await page.title()),'tab title names the evidence, not a report');
   assert.equal(await view.locator('h2 a[data-evidence-finding="F01"]').getAttribute('href'),route('findings','F01'));
   assert.equal(await view.locator('[data-evidence-report]').getAttribute('href'),route('reports','F01-xss/demo-xss-F01.md'));
   await view.locator('#evidence-preview h1',{hasText:'Evidence F01'}).waitFor();
