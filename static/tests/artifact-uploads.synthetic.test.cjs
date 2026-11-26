@@ -196,8 +196,8 @@ test('disabled with a reason for reports without a folder; absent when the flag 
       const host=page.locator('#report-artifacts-host');
       const button=host.locator('[data-artifacts-upload]');
       assert.equal(await button.isDisabled(),true,report);
-      assert.match(await button.getAttribute('title'),/Uploads need a report folder/);
-      await host.getByText(/Uploads need a report folder\. This report is not in its own folder/).waitFor();
+      assert.match(await button.getAttribute('title'),/Uploads need a report folder of its own/);
+      await host.locator('.artifacts-upload-hint').getByText(/Uploads need a report folder of its own/).waitFor();
       // Dropping files on this panel uploads nothing.
       const panel=host.locator('section.artifacts');
       const dt=await page.evaluateHandle(()=>{const d=new DataTransfer();d.items.add(new File(['x'],'nope.txt'));return d;});
@@ -252,7 +252,48 @@ test('uploading next to the live editor leaves the draft and focus alone',{timeo
       node.dispatchEvent(new ClipboardEvent('paste',{clipboardData:d,bubbles:true,cancelable:true}));
     });
     await page.waitForFunction(()=>[...document.querySelectorAll('#report-artifacts-host [data-artifact]')].some(r=>/^reports\/F1\/pasted-\d{8}-\d{6}\.png$/.test(r.dataset.artifact)));
+    // A pasted JPEG keeps a .jpg name (review R4).
+    await host.locator('section.artifacts').evaluate(node=>{
+      const d=new DataTransfer();d.items.add(new File([new Uint8Array([0xff,0xd8,0xff])],'image.jpg',{type:'image/jpeg'}));
+      node.dispatchEvent(new ClipboardEvent('paste',{clipboardData:d,bubbles:true,cancelable:true}));
+    });
+    await page.waitForFunction(()=>[...document.querySelectorAll('#report-artifacts-host [data-artifact]')].some(r=>/^reports\/F1\/pasted-\d{8}-\d{6}(-\d+)?\.jpg$/.test(r.dataset.artifact)));
     assert.match(await value(),/synthetic draft line more$/);
+    assert.deepEqual(errors,[]);
+  });
+});
+
+// Review U1: the 12-panel cache must not drop a panel whose upload is still
+// queued or running, or its progress, Cancel and Retry rows disappear.
+test('an in-flight upload stays visible and cancellable after visiting 12 other reports',{timeout:90000},async()=>{
+  await withBoard('upload-plain',async({page,base,lane,dir,errors})=>{
+    await openReport(page,base,'F1/REPORT.md');
+    const host=page.locator('#report-artifacts-host');
+    const files=path.join(dir,'files');fs.mkdirSync(files);
+    fs.writeFileSync(path.join(files,'slow-big.bin'),Buffer.alloc(7*1024*1024,3));
+    await host.locator('[data-artifacts-upload-input]').setInputFiles(path.join(files,'slow-big.bin'));
+    await host.locator('.artifact-upload[data-upload-name="slow-big.bin"][data-upload-state="uploading"]').waitFor();
+    // Mount 12 other report panels, then come back.
+    await page.evaluate(()=>{const h=document.getElementById('report-artifacts-host');const m=window.BoardModules.find(x=>x.name==='report-artifacts');const orig=h.dataset.path;
+      for(let i=0;i<12;i++){h.dataset.path=`F1/other-${i}.md`;m.afterRender();}h.dataset.path=orig;m.afterRender();});
+    const row=host.locator('.artifact-upload[data-upload-name="slow-big.bin"]');
+    assert.equal(await row.count(),1,'upload row must still be shown for the report it targets');
+    await row.locator('[data-upload-cancel]').click();
+    await host.locator('.artifact-upload[data-upload-name="slow-big.bin"][data-upload-state="cancelled"]').waitFor();
+    for(let i=0;i<50&&staged(lane).length;i++)await new Promise(r=>setTimeout(r,100));
+    assert.deepEqual(staged(lane),[]);
+    assert.ok(!fs.existsSync(path.join(lane,'reports/F1/slow-big.bin')));
+    // Once uploads are known to be on, a stray file drop is stopped even
+    // while the next report's list is still loading (review R3).
+    await page.route('**/api/report-artifacts?*',route=>new Promise(resolve=>setTimeout(()=>resolve(route.continue().catch(()=>{})),4000)));
+    const prevented=await page.evaluate(()=>{
+      const h=document.getElementById('report-artifacts-host');const m=window.BoardModules.find(x=>x.name==='report-artifacts');
+      for(let i=0;i<14;i++){h.dataset.path=`F1/loading-${i}.md`;m.afterRender();}
+      const d=new DataTransfer();d.items.add(new File(['x'],'stray.txt',{type:'text/plain'}));
+      const drop=new DragEvent('drop',{dataTransfer:d,bubbles:true,cancelable:true});(document.querySelector('header')||document.body).dispatchEvent(drop);
+      return drop.defaultPrevented;
+    });
+    assert.equal(prevented,true);
     assert.deepEqual(errors,[]);
   });
 });

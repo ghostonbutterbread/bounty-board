@@ -41,6 +41,15 @@ NAME_MAX_BYTES = 180
 # Refusals after the trust gate drain a small body so the browser reads the
 # JSON reply instead of a connection reset; larger bodies close unread.
 DRAIN_LIMIT = 1024 * 1024
+# Refusals for larger bodies reply first and then discard the declared body
+# (never more than the size cap) before closing, so the client reads the
+# reply rather than a connection reset. Bounded in time and in how many run
+# at once; past either bound the connection just closes.
+DISCARD_SECONDS = 300
+MAX_DISCARDS = 4
+# The data root's .stignore ignores these, so a file named like this would be
+# saved but never reach other devices.
+_SYNC_IGNORED = ('.tmp', '.crdownload')
 MAX_SUFFIX = 9999
 _UNSAFE = set('/\\:*?"<>|')
 _WINDOWS_RESERVED = re.compile(r'(con|prn|aux|nul|com[0-9]|lpt[0-9])', re.I)
@@ -62,6 +71,7 @@ class Uploads:
         self.free_floor = free_floor
         self.read_timeout = read_timeout
         self.slots = threading.BoundedSemaphore(concurrent)
+        self.discards = threading.BoundedSemaphore(MAX_DISCARDS)
         self.place_lock = threading.Lock()
 
 
@@ -113,7 +123,15 @@ def sanitize_name(raw):
     if _WINDOWS_RESERVED.fullmatch(head.rstrip(' ')):
         # CON, NUL, COM1... (before the first dot) cannot exist on Windows sync peers.
         stem = head.rstrip(' ') + '_' + dot + rest
-    return _fit(stem, ext)
+    return _sync_safe(_fit(stem, ext))
+
+
+def _sync_safe(name):
+    """``capture.tmp`` -> ``capture_tmp``: Syncthing ignores those suffixes here."""
+    for suffix in _SYNC_IGNORED:
+        if name.lower().endswith(suffix):
+            return name[:-len(suffix)] + '_' + name[-len(suffix) + 1:]
+    return name
 
 
 def _extension(name):
@@ -269,7 +287,9 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
 
     def refuse(status, payload, extra=None):
         # The body is unread: drain a small one so the reply reaches the
-        # browser, otherwise close so it is not parsed as the next request.
+        # browser and the connection stays usable. A larger one gets the reply
+        # first and is then discarded before closing, so the browser does not
+        # see a reset instead of the reply.
         nonlocal body_read
         if not body_read and length is not None and length <= DRAIN_LIMIT:
             try:
@@ -282,9 +302,23 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
                     handler.connection.settimeout(timeout)
                 except OSError:
                     pass
-        if not body_read:
-            handler.close_connection = True
-        handler.reply(status, payload, {**(extra or {}), **({} if body_read else {'Connection': 'close'})})
+        if body_read:
+            return handler.reply(status, payload, extra)
+        handler.close_connection = True
+        handler.reply(status, payload, {**(extra or {}), 'Connection': 'close'})
+        if length and uploads.discards.acquire(blocking=False):
+            try:
+                handler.wfile.flush()
+                _discard(handler, length, uploads.read_timeout)
+            except OSError:
+                pass
+            finally:
+                uploads.discards.release()
+                try:
+                    handler.connection.settimeout(timeout)
+                except OSError:
+                    pass
+        return None
 
     if uploads is None:
         handler.close_connection = True
@@ -364,6 +398,22 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
             if fd is not None:
                 os.close(fd)
         uploads.slots.release()
+
+
+def _discard(handler, length, read_timeout):
+    """Read and drop up to ``length`` body bytes within DISCARD_SECONDS."""
+    import time
+    deadline = time.monotonic() + DISCARD_SECONDS
+    remaining = length
+    while remaining:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        handler.connection.settimeout(min(read_timeout, left))
+        chunk = handler.rfile.read(min(CHUNK, remaining))
+        if not chunk:
+            return
+        remaining -= len(chunk)
 
 
 def _entry(lane_fd, family, program, lane, path, relative):

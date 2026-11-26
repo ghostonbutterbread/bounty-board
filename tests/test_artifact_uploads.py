@@ -207,6 +207,34 @@ class GateTests(Fixture):
         self.assertEqual(headers.get('retry-after'), '2')
         self.assertFalse((self.folder / 'busy.txt').exists())
 
+    def test_large_refused_body_still_gets_the_reply(self):
+        # Review U3: a refusal for a body over the small-drain limit used to
+        # close with the body unread, so the client saw a reset, not the reply.
+        slots = self.server.artifact_uploads.slots
+        slots.acquire(); slots.acquire()
+        try:
+            n = 8 * 1024 * 1024
+            query = urlencode({**SELECT, 'path': F1, 'name': 'big.bin'})
+            sock = socket.create_connection(('127.0.0.1', self.port), timeout=20)
+            try:
+                sock.sendall((f'POST /api/report-artifact-upload?{query} HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n'
+                              f'Origin: {self.origin}\r\nX-Requested-With: Bounty-Board\r\n'
+                              f'Content-Type: application/octet-stream\r\nContent-Length: {n}\r\n\r\n').encode())
+                sock.sendall(b'\0' * n)
+                data = b''
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            finally:
+                sock.close()
+        finally:
+            slots.release(); slots.release()
+        self.assertTrue(data.startswith(b'HTTP/1.0 503') or data.startswith(b'HTTP/1.1 503'), data[:80])
+        self.assertIn(b'uploads_busy', data)
+        self.assertFalse((self.folder / 'big.bin').exists())
+
     def test_insufficient_storage(self):
         with mock.patch.object(au, 'free_bytes', return_value=5):
             status, _, body = self.upload('space.txt', b'x' * 10)
@@ -425,6 +453,17 @@ class SanitizeTests(unittest.TestCase):
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(au.sanitize_name(raw), expected)
+
+    def test_sync_ignored_suffixes_are_renamed(self):
+        # Review U2: the data root's .stignore ignores *.tmp and *.crdownload,
+        # so such a name would be saved but never synced.
+        cases = {'capture.tmp': 'capture_tmp', 'dump.TMP': 'dump_TMP', 'x.crdownload': 'x_crdownload',
+                 'a.tmp.txt': 'a.tmp.txt', '.tmp': 'tmp'}
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(au.sanitize_name(raw), expected)
+        long = 'a' * 170 + '.tmp' + 'b' * 40 + '.tmp'
+        self.assertFalse(au.sanitize_name(long).lower().endswith('.tmp'))
 
     def test_long_names_keep_extension_within_180_bytes(self):
         for raw in ('a' * 400 + '.png', '\u00e9' * 300 + '.txt', '\U0001f600' * 100 + '.mp4', 'b' * 500):

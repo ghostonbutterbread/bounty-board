@@ -34,6 +34,7 @@
   const uploadQueue = [];
   let uploadActive = null;
   let uploadCounter = 0;
+  let uploadsSeen = false;
 
   const el = (tag, props = {}, ...children) => {
     const node = document.createElement(tag);
@@ -72,7 +73,13 @@
       panel = {key, selector, node: el('section', {class: 'artifacts', 'aria-label': 'Report artifacts', 'data-artifacts-key': key}), open: new Set(), fresh: new Map()};
       setupUploads(panel);
       panels.set(key, panel);
-      while (panels.size > KEEP_PANELS) panels.delete(panels.keys().next().value);
+      // Evict the oldest panels, but never one with a queued or running upload:
+      // its rows (progress, Cancel, Retry) must still be there when the report
+      // is opened again.
+      for (const [oldKey, old] of panels) {
+        if (panels.size <= KEEP_PANELS) break;
+        if (!old.uploads?.some(u => u.state === 'queued' || u.state === 'uploading')) panels.delete(oldKey);
+      }
       load(panel);
     } else { panels.delete(key); panels.set(key, panel); }
     if (host.firstChild !== panel.node) host.replaceChildren(panel.node);
@@ -101,6 +108,9 @@
         // Redrawing also reloads open previews, so a changed file shows its new content.
       }
       panel.data = body;
+      // Once any list shows uploads are on, keep guarding page-level file
+      // drops even while a panel is loading or its list failed.
+      if (body.upload && body.upload.reason !== 'disabled') uploadsSeen = true;
       panel.signature = next;
       panel.status = 'ready';
     } catch {
@@ -174,7 +184,7 @@
   }
 
   // ------------------------------------------------------------- uploads
-  const NO_FOLDER_TEXT = 'Uploads need a report folder. This report is not in its own folder, so files cannot be added here.';
+  const NO_FOLDER_TEXT = 'Uploads need a report folder of its own, so files cannot be added here.';
   const uploadState = panel => {
     const upload = panel.status === 'ready' ? panel.data?.upload : null;
     if (!upload) return 'off';
@@ -220,7 +230,8 @@
       if (!images.length) return;
       event.preventDefault();
       const stamp = new Date().toISOString().replace(/\.\d+Z$/, '').replace(/[-:]/g, '').replace('T', '-');
-      enqueue(panel, images.map((file, index) => ({file, name: `pasted-${stamp}${index ? `-${index + 1}` : ''}.png`})));
+      const ext = file => ({'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp'})[file.type] || 'png';
+      enqueue(panel, images.map((file, index) => ({file, name: `pasted-${stamp}${index ? `-${index + 1}` : ''}.${ext(file)}`})));
     });
   }
 
@@ -415,7 +426,7 @@
   // handled: the editor and finding drag and drop handle their events first.
   const dropGuard = event => {
     if (event.defaultPrevented || ![...(event.dataTransfer?.types || [])].includes('Files')) return;
-    if (![...panels.values()].some(panel => uploadState(panel) !== 'off')) return;
+    if (!uploadsSeen && ![...panels.values()].some(panel => uploadState(panel) !== 'off')) return;
     if (event.target.closest?.('input[type=file]')) return;
     event.preventDefault();
     if (event.type === 'dragover') event.dataTransfer.dropEffect = 'none';
