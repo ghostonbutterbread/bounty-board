@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import threading
 import time
 from collections import Counter, OrderedDict
@@ -466,6 +467,7 @@ def url_index_summary(path, budget=QUERY_BUDGET, detail=True, exact_limit=EXACT_
         # --- hosts ---------------------------------------------------------
         hosts, complete = skip_scan(db, 'urls', 'host', SKIP_SCAN_LIMIT, budget)
         result['hosts'] = number(len(hosts), exact=complete, method=None if complete else 'skip_scan_partial')
+        result['host_list'] = [c.host(h) for h in hosts]  # scope check targets (scope_check.py); not sent to clients
         if not complete:
             c.approximate = True
         # --- per-host, routes, parameterized urls (program view only) ------
@@ -971,7 +973,7 @@ class ReconIntel:
 
     def __init__(self, root_fn, discover_fn, read_file, ledger_fn, coverage_fn, map_fn, artifact_root=None,
                  query_budget=QUERY_BUDGET, refresh_interval=REFRESH_INTERVAL, exact_limit=EXACT_ROW_LIMIT,
-                 sample_windows_n=SAMPLE_WINDOWS, sample_rows=SAMPLE_WINDOW_ROWS, start=True):
+                 sample_windows_n=SAMPLE_WINDOWS, sample_rows=SAMPLE_WINDOW_ROWS, start=True, scope=None):
         self.root_fn = root_fn
         self.discover_fn = discover_fn
         self.read_file = read_file
@@ -981,6 +983,7 @@ class ReconIntel:
         self.refresh_interval = refresh_interval
         self.exact_limit = exact_limit
         self.sample_windows_n, self.sample_rows = sample_windows_n, sample_rows
+        self.scope = scope           # scope_check.ScopeChecker or None (no scope columns)
         self.cache = OrderedDict()   # (kind, path) -> {'sig', 'result', 'error', 'computed_at', 'level', 'elapsed'}
         self.lock = threading.Lock()
         self.wake = threading.Condition(self.lock)
@@ -1084,6 +1087,14 @@ class ReconIntel:
                 job, path = self.queue.popitem(last=False)
                 self.running = job
             kind, _, level = job
+            if kind == 'scope':  # one classify call per program per pass (scope_check.py)
+                try:
+                    self.scope.classify(path['program'], path['targets'])
+                except Exception as exc:  # keep the worker alive
+                    print(f'bounty-board: scope pass failed: {type(exc).__name__}', file=sys.stderr, flush=True)
+                with self.lock:
+                    self.running = None
+                continue
             started = time.monotonic()
             try:
                 result, error, sig = self._compute(kind, Path(path), level)
@@ -1190,6 +1201,21 @@ class ReconIntel:
             lane_path / 'ledgers' / 'surface_coverage.sqlite-wal', lane_path / 'recon' / 'maps' / 'map.jsonl'))
         return sources
 
+    # -- scope (scope_check.py) ----------------------------------------------
+    def _scope_lookup(self, program, targets, front):
+        """Cached verdicts; queues one background classify pass for targets that are due."""
+        verdicts, summary, missing = self.scope.lookup(program, targets)
+        if missing:
+            job = ('scope', program, 0)
+            with self.lock:
+                if self.running != job:
+                    queued = self.queue.get(job)
+                    self.queue[job] = {'program': program, 'targets': list(dict.fromkeys((queued or {}).get('targets', []) + missing))}
+                    if front:
+                        self.queue.move_to_end(job, last=False)
+                    self.wake.notify()
+        return verdicts, summary
+
     # -- API payloads --------------------------------------------------------
     def overview(self):
         rows = []
@@ -1197,7 +1223,15 @@ class ReconIntel:
         for family, program, lane, path in self.lanes():
             sources = self.lane_sources(family, program, lane, path, 0)
             partial |= any(s.get('state') == 'computing' or s.get('pending') for s in sources.values())
-            rows.append(headline_row(family, program, lane, sources))
+            row = headline_row(family, program, lane, sources)
+            if self.scope is not None:
+                from scope_check import overview_fields
+                url, js = _val(sources.get('url_index', {})), _val(sources.get('js', {}))
+                targets = list((url or {}).get('host_list') or []) + [h['host'] for h in ((js or {}).get('detail') or {}).get('hosts') or []]
+                verdicts, summary = self._scope_lookup(program, targets, front=False)
+                row.update(overview_fields(summary, verdicts, url, js))
+                partial |= summary['state'] == 'pending'
+            rows.append(row)
         return {'computed_at': time.time(), 'partial': partial, 'programs': rows,
                 'artifact_root': self.artifact_state(), 'budget': {'query_seconds': self.budget, 'exact_row_limit': self.exact_limit,
                                                                    'refresh_interval': self.refresh_interval}}
@@ -1214,13 +1248,25 @@ class ReconIntel:
                                                                            or (self.artifact_root and k[1].startswith(str(self.artifact_root / program / lane) + os.sep)))]:
                         self.cache[key]['computed_at'] = 0
                         self.cache[key]['sig'] = None
+            if self.scope is not None:
+                self.scope.forget(program)
         sources = self.lane_sources(family, program, lane, path, 1)
         partial = any(s.get('state') == 'computing' or s.get('pending') for s in sources.values())
+        verdicts, scope_summary = None, None
+        if self.scope is not None:
+            from scope_check import item_targets, program_summary
+            verdicts, scope_summary = self._scope_lookup(program, sorted(host_names(sources)) + item_targets(sources), front=True)
+            partial |= scope_summary['state'] == 'pending'
+        hosts = host_rows(sources, verdicts)
+        if self.scope is not None:
+            scope_summary = program_summary(scope_summary, hosts.pop('all_rows'))
+        from scope_check import annotate_sources
+        sources = annotate_sources(sources, verdicts)
         lanes = sorted({entry[2] for entry in self.lanes() if entry[1] == program})
         return {'computed_at': time.time(), 'partial': partial, 'family': family, 'program': escape_unsafe(program), 'lane': escape_unsafe(lane),
                 'unsafe_chars': is_unsafe(program, lane),
                 'lanes': [escape_unsafe(l) for l in lanes], 'lane_path': escape_unsafe(path), 'headline': headline_row(family, program, lane, sources),
-                'sources': sources, 'hosts': host_rows(sources), 'artifact_root': self.artifact_state(),
+                'sources': sources, 'hosts': hosts, 'scope_summary': scope_summary, 'artifact_root': self.artifact_state(),
                 'budget': {'query_seconds': self.budget, 'exact_row_limit': self.exact_limit, 'refresh_interval': self.refresh_interval}}
 
     def wait_idle(self, timeout=30.0):
@@ -1274,8 +1320,20 @@ def headline_row(family, program, lane, sources):
             'approximate': bool(_val(url, 'approximate') or _val(js, 'approximate') or _val(agg, 'approximate'))}
 
 
-def host_rows(sources):
-    """Merge per-host URL index, JS library, findings and coverage into one table."""
+def host_names(sources):
+    """Every host the host table will list."""
+    names = {h['host'] for h in _val(sources.get('url_index', {}), 'detail', 'hosts') or []}
+    names |= {h['host'] for h in _val(sources.get('js', {}), 'detail', 'hosts') or []}
+    names |= set(_val(sources.get('board', {}), 'findings', 'by_host') or {})
+    names |= set(_val(sources.get('board', {}), 'coverage', 'by_host') or {})
+    return {n for n in names if n}
+
+
+def host_rows(sources, scope=None):
+    """Merge per-host URL index, JS library, findings and coverage into one table.
+
+    scope: {host: verdict} from scope_check, or None. Out-of-scope hosts are never
+    under-tested and are capped last; all_rows (every row) is added for the summary."""
     url_hosts = _val(sources.get('url_index', {}), 'detail', 'hosts') or []
     approximate_urls = _val(sources.get('url_index', {}), 'host_counts') == 'sample'
     js_hosts = {h['host']: h for h in (_val(sources.get('js', {}), 'detail', 'hosts') or [])}
@@ -1299,10 +1357,19 @@ def host_rows(sources):
         row['under_tested'] = under_tested(row)
         row['unsafe_chars'] = name in unsafe or bool(js.get('unsafe_chars'))
         row['surface_score'] = (row.get('urls') or 0) + 20 * row['js_files'] + 5 * (row.get('param_urls') or 0)
-    ordered = sorted(rows.values(), key=lambda r: (-r['surface_score'], r['host']))
+        if scope is not None:
+            row['scope'] = scope.get(name)
+            if (row['scope'] or {}).get('state') == 'out':
+                row['under_tested'] = False
+    out = lambda r: (r.get('scope') or {}).get('state') == 'out'
+    ordered = sorted(rows.values(), key=lambda r: (out(r), -r['surface_score'], r['host']))
     truncated = len(ordered) > HOST_LIMIT
-    return {'rows': ordered[:HOST_LIMIT], 'total': len(ordered), 'truncated': truncated, 'urls_approximate': approximate_urls,
-            'rule': 'Under-tested: at least 50 URLs or 3 JS files, and no test runs or fewer than one test run per 200 URLs.'}
+    result = {'rows': ordered[:HOST_LIMIT], 'total': len(ordered), 'truncated': truncated, 'urls_approximate': approximate_urls,
+              'rule': 'Under-tested: at least 50 URLs or 3 JS files, and no test runs or fewer than one test run per 200 URLs.'}
+    if scope is not None:
+        result['all_rows'] = ordered
+        result['out_of_scope'] = sum(1 for r in ordered if out(r))
+    return result
 
 
 def under_tested(row):
