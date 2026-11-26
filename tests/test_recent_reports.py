@@ -351,8 +351,11 @@ class MappingTests(unittest.TestCase):
     def test_mapping_rules(self):
         # Evidence files (F012-xss/EVIDENCE.md by name, ev/e.md by evidence_path)
         # are artifacts and never Recent items; the dict equality proves absence.
+        # One row per finding packet (report_packets): in F012-xss the
+        # registered owned.md is the main report (fallback tier, report_path
+        # wins); acme.example-xss-F012.md (a "." in the stem, so not a
+        # vuln-type name) and nav.md are its packet files, not rows.
         self.assertEqual(self.mapped(), {
-            'F012-xss/acme.example-xss-F012.md': ('F012', 'packet'),
             'F012/notes.md': ('F012', 'packet'),
             'F012-xss/owned.md': ('F060', 'report_path'),
             'reg/report.md': ('F020', 'report_path'),
@@ -374,8 +377,9 @@ class MappingTests(unittest.TestCase):
         shown = self.items(include_navigation=True)
         self.assertEqual((shown['F012-xss/_meta/x.md']['finding']['fid'], shown['F012-xss/_meta/x.md']['packet_meta']), ('F012', True))
         self.assertTrue(shown['F012-xss/_meta/deep/y.md']['packet_meta'])
-        # Two packet _meta files and two navigation stubs (F012-xss/nav.md, index/F012.md).
-        self.assertEqual(self.index.recent(limit=1)['total_reports'] + 4, self.index.recent(limit=1, include_navigation=True)['total_reports'])
+        # Two packet _meta files and one navigation stub (index/F012.md);
+        # F012-xss/nav.md is a packet file of the F012-xss main report.
+        self.assertEqual(self.index.recent(limit=1)['total_reports'] + 3, self.index.recent(limit=1, include_navigation=True)['total_reports'])
         # Search never lists them, like generated navigation.
         found = [r['path'] for r in self.index.search('meta', limit=50)['results']['reports']]
         self.assertIn('scratch/_meta/z.md', found)
@@ -383,12 +387,12 @@ class MappingTests(unittest.TestCase):
 
     def test_navigation_never_maps(self):
         items = self.items(include_navigation=True)
-        self.assertIsNone(items['F012-xss/nav.md']['finding'])
-        self.assertEqual(items['F012-xss/nav.md']['report_kind'], 'generated_navigation')
+        self.assertIsNone(items['index/F012.md']['finding'])
+        self.assertEqual(items['index/F012.md']['report_kind'], 'generated_navigation')
 
     def test_finding_payload(self):
         items = self.items()
-        self.assertEqual({k: v for k, v in items['F012-xss/acme.example-xss-F012.md']['finding'].items() if k != 'metadata_revision'},
+        self.assertEqual({k: v for k, v in items['F012/notes.md']['finding'].items() if k != 'metadata_revision'},
                          {'fid': 'F012', 'title': 'Packet XSS', 'severity': 'HIGH', 'status': 'confirmed',
                           'submission': {'state': 'submitted', 'result': 'valid'}, 'submission_status': 'submitted', 'match': 'packet'})
         self.assertIsNone(items['findings/high/F040 - Legacy title.md']['finding']['submission'])

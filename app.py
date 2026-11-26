@@ -237,7 +237,8 @@ def coverage(lane, warnings):
 def reports(lane, warnings, findings=None, report_autosave=False):
     import os
     from report_publisher import generated_navigation
-    from report_evidence import is_evidence, recorded_paths
+    from report_evidence import is_evidence, recorded_paths, reports_relative
+    from report_packets import counts_for_time, packet_folder, plan
     base = lane / 'reports'
     if not base.exists():
         warnings.append('reports_missing')
@@ -248,55 +249,79 @@ def reports(lane, warnings, findings=None, report_autosave=False):
     items = []
     ownership = {}
     for finding in findings or []:
-        for field in ('report_path', 'evidence_path'):
-            recorded = finding.get(field)
-            if not isinstance(recorded, str) or not recorded:
-                continue
-            candidate = Path(recorded)
-            if not candidate.is_absolute():
-                candidate = lane / candidate
-            fid = finding.get('fid')
-            if fid:
-                ownership.setdefault(candidate, {'report_path': [], 'evidence_path': []})[field].append(fid)
+        fid = finding.get('fid') if isinstance(finding, dict) else None
+        relative = reports_relative(finding.get('report_path'), lane) if fid else None
+        if relative:
+            ownership.setdefault(relative, []).append(fid)
     # Evidence files are artifacts of their finding, not reports: skipped
     # before their content is read (report_evidence.is_evidence).
     report_paths, evidence_paths = recorded_paths(findings, lane)
     def onerror(_error):
         warnings.append('reports_unavailable_or_invalid')
+    def mtime_of(file):
+        try:
+            return file.lstat().st_mtime
+        except OSError:
+            return None
+    found, evidence, other = [], [], []
     for directory, dirs, files in os.walk(base, followlinks=False, onerror=onerror):
         dirs[:] = sorted(d for d in dirs if not (Path(directory) / d).is_symlink())
         for name in sorted(files):
             file = Path(directory) / name
-            if file.suffix.lower() == '.md' and not file.is_symlink():
-                rel = file.relative_to(base).as_posix()
+            if file.is_symlink():
+                continue
+            rel = file.relative_to(base).as_posix()
+            if file.suffix.lower() == '.md':
                 if is_evidence(rel, report_paths, evidence_paths):
-                    continue
-                owners = ownership.get(file.absolute(), {'report_path': [], 'evidence_path': []})
-                try:
-                    text = read_file(lane, 'reports/' + rel).decode('utf-8')
-                except (OSError, ValueError, UnicodeError):
-                    text = None
-                    if 'report_content_unavailable_or_invalid' not in warnings:
-                        warnings.append('report_content_unavailable_or_invalid')
-                navigation = text is not None and generated_navigation(rel, text)
-                if navigation:
-                    kind, fids = 'generated_navigation', []
-                elif owners['report_path']:
-                    kind = 'registered_report'
-                    fids = owners['report_path']
-                elif text is None:
-                    kind, fids = 'unknown', []
-                elif '<!-- generated: bounty-core-finding-report -->' in text:
-                    kind, fids = 'generated_report', []
+                    evidence.append((rel, mtime_of(file)))
                 else:
-                    kind, fids = ('unregistered' if findings is not None else 'unknown'), []
-                try:
-                    modified = file.lstat().st_mtime
-                except OSError:
-                    modified = None
-                items.append({'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids, 'modified': modified,
-                              'editable': bool(report_autosave and text is not None and not navigation),
-                              'collaboration_editable': bool(text is not None and not navigation)})
+                    found.append((rel, name, file, mtime_of(file)))
+            elif packet_folder(rel) and counts_for_time(rel) and file.is_file():
+                # Only for the packet time (report_packets): never read.
+                other.append((rel, mtime_of(file)))
+    # One main report per finding packet (report_packets.plan); the packet's
+    # other Markdown files stay listed as kind packet_file, unread.
+    packets = plan([(rel, modified) for rel, _, _, modified in found], findings, lane, other, evidence)
+    for rel, name, file, modified in found:
+        owned = ownership.get(rel, [])
+        packet_file = packets.files.get(rel)
+        if packet_file is not None:
+            items.append({'path': rel, 'name': name, 'kind': 'packet_file', 'owner_fids': owned,
+                          'modified': modified, 'packet': packet_file['packet'], 'packet_main': packet_file['main'],
+                          'packet_group': packet_file['group'], 'editable': bool(report_autosave),
+                          'collaboration_editable': True})
+            continue
+        try:
+            text = read_file(lane, 'reports/' + rel).decode('utf-8')
+        except (OSError, ValueError, UnicodeError):
+            text = None
+            if 'report_content_unavailable_or_invalid' not in warnings:
+                warnings.append('report_content_unavailable_or_invalid')
+        navigation = text is not None and generated_navigation(rel, text)
+        main = packets.mains.get(rel)
+        fids = owned
+        if main is not None and not navigation:
+            # The packet's main report: owned by every finding whose
+            # report_path lies in the packet; its time is the packet's.
+            fids = list(dict.fromkeys([*fids, *main['owner_fids']]))
+        if navigation:
+            kind, fids = 'generated_navigation', []
+        elif fids:
+            kind = 'registered_report'
+        elif text is None:
+            kind, fids = 'unknown', []
+        elif '<!-- generated: bounty-core-finding-report -->' in text:
+            kind, fids = 'generated_report', []
+        else:
+            kind, fids = ('unregistered' if findings is not None else 'unknown'), []
+        item = {'path': rel, 'name': name, 'kind': kind, 'owner_fids': fids, 'modified': modified,
+                'editable': bool(report_autosave and text is not None and not navigation),
+                'collaboration_editable': bool(text is not None and not navigation)}
+        if main is not None and not navigation:
+            item.update({'packet': main['packet'], 'packet_main': rel, 'modified': main['modified'],
+                         'file_modified': modified, 'updated_file': main['updated_file'],
+                         'packet_evidence': main['evidence']})
+        items.append(item)
     return items
 
 

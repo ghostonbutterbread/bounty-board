@@ -33,7 +33,10 @@ class ReportIndexTests(unittest.TestCase):
             self.assertEqual((items['owned.md']['kind'], items['owned.md']['owner_fids']), ('registered_report', ['A', 'B']))
             # evidence.md is evidence (named by D's evidence_path only): an artifact, not a report.
             self.assertNotIn('evidence.md', items)
-            self.assertEqual((items['unregistered.md']['kind'], items['unregistered.md']['owner_fids']), ('unregistered', []))
+            # Ledger paths resolve through report_evidence.reports_relative (as
+            # the evidence classifier and search index do), which normalizes
+            # reports/../reports/x.md to x.md.
+            self.assertEqual((items['unregistered.md']['kind'], items['unregistered.md']['owner_fids']), ('registered_report', ['NOT-EXACT']))
             self.assertEqual(findings[0]['extra'], {'keep': 1})
 
     def test_ownership_is_indexed_once_per_finding(self):
