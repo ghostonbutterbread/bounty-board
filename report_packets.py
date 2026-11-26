@@ -108,14 +108,17 @@ class Packets:
         return info['main'] if info else rel
 
 
-def plan(md_files, findings, lane, other_files=(), evidence_files=()):
+def plan(md_files, findings, lane, other_files=(), evidence_files=(), is_navigation=None):
     """Build the lane's packet plan.
 
     ``md_files``: ``(rel, mtime)`` of every non-evidence ``.md`` file under
     ``reports/`` (any depth). ``evidence_files``: ``(rel, mtime)`` of evidence
     ``.md`` files. ``other_files``: ``(rel, mtime)`` of other regular files
     (only those inside a packet matter, for the packet time). ``findings``:
-    the lane ledger (or None).
+    the lane ledger (or None). ``is_navigation(rel)``: optional; asked only for
+    fallback-tier candidates (rare), so a generated navigation page is never a
+    main. Asked only when a packet has no tier 1-4 candidate; a navigation page
+        found that way is left as it is today (neither main nor packet file).
     """
     result = Packets()
     md = dict(md_files)
@@ -152,6 +155,13 @@ def plan(md_files, findings, lane, other_files=(), evidence_files=()):
 
     for folder, rels in folders.items():
         fid = folder_fid(folder)
+        # A file the ledger registers only to findings with another FID is that
+        # finding's report, not part of this packet: it stays listed as today,
+        # never becomes main or a packet file, and lends no owner or time here.
+        foreign = {rel.lower() for rel in rels
+                   if registered.get(rel.lower()) and all(o.upper() != (fid or '').upper() for o in registered[rel.lower()])}
+        rels = [rel for rel in rels if rel.lower() not in foreign]
+        navigation = set()
         candidates = []
         for rel in rels:
             parts = rel.split('/')
@@ -162,6 +172,11 @@ def plan(md_files, findings, lane, other_files=(), evidence_files=()):
                 continue
             mtime = md[rel] if md[rel] is not None else float('-inf')
             candidates.append((rank, rel.lower() not in registered, -mtime, rel.lower(), rel))
+        if candidates and is_navigation is not None and min(c[0] for c in candidates) == 5:
+            # Only fallback candidates left (rare): read them so a generated
+            # navigation page never becomes the main report.
+            navigation = {c[-1] for c in candidates if is_navigation(c[-1])}
+            candidates = [c for c in candidates if c[-1] not in navigation]
         if not candidates:
             continue
         candidates.sort()
@@ -169,11 +184,12 @@ def plan(md_files, findings, lane, other_files=(), evidence_files=()):
         prefix = folder.lower() + '/'
         in_packet = {}
         for path, owners in registered.items():
-            if path.startswith(prefix):
+            if path.startswith(prefix) and path not in foreign:
                 for owner in owners:
                     in_packet.setdefault(owner, set()).add(path)
         owner_fids = sorted(in_packet, key=lambda x: (x.upper(), x))
-        newest = max(times.get(folder, []), default=None, key=lambda t: (t[0], t[1]))
+        newest = max((t for t in times.get(folder, []) if t[1].lower() not in foreign),
+                     default=None, key=lambda t: (t[0], t[1]))
         main_time = md[main]
         modified = main_time
         updated = None
@@ -185,7 +201,7 @@ def plan(md_files, findings, lane, other_files=(), evidence_files=()):
                               'owner_fids': owner_fids,
                               'finding': _packet_finding(main, in_packet, unique, fid)}
         for rel in rels:
-            if rel == main or is_meta(rel):
+            if rel == main or is_meta(rel) or rel in navigation:
                 continue
             parts = rel.split('/')
             group = 'archive' if any(p.startswith('_') for p in parts[1:-1]) else 'files'
@@ -211,7 +227,7 @@ def plan(md_files, findings, lane, other_files=(), evidence_files=()):
         for f in findings or []:
             if isinstance(f, dict) and f.get('fid') == fid:
                 relative = reports_relative(f.get('report_path'), lane)
-                if relative and packet_folder(relative):
+                if relative and packet_folder(relative) and (folder_fid(packet_folder(relative)) or '').upper() == fid.upper():
                     holding = known.get(packet_folder(relative).lower(), holding)
         if holding is not None:
             folder = holding

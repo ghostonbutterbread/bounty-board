@@ -251,8 +251,13 @@ class SearchIndex:
                     evidence[rel] = {'mtime': stat.st_mtime}
                 else:
                     found.append((rel, filename, stat))
+        def navigation_page(rel):
+            try:
+                return bool(self._generated_navigation(rel, self._read_file(lane, 'reports/' + rel).decode('utf-8')))
+            except (OSError, ValueError, UnicodeError):
+                return False
         packets = packet_plan([(rel, stat.st_mtime) for rel, _, stat in found], raw_findings, lane, other,
-                              [(rel, e['mtime']) for rel, e in evidence.items()])
+                              [(rel, e['mtime']) for rel, e in evidence.items()], is_navigation=navigation_page)
         for rel, filename, stat in found:
             if rel in packets.files:
                 packet_files[rel] = {**packets.files[rel], 'mtime': stat.st_mtime}

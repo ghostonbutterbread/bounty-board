@@ -272,6 +272,8 @@ def reports(lane, warnings, findings=None, report_autosave=False):
                 continue
             rel = file.relative_to(base).as_posix()
             if file.suffix.lower() == '.md':
+                if not file.is_file():
+                    continue  # regular files only, like the search index (_walk S_ISREG)
                 if is_evidence(rel, report_paths, evidence_paths):
                     evidence.append((rel, mtime_of(file)))
                 else:
@@ -281,7 +283,13 @@ def reports(lane, warnings, findings=None, report_autosave=False):
                 other.append((rel, mtime_of(file)))
     # One main report per finding packet (report_packets.plan); the packet's
     # other Markdown files stay listed as kind packet_file, unread.
-    packets = plan([(rel, modified) for rel, _, _, modified in found], findings, lane, other, evidence)
+    def navigation_page(rel):
+        try:
+            return generated_navigation(rel, read_file(lane, 'reports/' + rel).decode('utf-8'))
+        except (OSError, ValueError, UnicodeError):
+            return False
+    packets = plan([(rel, modified) for rel, _, _, modified in found], findings, lane, other, evidence,
+                   is_navigation=navigation_page)
     for rel, name, file, modified in found:
         owned = ownership.get(rel, [])
         packet_file = packets.files.get(rel)

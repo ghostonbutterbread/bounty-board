@@ -171,6 +171,40 @@ class TierTests(unittest.TestCase):
         packets = run(files, findings + [{'fid': 'D19'}])
         self.assertNotIn('findings/high/D19 - Old title.md', packets.files)
 
+    def test_report_registered_to_another_fid_stays_out_of_the_packet(self):
+        # D16's registered report filed inside D15's folder is D16's report (review F1).
+        files = {'D15-xss/acme-com-xss-D15.md': 100, 'D15-xss/acme-com-idor-D16.md': 200,
+                 'D15-xss/SUBMISSION.md': 50, 'findings/high/D16 - Idor.md': 1}
+        findings = [{'fid': 'D15', 'report_path': 'reports/D15-xss/acme-com-xss-D15.md'},
+                    {'fid': 'D16', 'report_path': 'reports/D15-xss/acme-com-idor-D16.md'}]
+        packets = run(files, findings)
+        info = packets.mains['D15-xss/acme-com-xss-D15.md']
+        self.assertNotIn('D15-xss/acme-com-idor-D16.md', packets.files)
+        self.assertNotIn('D15-xss/acme-com-idor-D16.md', packets.mains)
+        self.assertEqual((info['owner_fids'], info['finding']), (['D15'], ('D15', 'report_path')))
+        self.assertEqual((info['modified'], info['updated_file']), (100, None), 'the foreign file lends no time')
+        self.assertEqual(packets.files['D15-xss/SUBMISSION.md']['main'], 'D15-xss/acme-com-xss-D15.md')
+        self.assertNotIn('findings/high/D16 - Idor.md', packets.files, "D16's legacy copy never joins D15's packet")
+        # A file registered to the folder's own finding as well stays in the packet.
+        packets = run(files, [findings[1], {'fid': 'D15', 'report_path': 'reports/D15-xss/acme-com-idor-D16.md'}])
+        self.assertIn('D15-xss/acme-com-idor-D16.md', packets.files)
+
+    def test_navigation_page_is_never_the_fallback_main(self):
+        files = {'F12-x/nav.md': 900, 'F12-x/acme.example-xss-F12.md': 100, 'F13/nav.md': 900, 'F13/REPORT.md': 1}
+        asked = []
+        def is_navigation(rel):
+            asked.append(rel)
+            return rel.endswith('/nav.md')
+        packets = plan(list(files.items()), [], LANE_PATH, is_navigation=is_navigation)
+        self.assertEqual(main_of(packets, 'F12-x'), 'F12-x/acme.example-xss-F12.md')
+        self.assertNotIn('F12-x/nav.md', packets.files, 'a navigation page stays as it is today')
+        self.assertEqual(main_of(packets, 'F13'), 'F13/REPORT.md')
+        self.assertEqual(sorted(asked), ['F12-x/acme.example-xss-F12.md', 'F12-x/nav.md'],
+                         'read only when a packet has nothing but fallback candidates')
+        # A packet holding only a navigation page has no main.
+        packets = plan([('F14/nav.md', 1)], [], LANE_PATH, is_navigation=is_navigation)
+        self.assertEqual((packets.mains, packets.files), ({}, {}))
+
     def test_cross_host_absolute_report_path(self):
         findings = [{'fid': 'D21', 'report_path': OTHER_HOST + '/reports/D21-x/REPORT.md'}]
         packets = run({'D21-x/REPORT.md': 1, 'D21-x/REPORT-D21.md': 5}, findings)
@@ -306,6 +340,15 @@ class LaneReportsTests(Base):
         self.assertTrue(items['D15-ssrf/REPORT.md']['collaboration_editable'])
         self.assertEqual(items['D21-x/REPORT.md']['owner_fids'], ['D21'])
         self.assertNotIn('D18-x/EVIDENCE.md', items)
+
+    def test_non_regular_markdown_is_skipped_like_the_search_index(self):
+        # Review F2: app.reports() and SearchIndex agree on regular files only.
+        fifo = self.lane / 'reports/D17-redirect/acme-com-redirect-D17.md'
+        os.mkfifo(fifo)
+        findings = app.ledger(self.lane, [])
+        items = {i['path']: i for i in app.reports(self.lane, [], findings)}
+        self.assertNotIn('D17-redirect/acme-com-redirect-D17.md', items)
+        self.assertEqual(items['D17-redirect/REPORT.md']['kind'], 'registered_report')
 
     def test_packet_files_are_never_read(self):
         reads = []

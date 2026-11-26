@@ -88,6 +88,16 @@ Runs (box shared and loaded, load average 4 to 14; `TMPDIR=/home/ryushe/.hermes/
 - `npm test`: 236 tests, 235 pass, 1 fail: sandbox-terminal "legacy reports open their ledger packet" (picker no longer lists the legacy copy, see above). After the update that file alone: 8/8.
 - Broad browser suite (`node --test --test-concurrency=1 --test-skip-pattern='^browser metadata update reaches backend with a disposable synthetic writer$'` over `static/tests/*.test.cjs` minus `collaboration.synthetic` and `collaboration-combined.synthetic`, 51 files, including the sandbox fix): 313 tests, 312 pass, 1 fail: `report-save-ui` "backend editability disables collaborative editor and source writes only for denied reports" (6 s wait for "Markdown file saved"). Reruns of `report-save-ui` alone at load 12 to 14: one test alone 1/1; whole file 10 of 12 pass (a different pair failing each run). The same file on the base sources at the same load: also 10 of 12 (yet another pair). Its fixture has no finding packets; recorded as a load flake, not a regression.
 
+## Review
+
+Independent review (Claude Code opus, read-only, detached tree at `a59300f`): ACCEPT, no data loss, wrong-file write or security finding. It verified that packet files keep their own `state.report`, draft key, live host and artifacts host; that a mid-edit promotion keeps the open file; that all new HTML is escaped; and that both indexes call the same `plan()`.
+
+- F1 (should-fix, fixed): a top-level file the ledger registers only to findings with another FID (D16's report filed in `D15-xss/`) became a packet file of D15's main, and D16's links opened D15's report. Such a *foreign* file is now left out of the packet. It is never main or a packet file, it stays listed as before, it adds no owner to the main, it does not move the packet time, and that finding's legacy copy never joins the packet. A file registered to the folder's own finding as well stays in the packet. Measured with the real helper on production: 0 such files.
+- F2 (minor, fixed): `app.reports()` now takes only regular `.md` files, like `SearchIndex._walk`.
+- F3 (note): N/A marks on files that are now packet files are ignored. Production has one N/A mark and it is not on a packet file, so nothing reappears.
+- Found while fixing F1: once the foreign file left the packet, a generated navigation page could become the fallback main and hide the packet's row. `plan()` takes `is_navigation(rel)`, which it asks only when a packet has nothing but fallback candidates; navigation pages found that way stay as they are today. Production: 0 navigation pages inside packets (exact Board markers). With this, the original `tests/test_recent_reports.py` passes unchanged, so the four expectation edits listed above were reverted.
+- Regression tests: `test_report_registered_to_another_fid_stays_out_of_the_packet`, `test_navigation_page_is_never_the_fallback_main`, `test_non_regular_markdown_is_skipped_like_the_search_index`. All three fail on the `a59300f` sources.
+
 ## Screenshots
 
 Synthetic fixture, `PACKETS_SCREENSHOT_DIR=/home/ryushe/.hermes/cache/scratch/bb-packets/tmp/shots`:
