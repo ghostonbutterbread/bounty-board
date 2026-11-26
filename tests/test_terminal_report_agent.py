@@ -400,7 +400,9 @@ class AgentServiceTests(unittest.TestCase):
         status, payload = self.request('GET', '/terminal/api/agent/config')
         self.assertEqual(status, 200)
         self.assertTrue(payload['enabled'])
-        self.assertEqual(payload['login'], {'ready': True, 'reason': None, 'message': None})
+        login = dict(payload['login'])
+        self.assertIsInstance(login.pop('saved_at'), int)
+        self.assertEqual(login, {'ready': True, 'reason': None, 'message': None, 'editable': True})
         clis = {c['id']: c for c in payload['clis']}
         self.assertEqual(set(clis), {'claude', 'codex', 'omp', 'opencode'})
         self.assertTrue(clis['claude']['available'] and clis['claude']['sandbox_ready'])

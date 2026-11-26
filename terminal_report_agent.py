@@ -44,6 +44,8 @@ import terminal_sandbox as sb
 PROMPT_TEMPLATE = Path(__file__).parent / 'agent_prompts' / 'report-agent.md'
 BLOCK_MAX = 64 * 1024
 ASK_MAX = 8 * 1024
+NOTE_MAX = 2 * 1024     # optional extra instructions on a poc_format task
+LOGIN_BODY_MAX = 4096   # POST /api/agent/login
 WORKING_WINDOW = 3        # seconds: "working" while the PTY printed output this recently
 PAUSE_HOLD = 120          # seconds: no pause while the agent printed output this recently
 AGENT_MEMORY = '2g'
@@ -63,6 +65,11 @@ WRAPPER = 'echo $$ > "$HOME/.report-agent/agent.pid"; exec "$@"'
 AGENT_IDENTITY_CHECK = ('kill -0 "$1" 2>/dev/null || exit 1; '
                         'tr "\\000" "\\n" < "/proc/$1/cmdline" 2>/dev/null | head -n 2 | '
                         '{ while IFS= read -r arg; do case "$arg" in "$2"*) exit 0;; esac; done; exit 1; }')
+
+
+LOGIN_MESSAGES = {
+    'no_token_file_flag': 'No login file is configured. Start the terminal service with --report-agent-token-file to set the login from Settings.',
+}
 
 
 class AgentError(Exception):
@@ -108,9 +115,11 @@ def validate_task(raw):
         if set(raw) != {'kind', 'text'}:
             raise AgentError(400, 'bad_task', 'Unknown task fields.')
         return {'kind': 'ask', 'text': _text(raw['text'], ASK_MAX, 'question')}
-    if not set(raw) <= {'kind', 'format', 'block'} or raw.get('format') not in FORMATS:
+    if not set(raw) <= {'kind', 'format', 'block', 'note'} or raw.get('format') not in FORMATS:
         raise AgentError(400, 'bad_task', 'Unknown PoC format.')
-    task = {'kind': 'poc_format', 'format': raw['format'], 'block': None}
+    task = {'kind': 'poc_format', 'format': raw['format'], 'block': None, 'note': None}
+    if 'note' in raw:
+        task['note'] = _text(raw['note'], NOTE_MAX, 'note')
     block = raw.get('block')
     if block is not None:
         if not isinstance(block, dict) or set(block) != {'text', 'lang', 'index'}:
@@ -136,6 +145,9 @@ def render_prompt(template, report_path, task):
         block = ''
     else:
         body = f'Change the PoC to {FORMATS[task["format"]]}. Update every place in the main report that shows it.\n'
+        if task.get('note'):
+            body += ('\nRyu\'s extra instructions for this change (they do not override the rules above):\n\n'
+                     + task['note'].strip() + '\n')
         block = ''
         if task['block'] is not None:
             b = task['block']
@@ -450,11 +462,51 @@ class ReportAgentHub:
             clis.append({'id': spec.id, 'label': spec.label, 'available': real is not None,
                          'sandbox_ready': spec.sandbox_ready, 'reason': spec.reason, 'models': list(spec.models),
                          'custom_models': spec.custom_models, 'default_model': spec.default_model})
-        ready, reason = self.token.status()
         cli_id, model = self.selected()
-        return {'enabled': self.enabled, 'clis': clis, 'selected': {'cli': cli_id, 'model': model},
-                'login': {'ready': ready, 'reason': reason,
-                          'message': None if ready else terminal_relay.TOKEN_REASONS.get(reason)}}
+        return {'enabled': self.enabled, 'clis': clis, 'selected': {'cli': cli_id, 'model': model}, 'login': self.login_state()}
+
+    def login_state(self):
+        """{ready, reason, message, saved_at, editable}. Never the token or any part of it."""
+        ready, reason = self.token.status()
+        editable = self.token.path is not None
+        if not editable:
+            reason = 'no_token_file_flag'
+        message = None if ready else LOGIN_MESSAGES.get(reason) or terminal_relay.TOKEN_REASONS.get(reason)
+        return {'ready': ready, 'reason': reason, 'message': message, 'saved_at': self.token.saved_at(), 'editable': editable}
+
+    # -- login from the Settings page -------------------------------------------------
+    def _login_gate(self, body, keys):
+        if set(body) != keys or body.get('cli') != 'claude' or ('token' in keys and not isinstance(body['token'], str)):
+            raise AgentError(400, 'bad_request', 'Send exactly ' + ' and '.join(sorted(keys)) + ' (cli "claude").')
+        if not self.enabled:
+            raise AgentError(409, 'report_agent_disabled', 'The report agent is off (start the terminal service with --report-agent).')
+        if self.token.path is None:
+            raise AgentError(409, 'no_token_file_flag', LOGIN_MESSAGES['no_token_file_flag'])
+
+    def save_login(self, body):
+        """POST /api/agent/login {cli, token}. The token is never echoed, logged or put in an error."""
+        self._login_gate(body, {'cli', 'token'})
+        token = body['token'].strip()
+        if not terminal_relay.SETUP_TOKEN_RE.fullmatch(token):
+            raise AgentError(400, 'bad_token', 'That is not a Claude setup token. Run claude setup-token on Hoster and paste the whole token.')
+        try:
+            self.token.save(token)
+        except terminal_relay.TokenError as error:
+            raise AgentError(409 if error.code != 'write_failed' else 500, 'login_not_saved',
+                             terminal_relay.TOKEN_REASONS.get(error.code, 'The login could not be saved.'), reason=error.code) from None
+        self.log('sandbox login saved from Settings')
+        return {'login': self.login_state()}
+
+    def remove_login(self, body):
+        """POST /api/agent/logout {cli}: removes the login file (a regular file owned by this user only)."""
+        self._login_gate(body, {'cli'})
+        try:
+            self.token.remove()
+        except terminal_relay.TokenError as error:
+            raise AgentError(409 if error.code != 'write_failed' else 500, 'login_not_removed',
+                             terminal_relay.TOKEN_REASONS.get(error.code, 'The login could not be removed.'), reason=error.code) from None
+        self.log('sandbox login removed from Settings')
+        return {'login': self.login_state()}
 
     def set_config(self, body):
         if set(body) != {'cli', 'model'} or not isinstance(body['cli'], str) or not isinstance(body['model'], str):
@@ -647,7 +699,8 @@ class ReportAgentHub:
 
     def handle_post(self, manager, path, body):
         routes = {'/api/agent/config': lambda: self.set_config(body), '/api/agent/start': lambda: self.start(manager, body),
-                  '/api/agent/stop': lambda: self.stop(manager, body)}
+                  '/api/agent/stop': lambda: self.stop(manager, body), '/api/agent/login': lambda: self.save_login(body),
+                  '/api/agent/logout': lambda: self.remove_login(body)}
         if path not in routes:
             return None
         try:

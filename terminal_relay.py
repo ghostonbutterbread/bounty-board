@@ -45,6 +45,8 @@ UPSTREAM = ('api.anthropic.com', 443)
 OAUTH_BETA = 'oauth-2025-04-20'
 TOKEN_RE = re.compile(r'[A-Za-z0-9._~+/=-]{20,2048}')
 TOKEN_FILE_MAX = 8192
+# What `claude setup-token` prints (sk-ant-oat01-...); the only shape the Settings page may save.
+SETUP_TOKEN_RE = re.compile(r'sk-ant-oat[A-Za-z0-9_-]{20,500}')
 
 HEADER_NAME = re.compile(rb'[!#$%&\'*+.^_`|~0-9A-Za-z-]+')
 FORWARD_EXACT = {'content-type', 'content-length', 'accept', 'user-agent', 'x-app'}
@@ -119,6 +121,16 @@ class TokenFile:
         return True, None
 
     def read(self):
+        # A save from Settings renames a new file over the old one; a read that lands between
+        # its lstat and open sees two inodes. Try again (each try is the full check).
+        for attempt in range(5):
+            try:
+                return self._read_once()
+            except _Replaced:
+                continue
+        raise TokenError('unreadable')
+
+    def _read_once(self):
         if self.path is None:
             raise TokenError('not_configured')
         try:
@@ -141,11 +153,15 @@ class TokenFile:
             raise TokenError('bad_mode')
         try:
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            raise _Replaced() from None
         except OSError:
             raise TokenError('unreadable') from None
         try:
             again = os.fstat(fd)
-            if (again.st_dev, again.st_ino) != (info.st_dev, info.st_ino) or again.st_mode & 0o077:
+            if (again.st_dev, again.st_ino) != (info.st_dev, info.st_ino):
+                raise _Replaced()
+            if again.st_mode & 0o077:
                 raise TokenError('unreadable')
             data = os.read(fd, TOKEN_FILE_MAX + 1)
         finally:
@@ -157,6 +173,123 @@ class TokenFile:
         if len(data) > TOKEN_FILE_MAX or not TOKEN_RE.fullmatch(token):
             raise TokenError('invalid')
         return token
+
+    # -- written from the Settings page (POST /api/agent/login, /api/agent/logout) -------
+    _write_lock = threading.Lock()
+
+    def saved_at(self):
+        """mtime of the login file (epoch seconds) when it is a regular file, else None."""
+        if self.path is None:
+            return None
+        try:
+            info = os.lstat(self.path)
+        except OSError:
+            return None
+        return int(info.st_mtime) if stat.S_ISREG(info.st_mode) else None
+
+    def _open_dir(self):
+        """(dir fd, file name) after the write rules: configured, outside the root (also through
+        symlinked parents), the directory exists, is not a symlink and is not group- or
+        other-writable. The directory is never created."""
+        if self.path is None:
+            raise TokenError('not_configured')
+        try:
+            self.check_path(self.path, self.root)
+        except ValueError:
+            raise TokenError('inside_root') from None
+        folder, name = os.path.split(self.path)
+        try:
+            info = os.lstat(folder)
+        except FileNotFoundError:
+            raise TokenError('dir_missing') from None
+        except OSError:
+            raise TokenError('write_failed') from None
+        if stat.S_ISLNK(info.st_mode):
+            raise TokenError('dir_symlink')
+        if not stat.S_ISDIR(info.st_mode):
+            raise TokenError('dir_missing')
+        try:
+            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            raise TokenError('dir_symlink') from None
+        again = os.fstat(fd)
+        if (again.st_dev, again.st_ino) != (info.st_dev, info.st_ino):
+            os.close(fd)
+            raise TokenError('dir_symlink')
+        if again.st_mode & 0o022 or again.st_uid != os.getuid():
+            os.close(fd)
+            raise TokenError('dir_unsafe')
+        return fd, name
+
+    def save(self, token):
+        """Replace the login file atomically: a 0600 temp file (O_EXCL, O_NOFOLLOW) in the
+        same directory, write, fsync, rename, fsync the directory. ``token`` must already
+        match SETUP_TOKEN_RE. Raises TokenError; never puts the token in an error."""
+        if not isinstance(token, str) or not SETUP_TOKEN_RE.fullmatch(token):
+            raise TokenError('invalid')
+        with self._write_lock:
+            dir_fd, name = self._open_dir()
+            temp = None
+            try:
+                try:
+                    current = os.lstat(name, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    current = None
+                if current is not None and stat.S_ISLNK(current.st_mode):
+                    raise TokenError('symlink')
+                if current is not None and not stat.S_ISREG(current.st_mode):
+                    raise TokenError('not_a_file')
+                temp = f'.{name}.tmp-{os.urandom(8).hex()}'
+                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
+                try:
+                    os.fchmod(fd, 0o600)
+                    data = (token + '\n').encode('ascii')
+                    view = memoryview(data)
+                    while view:
+                        view = view[os.write(fd, view):]
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.rename(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                temp = None
+                os.fsync(dir_fd)
+            except OSError:
+                raise TokenError('write_failed') from None
+            finally:
+                if temp is not None:
+                    try:
+                        os.unlink(temp, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+                os.close(dir_fd)
+
+    def remove(self):
+        """Delete the login file, only after lstat shows a regular file owned by this user.
+        A missing file is already removed."""
+        with self._write_lock:
+            dir_fd, name = self._open_dir()
+            try:
+                try:
+                    info = os.lstat(name, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    return
+                if stat.S_ISLNK(info.st_mode):
+                    raise TokenError('symlink')
+                if not stat.S_ISREG(info.st_mode):
+                    raise TokenError('not_a_file')
+                if info.st_uid != os.getuid():
+                    raise TokenError('wrong_owner')
+                try:
+                    os.unlink(name, dir_fd=dir_fd)
+                    os.fsync(dir_fd)
+                except OSError:
+                    raise TokenError('write_failed') from None
+            finally:
+                os.close(dir_fd)
+
+
+class _Replaced(Exception):
+    """The login file was replaced between lstat and open."""
 
 
 class TokenError(Exception):
@@ -175,6 +308,10 @@ TOKEN_REASONS = {
     'inside_root': 'The login file is inside the Board data folder, which is refused.',
     'unreadable': 'The login file could not be read.',
     'invalid': 'The login file does not contain a token.',
+    'dir_missing': 'The folder for the login file does not exist. Create it on Hoster first (mode 0700).',
+    'dir_symlink': 'The folder for the login file is a symlink, which is refused.',
+    'dir_unsafe': 'The folder for the login file is writable by other users or owned by someone else. Run chmod 700 on it.',
+    'write_failed': 'The login file could not be written.',
 }
 
 

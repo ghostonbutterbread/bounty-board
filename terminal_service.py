@@ -25,6 +25,8 @@ Routes (after the optional prefix):
   POST /api/agent/config        {cli, model}
   POST /api/agent/start         {selector, task, cli?, model?}  (report agent in the sandbox)
   POST /api/agent/stop          {selector}
+  POST /api/agent/login         {cli: "claude", token}  (writes --report-agent-token-file; 4 KiB body cap)
+  POST /api/agent/logout        {cli: "claude"}
   GET  /api/agent/session?<selector>  report agent state
   GET  /api/agents/active?<selector>|all=1  Herdr agents to connect to (agent connect)
   GET  /ws?<selector>[&kind=shell|agent]  WebSocket attach (RFC 6455)
@@ -343,7 +345,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
         def selector_from_query(self):
             return sb.clean_selector(self.query_params())
 
-        def read_json(self):
+        def read_json(self, limit=MAX_BODY):
             if self.headers.get('X-Requested-With') != 'Bounty-Board':
                 return None, 'csrf'
             if (self.headers.get('Content-Type') or '').split(';')[0].strip().lower() != 'application/json':
@@ -352,7 +354,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 length = int(self.headers.get('Content-Length') or '0')
             except ValueError:
                 return None, 'length'
-            if not 0 < length <= MAX_BODY:
+            if not 0 < length <= limit:
                 return None, 'length'
             try:
                 body = json.loads(self.rfile.read(length))
@@ -425,7 +427,9 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             path = self.route()
             if not self.host_ok() or not self.origin_ok(required=True):
                 return self.reply(403, {'error': 'forbidden'})
-            body, problem = self.read_json()
+            # The login routes carry a token: a small body cap (4 KiB).
+            small = path in ('/api/agent/login', '/api/agent/logout')
+            body, problem = self.read_json(terminal_report_agent.LOGIN_BODY_MAX if small else MAX_BODY)
             self.request_ready()
             if problem:
                 return self.reply(400 if problem != 'csrf' else 403, {'error': problem})
