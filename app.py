@@ -652,7 +652,8 @@ def valid_terminal_url(value):
 def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False, tailnet_host=None,
                 tailnet_port=443, collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
                 report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
-                live_edit_dir=None, state_dir=None, terminal_url=None, artifact_root=None, recon_query_budget=None):
+                live_edit_dir=None, state_dir=None, terminal_url=None, artifact_root=None, recon_query_budget=None,
+                artifact_uploads=False):
     import os
     import tempfile
     import threading
@@ -1328,7 +1329,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 lane_fd = ra.open_lane(before[0] if bound else root, family, program, lane)
                 found = ra.associate(lane_fd, family, program, lane, path)
                 if view == 'list':
-                    return self.reply(200, {**found, 'max_zip_bytes': ra.MAX_ZIP_BYTES})
+                    # 'upload' (feat/board-artifact-uploads): whether the panel may upload here.
+                    from artifact_uploads import upload_state
+                    return self.reply(200, {**found, 'max_zip_bytes': ra.MAX_ZIP_BYTES,
+                                            'upload': upload_state(self.server.artifact_uploads, found)})
                 if view == 'zip':
                     return self.artifact_zip(ra, lane_fd, found, path)
                 item = next((a for a in found['artifacts'] if a['relative'] == params['artifact'][0]), None)
@@ -1352,6 +1356,14 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             finally:
                 if lane_fd is not None:
                     os.close(lane_fd)
+
+        # --- Artifact uploads (feat/board-artifact-uploads) ---------------------
+        # Opt-in (--artifact-uploads). Stores one raw-body file in the report's
+        # dedicated folder; logic and gates live in artifact_uploads.py, contract
+        # in docs/integrations/artifact-uploads.md.
+        def artifact_upload(self):
+            from artifact_uploads import handle_upload
+            return handle_upload(self, self.server.artifact_uploads, root, root_snapshot, FAMILIES)
 
         def artifact_headers(self, content_type, disposition):
             self.send_header('Content-Type', content_type)
@@ -1596,6 +1608,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                                           # Sandbox terminal (terminal_service.py, a separate process
                                           # published on this origin); None hides the terminal UI.
                                           'terminal_url': terminal_url,
+                                          # Report artifact uploads (artifact_uploads.py, --artifact-uploads).
+                                          'artifact_uploads': self.server.artifact_uploads is not None,
                                           'fixture_publish': experimental_fixture_publish}
                 if self.server.report_na is not None:
                     # Forget marks of reports that were moved or deleted (confirmed per file, bounded).
@@ -1764,6 +1778,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.reply(403, {'error': 'editing_disabled', 'message': 'Report writes are disabled; retain your draft.'})
 
         def do_POST(self):
+            if urlsplit(self.path).path == '/api/report-artifact-upload':  # feat/board-artifact-uploads
+                return self.artifact_upload()
             if urlsplit(self.path).path.startswith('/api/live/'):
                 if live is None:
                     return self.reply(404, {'error': 'live_edit_disabled'})
@@ -2436,6 +2452,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     server.live = live
     server.search_index = search_index
     server.recon = recon
+    # Artifact uploads (artifact_uploads.py): None unless --artifact-uploads.
+    from artifact_uploads import Uploads
+    server.artifact_uploads = Uploads() if artifact_uploads else None
     base_close = server.server_close
 
     # One close path: stop the live editing watcher and the search index
@@ -2493,6 +2512,9 @@ def parse_config(argv=None):
                         help='maximum retained publication entries (default 1000)')
     parser.add_argument('--retention-min-free-bytes', type=int, default=DEFAULT_MIN_FREE_BYTES,
                         help='free-space floor in bytes (default 1073741824)')
+    parser.add_argument('--artifact-uploads', action='store_true',
+                        help='opt in to uploading files from the artifacts panel into report folders under the data root '
+                        '(Syncthing distributes them); see docs/integrations/artifact-uploads.md')
     parser.add_argument('--artifact-root', type=Path,
                         help='bulk artifact tier holding JS libraries (default: /mnt/bounty when it is a mount point)')
     parser.add_argument('--recon-query-budget', type=float, default=None,
@@ -2567,6 +2589,7 @@ def main():
                 **({'terminal_url': args.terminal_url} if args.terminal_url else {}),
                 **({} if args.artifact_root is None else {'artifact_root': args.artifact_root}),
                 **({} if args.recon_query_budget is None else {'recon_query_budget': args.recon_query_budget}),
+                **({'artifact_uploads': True} if args.artifact_uploads else {}),
                 **({} if args.collaboration_max_bytes is None else {'collaboration_max_bytes': args.collaboration_max_bytes})).serve_forever()
 
 
