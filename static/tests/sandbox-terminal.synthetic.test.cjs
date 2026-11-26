@@ -311,7 +311,10 @@ test('only reports in a finding folder get a terminal; legacy reports open their
     assert.equal(await page.locator('#term-drawer:visible').count(),0);
     assert.equal(fs.existsSync(path.join(lane,'reports/active')),false,'no folder is created');
     // A legacy report mapped through the ledger opens D10's packet and says so.
-    await page.locator('#report-select').selectOption('findings/confirmed/D10 - HIGH - stored xss.md');
+    // One report per packet (feat/board-one-report-per-packet): the legacy copy is an
+    // Older copies packet file of D10's main report, so it is opened by its link, not the picker.
+    await page.evaluate(()=>{location.hash=location.hash.replace(/\/reports\/.*$/,'/reports/'+encodeURIComponent('findings/confirmed/D10 - HIGH - stored xss.md'));});
+    await page.locator('[data-packet-note]').waitFor();
     await page.waitForFunction(()=>document.querySelector('[data-term-toggle]')?.disabled===false,null,{timeout:15000});
     assert.equal(await page.locator('[data-term-reason]').isHidden(),true);
     await toggle.click();
