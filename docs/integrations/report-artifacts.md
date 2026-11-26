@@ -20,6 +20,8 @@ A file is listed for `reports/<path>` in a lane when at least one of these holds
 2. **Finding field** (`finding_field`). Paths in an owning finding's `poc`, `evidence`, `artifacts`, `attachments`, `evidence_files` or `files` (string, list, or `{path}` objects) that resolve to a file, or a non-shared folder's files, inside the lane. Prose values (whitespace without a slash) are ignored.
 3. **Report link** (`report_link`). Relative Markdown link/image targets (`[x](a/b.py)`, `![x](<a b.png>)`, reference definitions) resolved from the report's folder, inside the lane. URLs with a scheme, `//host`, and `#anchors` are ignored; `?query`/`#fragment` are stripped.
 
+The evidence artifact view (`docs/integrations/evidence-artifacts.md`) mounts the same panel with the evidence file as the anchor (`path=<packet>/EVIDENCE.md`), so it lists the packet's other files, including the submission report; the submission report's panel lists `EVIDENCE.md` through rule 1.
+
 An *owning finding* names the report in `report_path` or `evidence_path`; failing that, its `report_dir` is the report's own folder (so an unregistered `SUBMISSION.md` in a finding folder gets that folder). Absolute recorded paths are matched by their `/<family>/<program>/<lane>/` segment, so ledgers written on another host resolve on this one. Nothing outside the lane is ever listed.
 
 Measured read-only on the real root (aggregate counts only, no names or contents recorded): 544 report/evidence files; 450 resolve to a dedicated folder, 94 do not (87 in non-dedicated folders, 7 in the reports root); 0 marked shared after the fallback-owner rule; worst listing 45 ms.

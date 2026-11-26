@@ -58,6 +58,12 @@ test('evidence refs link only to reports present in the lane', () => {
   assert.equal(cd.reportForRef('reports/dir/r.md', reports).id, 'x1');
   assert.equal(cd.reportForRef('https://elsewhere.example/a', reports), null);
   assert.equal(cd.reportForRef(42, reports), null);
+  // Evidence files are not reports; a reports/.../EVIDENCE.md ref maps to the evidence view path.
+  assert.equal(cd.evidenceForRef('reports/F1-xss/EVIDENCE.md'), 'F1-xss/EVIDENCE.md');
+  assert.equal(cd.evidenceForRef('./reports/F1/evidence.md'), 'F1/evidence.md');
+  assert.equal(cd.evidenceForRef('reports/../x/EVIDENCE.md'), null);
+  assert.equal(cd.evidenceForRef('reports/F1/notes.md'), null);
+  assert.equal(cd.evidenceForRef('evidence/F1/EVIDENCE.md'), null);
 });
 test('missing or malformed coverage does not throw', () => {
   assert.equal(cd.summarize(null).questions.total, 0);

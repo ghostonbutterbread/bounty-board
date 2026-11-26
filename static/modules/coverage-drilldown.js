@@ -112,7 +112,16 @@
     return (reports || []).find(r => typeof r.path === 'string' && r.path && (clean === r.path || clean === 'reports/' + r.path || clean.endsWith('/' + r.path))) || null;
   }
 
-  const api = {summarize, byClass, byKind, filterQuestions, reportForRef, blockedTag, age, STATUS_LABEL};
+  /* A lane-relative reports/.../EVIDENCE.md reference -> its path under reports/, or null. */
+  function evidenceForRef(ref) {
+    if (typeof ref !== 'string') return null;
+    const clean = ref.trim().replace(/^\.\//, '');
+    if (!clean.startsWith('reports/') || !/(^|\/)evidence\.md$/i.test(clean)) return null;
+    const rest = clean.slice(8);
+    return rest.split('/').some(part => !part || part === '.' || part === '..') ? null : rest;
+  }
+
+  const api = {summarize, byClass, byKind, filterQuestions, reportForRef, evidenceForRef, blockedTag, age, STATUS_LABEL};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (!root || !root.document || !root.registerBoardModule) return;
 
@@ -141,7 +150,10 @@
       const refs = r => (Array.isArray(r.evidence_refs) ? r.evidence_refs : []).map(ref => {
         const rep = reportForRef(ref, reports);
         // A real link: plain clicks navigate in-app (app.js), modified clicks open a new tab.
-        return rep ? `<a class="link-button" href="${esc(ctx.hrefFor({program: ctx.state.program, lane: ctx.state.lane, section: 'reports', report: String(rep.id)}))}" data-cd-report="${esc(rep.id)}">${esc(String(ref))}</a>` : `<code>${esc(display(ref))}</code>`;
+        if (rep) return `<a class="link-button" href="${esc(ctx.hrefFor({program: ctx.state.program, lane: ctx.state.lane, section: 'reports', report: String(rep.id)}))}" data-cd-report="${esc(rep.id)}">${esc(String(ref))}</a>`;
+        // Evidence files are not in the report list; a reports/.../EVIDENCE.md ref opens the evidence view.
+        const evidence = evidenceForRef(ref);
+        return evidence ? `<a class="link-button" href="${esc(ctx.hrefFor({program: ctx.state.program, lane: ctx.state.lane, section: 'reports', report: evidence}))}" data-cd-evidence="${esc(evidence)}">${esc(String(ref))}</a>` : `<code>${esc(display(ref))}</code>`;
       }).join('<br>') || '<span class="muted">No evidence recorded</span>';
       const display = ctx.display;
       const rowsHtml = shown.map(r => {
