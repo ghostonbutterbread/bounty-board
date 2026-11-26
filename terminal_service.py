@@ -21,7 +21,16 @@ Routes (after the optional prefix):
   GET  /api/settings            terminal settings (preview ports, Tailscale binding)
   POST /api/settings            {ports_tailscale: bool}
   GET  /api/ports?<selector>    preview ports of a report's sandbox
-  GET  /ws?<selector>           WebSocket attach (RFC 6455)
+  GET  /api/agent/config        report agent CLI and model choice, login state
+  POST /api/agent/config        {cli, model}
+  POST /api/agent/start         {selector, task, cli?, model?}  (report agent in the sandbox)
+  POST /api/agent/stop          {selector}
+  GET  /api/agent/session?<selector>  report agent state
+  GET  /api/agents/active?<selector>|all=1  Herdr agents to connect to (agent connect)
+  GET  /ws?<selector>[&kind=shell|agent]  WebSocket attach (RFC 6455)
+  GET  /ws?kind=connect&pane&terminal_id&session_ref  attach to a Herdr agent (agent connect)
+
+Report agent, model relay and agent connect: docs/integrations/report-agent.md.
 
 Every request must carry an allowed Host; WebSocket upgrades and state changes
 also need Origin equal to an allowed origin (and that origin's own Host);
@@ -49,7 +58,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import terminal_auth
 import terminal_checks
+import terminal_connect
 import terminal_ports
+import terminal_report_agent
 import terminal_sandbox as sb
 import terminal_ws
 
@@ -142,9 +153,11 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                  max_connections=MAX_CONNECTIONS, ping_interval=PING_INTERVAL, peer_timeout=PEER_TIMEOUT,
                  max_anonymous=MAX_ANONYMOUS, max_pending=MAX_PENDING, request_deadline=REQUEST_DEADLINE,
                  preview_ports=False, ports_range=terminal_ports.DEFAULT_RANGE, tailscale_address='auto',
-                 tailscale=None, ports_refresh=terminal_ports.TAILSCALE_REFRESH):
+                 tailscale=None, ports_refresh=terminal_ports.TAILSCALE_REFRESH, report_agent=None, agent_connect=None):
     """``tailscale`` (a terminal_ports.TailscaleAddress) is for tests only; the
-    command line reaches ``tailscale_address``."""
+    command line reaches ``tailscale_address``. ``report_agent`` is a
+    terminal_report_agent.ReportAgentHub and ``agent_connect`` a
+    terminal_connect.ConnectHub (both off when None)."""
     root = Path(root).absolute()
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +187,14 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
     manager = sb.SessionManager(root, backend, max_sessions=max_sessions, pause_after=pause_after,
                                 remove_after=idle_timeout if idle_timeout is not None else remove_after,
                                 min_free_memory=min_free_memory, reap_interval=reap_interval, mem_available=mem_available)
+    # Report agent and agent connect (docs/integrations/report-agent.md): off unless given.
+    agent_hub = report_agent or terminal_report_agent.ReportAgentHub(enabled=False, root=root, state_dir=state_dir)
+    if agent_hub.enabled:
+        agent_hub.clock = manager.clock
+        manager.agent_hub = agent_hub
+        if backend is not None and hasattr(backend, 'agent_hub'):
+            backend.agent_hub = agent_hub
+    connect_hub = agent_connect or terminal_connect.ConnectHub(enabled=False, root=root)
     def settings_payload():
         if ports is None:
             return terminal_ports.disabled_settings(ports_range)
@@ -310,11 +331,17 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             self.end_headers()
             self.wfile.write(data)
 
-        def selector_from_query(self):
-            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
+        def query_params(self):
+            try:
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=8)
+            except ValueError:
+                raise sb.SandboxError('bad_selector', 'Report selector is invalid.') from None
             if any(len(v) != 1 for v in params.values()):
                 raise sb.SandboxError('bad_selector', 'Report selector is invalid.')
-            return sb.clean_selector({k: v[0] for k, v in params.items()})
+            return {k: v[0] for k, v in params.items()}
+
+        def selector_from_query(self):
+            return sb.clean_selector(self.query_params())
 
         def read_json(self):
             if self.headers.get('X-Requested-With') != 'Bounty-Board':
@@ -356,7 +383,8 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                                             'password_login': auth.password_enabled})
                 return self.reply(200, {'user': user, 'method': method, 'idle_timeout': manager.remove_after,
                                         'pause_after': manager.pause_after, 'remove_after': manager.remove_after,
-                                        'max_sessions': manager.max_sessions, **ports_flags()})
+                                        'max_sessions': manager.max_sessions, **ports_flags(),
+                                        'report_agent': agent_hub.enabled, 'agent_connect': connect_hub.enabled})
             if not user:
                 return self.reply(401, {'error': 'login_required', 'login_url': f'{PREFIX}/login'})
             try:
@@ -384,6 +412,10 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 if path == '/api/session':
                     session = manager.get(self.selector_from_query())
                     return self.reply(200, {'session': session.info() if session else None})
+                handled = (agent_hub.handle_get(manager, path, self.selector_from_query)
+                           or connect_hub.handle_get(path, self.query_params()))
+                if handled:
+                    return self.reply(*handled)
             except sb.SandboxError as error:
                 return self.reply(400, {'error': error.code, 'message': error.message})
             return self.reply(404, {'error': 'not_found'})
@@ -414,6 +446,9 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 return self.reply(401, {'error': 'login_required', 'login_url': f'{PREFIX}/login'})
             if path == '/api/settings':
                 return self.post_settings(body)
+            handled = agent_hub.handle_post(manager, path, body)
+            if handled:
+                return self.reply(*handled)
             try:
                 sel = sb.clean_selector(body)
                 if path == '/api/checks':
@@ -467,7 +502,19 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
         def websocket(self):
             if not self.origin_ok(required=True):
                 return self.reply(403, {'error': 'forbidden'})
-            sel = self.selector_from_query()
+            query = self.query_params()
+            # kind=shell (default) attaches the report's shell; kind=agent the report
+            # agent's PTY; kind=connect a Herdr agent on the host (agent connect).
+            kind = query.pop('kind', 'shell')
+            if kind in ('shell', 'agent'):
+                sel = sb.clean_selector(query)
+            elif kind == 'connect':
+                try:
+                    terminal_connect.ConnectHub.check_params(query)
+                except terminal_connect.ConnectError as error:
+                    return self.reply(error.status, error.payload())
+            else:
+                return self.reply(400, {'error': 'bad_kind'})
             try:
                 accept = terminal_ws.check_handshake(self.command, self.headers)
             except terminal_ws.HandshakeError as error:
@@ -486,10 +533,17 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             ws = terminal_ws.WebSocket(self.rfile, self.connection, max_frame=256 * 1024, max_message=256 * 1024)
             viewer = Viewer(ws)
             try:
-                session = manager.attach(sel, viewer)
+                if kind == 'shell':
+                    target = ShellTarget(sel, manager.attach(sel, viewer), viewer)
+                elif kind == 'agent':
+                    target = agent_hub.attach(manager, sel, viewer)
+                else:
+                    target = connect_hub.attach(query, viewer)
             except Exception as error:
-                code, message = ((error.code, error.message) if isinstance(error, sb.SandboxError)
-                                 else ('sandbox_failed', 'The sandbox could not start.'))
+                if isinstance(error, (sb.SandboxError, terminal_report_agent.AgentError, terminal_connect.ConnectError)):
+                    code, message = error.code, error.message
+                else:
+                    code, message = 'sandbox_failed', 'The sandbox could not start.'
                 viewer.send_control({'type': 'error', 'code': code, 'message': message})
                 viewer.close()
                 # Give the client 5 s to answer the close, then drop the connection.
@@ -518,8 +572,8 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                     message = ws.recv()
                     if message is None:
                         break
-                    kind, data = message
-                    if kind != 'text':
+                    kind_, data = message
+                    if kind_ != 'text':
                         continue
                     try:
                         command = json.loads(data)
@@ -527,19 +581,36 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                         continue
                     if not isinstance(command, dict):
                         continue
-                    current = manager.get(sel)
-                    if current is not session:
+                    if not target.alive():
                         break  # the session was closed (idle, evicted, stopped)
                     if command.get('t') == 'in' and isinstance(command.get('d'), str) and len(command['d']) <= MAX_INPUT:
-                        session.write(command['d'].encode('utf-8', 'replace'))
+                        target.write(command['d'].encode('utf-8', 'replace'))
                     elif command.get('t') == 'resize':
                         cols, rows = command.get('cols'), command.get('rows')
                         if type(cols) is int and type(rows) is int and 2 <= cols <= 500 and 2 <= rows <= 300:
-                            session.resize(cols, rows)
+                            target.resize(cols, rows)
             finally:
                 stop.set()
-                manager.detach(session, viewer)
+                target.detach()
                 viewer.close()
+
+    class ShellTarget:
+        """The report's shell session, for the WebSocket loop."""
+
+        def __init__(self, sel, session, viewer):
+            self.sel, self.session, self.viewer = sel, session, viewer
+
+        def alive(self):
+            return manager.get(self.sel) is self.session
+
+        def write(self, data):
+            self.session.write(data)
+
+        def resize(self, cols, rows):
+            self.session.resize(cols, rows)
+
+        def detach(self):
+            manager.detach(self.session, self.viewer)
 
     class Server(ThreadingHTTPServer):
         """Thread per connection with bounded admission (see Handler)."""
@@ -571,6 +642,8 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                 checks.close()
                 if ports is not None:
                     ports.close()
+                agent_hub.close()
+                connect_hub.close()
             finally:
                 super().server_close()
 
@@ -579,6 +652,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
     server.anonymous_slots = threading.BoundedSemaphore(max_anonymous)
     server.pending, server.pending_lock, server.max_pending = {}, threading.Lock(), max_pending
     server.manager, server.auth, server.checks, server.ports = manager, auth, checks, ports
+    server.report_agent, server.agent_connect = agent_hub, connect_hub
     return server
 
 
@@ -617,6 +691,56 @@ def hash_password_cli(argv):
     return 0
 
 
+def agent_flags(parser):
+    """Report agent, model relay and agent connect (docs/integrations/report-agent.md). All off by default."""
+    parser.add_argument('--report-agent', action='store_true',
+                        help='allow a coding CLI (Claude Code) to run in a report\'s sandbox through the model relay')
+    parser.add_argument('--report-agent-cli', action='append', default=[], metavar='ID=PATH',
+                        help='host binary of a CLI (claude, codex, omp, opencode); symlinks are resolved at sandbox start')
+    parser.add_argument('--report-agent-skill', action='append', default=[], metavar='NAME=PATH',
+                        help='skill folder mounted read-only for the agent (repeatable; no symlinks)')
+    parser.add_argument('--report-agent-token-file', type=Path,
+                        help='0600 file with the dedicated login from "claude setup-token" (outside --root)')
+    parser.add_argument('--agent-connect', action='store_true',
+                        help='allow attaching to agents running in Herdr on this host (host access through the agent)')
+    parser.add_argument('--herdr-bin', type=Path, default=Path(terminal_connect.default_herdr_bin()))
+    parser.add_argument('--herdr-session', help='Herdr session name (required with --agent-connect)')
+
+
+def build_agent_hubs(args):
+    """(ReportAgentHub or None, ConnectHub or None) from the flags; ValueError for bad flags."""
+    import terminal_agent_cli
+    import terminal_relay
+    report_agent = agent_connect = None
+    if args.report_agent:
+        clis = terminal_agent_cli.parse_cli_flags(args.report_agent_cli)
+        skills = terminal_agent_cli.parse_skill_flags(args.report_agent_skill)
+        token = None
+        if args.report_agent_token_file is not None:
+            token = terminal_relay.TokenFile.check_path(args.report_agent_token_file, args.root)
+            if os.path.islink(token):
+                raise ValueError('--report-agent-token-file must not be a symlink')
+        report_agent = terminal_report_agent.ReportAgentHub(enabled=True, root=args.root, state_dir=args.state_dir,
+                                                            clis=clis, skills=skills, token_file=token)
+    elif args.report_agent_cli or args.report_agent_skill or args.report_agent_token_file:
+        raise ValueError('--report-agent-cli, --report-agent-skill and --report-agent-token-file need --report-agent')
+    if args.agent_connect:
+        if not args.herdr_session or not terminal_connect.SESSION_NAME_RE.fullmatch(args.herdr_session):
+            raise ValueError('--agent-connect needs --herdr-session NAME (letters, digits, _ . -)')
+        agent_connect = terminal_connect.ConnectHub(enabled=True, root=args.root,
+                                                    herdr=terminal_connect.Herdr(args.herdr_bin, args.herdr_session),
+                                                    pty_env=connect_env())
+    return report_agent, agent_connect
+
+
+def connect_env():
+    """Environment for the Herdr attach client: what it needs to find its socket and draw."""
+    keep = ('HOME', 'USER', 'LOGNAME', 'PATH', 'LANG', 'LC_ALL', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR')
+    env = {key: os.environ[key] for key in keep if key in os.environ}
+    env['TERM'] = 'xterm-256color'
+    return env
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ['hash-password']:
@@ -651,6 +775,7 @@ def main(argv=None):
     parser.add_argument('--ports-range', default='9100-9199', help='host ports for preview ports (default 9100-9199)')
     parser.add_argument('--tailscale-address', default='auto',
                         help='"auto" (an address in 100.64.0.0/10, tailscale0 first) or that IPv4 address')
+    agent_flags(parser)
     args = parser.parse_args(argv)
     try:
         args.ports_range = terminal_ports.parse_range(args.ports_range)
@@ -672,6 +797,10 @@ def main(argv=None):
             hash_record = terminal_auth.read_hash_file(args.password_hash_file)
         except (OSError, UnicodeError, terminal_auth.HashFileError) as error:
             parser.error(f'password hash file: {error}')
+    try:
+        report_agent, agent_connect = build_agent_hubs(args)
+    except ValueError as error:
+        parser.error(str(error))
     if args.backend == 'local-test-only':
         tmp = os.path.realpath(os.environ.get('TMPDIR', '/nonexistent'))
         if os.environ.get('BBTERM_ALLOW_LOCAL_BACKEND') != '1' or not os.path.realpath(args.root).startswith(tmp + '/'):
@@ -687,7 +816,8 @@ def main(argv=None):
                               backend=backend, max_sessions=args.max_sessions, pause_after=args.pause_after,
                               remove_after=args.remove_after, min_free_memory=args.min_free_memory,
                               reap_interval=max(1, args.reap_interval), preview_ports=args.preview_ports,
-                              ports_range=args.ports_range, tailscale_address=args.tailscale_address)
+                              ports_range=args.ports_range, tailscale_address=args.tailscale_address,
+                              report_agent=report_agent, agent_connect=agent_connect)
     except ValueError as error:
         parser.error(str(error))
     import signal
