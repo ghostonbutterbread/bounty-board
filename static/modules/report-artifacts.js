@@ -78,6 +78,7 @@
       // is opened again.
       for (const [oldKey, old] of panels) {
         if (panels.size <= KEEP_PANELS) break;
+        if (oldKey === key) continue;  // never the panel being mounted
         if (!old.uploads?.some(u => u.state === 'queued' || u.state === 'uploading')) panels.delete(oldKey);
       }
       load(panel);

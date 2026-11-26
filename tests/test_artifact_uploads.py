@@ -235,6 +235,29 @@ class GateTests(Fixture):
         self.assertIn(b'uploads_busy', data)
         self.assertFalse((self.folder / 'big.bin').exists())
 
+    def test_refused_upload_releases_its_slot_while_discarding(self):
+        # Re-review N1: a refusal after the slot is taken (507 here) discarded
+        # the body while still holding the slot, so a client that stalls after
+        # the reply blocked every other upload with 503 for minutes.
+        self.server.artifact_uploads = au.Uploads(free_floor=0, concurrent=1, read_timeout=5)
+        n = 4 * 1024 * 1024
+        query = urlencode({**SELECT, 'path': F1, 'name': 'big.bin'})
+        with mock.patch.object(au, 'free_bytes', side_effect=[0, 1 << 50]):
+            stalled = socket.create_connection(('127.0.0.1', self.port), timeout=10)
+            try:
+                stalled.sendall((f'POST /api/report-artifact-upload?{query} HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n'
+                                 f'Origin: {self.origin}\r\nX-Requested-With: Bounty-Board\r\n'
+                                 f'Content-Type: application/octet-stream\r\nContent-Length: {n}\r\n\r\n').encode())
+                stalled.sendall(b'\0' * 65536)  # then stall mid-body
+                self.assertIn(b' 507 ', stalled.recv(64))
+                time.sleep(0.3)
+                status, _, body = self.upload('small.txt', b'hello')
+            finally:
+                stalled.close()
+        self.assertEqual(status, 201, body)
+        self.assertEqual((self.folder / 'small.txt').read_bytes(), b'hello')
+        self.assertFalse((self.folder / 'big.bin').exists())
+
     def test_insufficient_storage(self):
         with mock.patch.object(au, 'free_bytes', return_value=5):
             status, _, body = self.upload('space.txt', b'x' * 10)

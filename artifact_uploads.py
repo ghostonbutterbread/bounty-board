@@ -283,6 +283,7 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
     """``POST /api/report-artifact-upload``. ``handler`` is the Board request handler."""
     length = None
     body_read = False
+    holding = False  # an upload slot is held (released once, by refuse or finally)
     timeout = handler.connection.gettimeout()
 
     def refuse(status, payload, extra=None):
@@ -290,7 +291,7 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
         # browser and the connection stays usable. A larger one gets the reply
         # first and is then discarded before closing, so the browser does not
         # see a reset instead of the reply.
-        nonlocal body_read
+        nonlocal body_read, holding
         if not body_read and length is not None and length <= DRAIN_LIMIT:
             try:
                 handler.connection.settimeout(5)
@@ -306,6 +307,11 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
             return handler.reply(status, payload, extra)
         handler.close_connection = True
         handler.reply(status, payload, {**(extra or {}), 'Connection': 'close'})
+        # A refused upload must not keep its upload slot while the body is
+        # discarded, or a stalled client blocks other uploads for minutes.
+        if holding:
+            holding = False
+            uploads.slots.release()
         if length and uploads.discards.acquire(blocking=False):
             try:
                 handler.wfile.flush()
@@ -344,6 +350,7 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
         return refuse(409, {'error': 'root_changed'})
     if not uploads.slots.acquire(blocking=False):
         return refuse(503, {'error': 'uploads_busy'}, {'Retry-After': '2'})
+    holding = True
     lane_fd = dir_fd = None
     try:
         try:
@@ -397,7 +404,9 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
         for fd in (dir_fd, lane_fd):
             if fd is not None:
                 os.close(fd)
-        uploads.slots.release()
+        if holding:
+            holding = False
+            uploads.slots.release()
 
 
 def _discard(handler, length, read_timeout):

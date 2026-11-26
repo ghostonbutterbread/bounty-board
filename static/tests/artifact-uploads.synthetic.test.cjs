@@ -297,3 +297,42 @@ test('an in-flight upload stays visible and cancellable after visiting 12 other 
     assert.deepEqual(errors,[]);
   });
 });
+
+// Re-review N2: when every older cached panel has queued or running uploads,
+// eviction must not drop the panel that is being mounted.
+test('the panel being mounted is kept when all older panels have active uploads',{timeout:120000},async()=>{
+  await withBoard('upload-plain',async({page,base,dir,errors})=>{
+    // Fake report lists for F1/fake-*.md (upload enabled, empty), real ones otherwise.
+    await page.route('**/api/report-artifacts?*',route=>{
+      const p=new URL(route.request().url()).searchParams.get('path')||'';
+      if(!p.startsWith('F1/fake-'))return route.continue();
+      return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({report:`reports/${p}`,folder:'reports/F1',artifacts:[],notes:[],max_zip_bytes:1,upload:{enabled:true,reason:null,max_bytes:8*1024*1024}})});
+    });
+    await openReport(page,base,'F1/REPORT.md');
+    const host=page.locator('#report-artifacts-host');
+    const files=path.join(dir,'files');fs.mkdirSync(files);
+    fs.writeFileSync(path.join(files,'slow-hold.bin'),Buffer.alloc(7*1024*1024,5));
+    fs.writeFileSync(path.join(files,'queued.txt'),'q\n');
+    await host.locator('[data-artifacts-upload-input]').setInputFiles(path.join(files,'slow-hold.bin'));
+    await host.locator('.artifact-upload[data-upload-name="slow-hold.bin"][data-upload-state="uploading"]').waitFor();
+    const mountPath=p=>page.evaluate(p=>{const h=document.getElementById('report-artifacts-host');h.dataset.path=p;window.BoardModules.find(x=>x.name==='report-artifacts').afterRender();},p);
+    // 11 more panels, each with a queued upload: 12 panels with active uploads.
+    for(let i=0;i<11;i++){
+      await mountPath(`F1/fake-${i}.md`);
+      const panel=host.locator(`section.artifacts[data-artifacts-key*="fake-${i}.md"]`);
+      await panel.locator('[data-artifacts-upload]').waitFor();
+      await panel.locator('[data-artifacts-upload-input]').setInputFiles(path.join(files,'queued.txt'));
+      await panel.locator('.artifact-upload[data-upload-state="queued"]').waitFor();
+    }
+    // Mount a 13th panel, then re-render: the same panel node must be reused.
+    await mountPath('F1/fake-new.md');
+    await host.locator('section.artifacts[data-artifacts-key*="fake-new.md"] [data-artifacts-upload]').waitFor();
+    const same=await page.evaluate(()=>{const h=document.getElementById('report-artifacts-host');const before=h.firstChild;
+      window.BoardModules.find(x=>x.name==='report-artifacts').afterRender();return h.firstChild===before;});
+    assert.equal(same,true,'the newly mounted panel must stay cached');
+    // Stop the slow upload so nothing runs on after the test.
+    await mountPath('F1/REPORT.md');
+    await host.locator('.artifact-upload[data-upload-name="slow-hold.bin"] [data-upload-cancel]').click();
+    assert.deepEqual(errors,[]);
+  });
+});
