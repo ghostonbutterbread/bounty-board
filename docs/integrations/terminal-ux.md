@@ -83,6 +83,7 @@ window.BoardTerminal.session();                   // the hello `session` object 
 - `message` fires with every parsed server text message object (after the drawer's own handling), so a later module can handle new types such as `{"type": "ports", ...}` without editing this file.
 - `on` returns an unsubscribe function; a throwing listener is logged and does not affect others.
 - The other `BoardTerminal` members (`term`, `status`, `checks`, `prefs`, `unsafeText`, `unsafePaste`, `shortcutProblem`, ...) are for tests and diagnostics only.
+- Drawer tabs (`registerTab`, `openTab`, `updateTab`, `removeTab`), code-block actions (`registerBlockAction`, `refreshBlocks`) and `mount()` / the `mount` event were added for the report agent UI; see [`report-agent-ui.md`](report-agent-ui.md#seams-added-to-sandbox-terminaljs).
 
 ### Drag to dock
 
