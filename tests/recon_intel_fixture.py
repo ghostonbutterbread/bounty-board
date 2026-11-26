@@ -57,8 +57,8 @@ def iso(days=0.0, now=None):
     return ((now or datetime.now(timezone.utc)) - timedelta(days=days)).isoformat()
 
 
-def make_url_index(path, hosts=None, tests=True):
-    """A small URL index. hosts: {host: url_count}. Returns the path."""
+def make_url_index(path, hosts=None, tests=True, tests_host='app.example.test'):
+    """A small URL index. hosts: {host: url_count}; test runs go to tests_host. Returns the path."""
     hosts = hosts or {'app.example.test': 60, 'api.example.test': 30, 'static.example.test': 8}
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,7 +81,7 @@ def make_url_index(path, hosts=None, tests=True):
                            'VALUES (?,?,?,?,?,?,?,?)', (n, key, 'query', 'synthetic', 'url' if key in ('url', 'next') else 'text',
                                                         json.dumps(HINTS[key]), iso(10), iso(1)))
     if tests:
-        app = ids.get('app.example.test', [])
+        app = ids.get(tests_host, [])
         rows = [
             (app[0], 'xss', 'q', 'xss-reflect', 'reflection', 'surface_reviewed', 0.2, 'agent-a', 'reports/xss-notes.md', 'reflected safely'),
             (app[2], 'open-redirect', 'url', 'redirect', 'redirect-basic', 'deep_reviewed', 3, 'agent-b', '/elsewhere/out.txt', 'no redirect'),
