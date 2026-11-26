@@ -518,9 +518,9 @@ test('toggle shortcut: Ctrl+E everywhere, configurable, focus returns, slot and 
     // Slot: stable, in the header between the status text and the dock picker, hidden while empty.
     assert.equal(await page.evaluate(()=>window.__slotSame),true);
     const slotInfo=await page.evaluate(()=>{const s=document.querySelector('#term-drawer [data-term-slot="ports"]');const head=s.closest('.term-head');
-      const order=[...head.querySelectorAll('[data-term-steps],[data-term-slot="ports"],[data-term-dock]')].map(e=>e.matches('[data-term-slot]')?'slot':e.matches('[data-term-dock]')?'dock':'steps');
+      const order=[...head.querySelectorAll('[data-term-status],[data-term-slot="ports"],[data-term-dock]')].map(e=>e.matches('[data-term-slot]')?'slot':e.matches('[data-term-dock]')?'dock':'status');
       const hidden=getComputedStyle(s).display==='none';s.innerHTML='<span class="term-pill">8000</span>';return {order,hidden,shown:getComputedStyle(s).display!=='none'};});
-    assert.deepEqual(slotInfo,{order:['steps','slot','dock'],hidden:true,shown:true});
+    assert.deepEqual(slotInfo,{order:['status','slot','dock'],hidden:true,shown:true});
     await page.waitForFunction(()=>window.__events.length>=1);
     assert.deepEqual(await page.evaluate(()=>window.__events[0]),{folder:'reports/D1-sqli-login',path:REPORT},'session event on attach');
     assert.ok((await page.evaluate(()=>window.__types)).includes('hello'),'message event for every server message');
@@ -681,7 +681,7 @@ test('docks: each side reserves its space, sizes persist per orientation, maximi
     await openReport(page,base);
     await page.locator('#term-drawer').waitFor();
     let d=await drawerBox();
-    assert.equal((await stored(page)).dock,'left');
+    assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('bounty-board-terminal-dock:v1')).dock),'left','the current dock is kept for this tab');
     assert.ok(Math.round(d.width)===width+64&&Math.abs(d.left-sidebar.right)<=1,`left dock restored ${JSON.stringify(d)}`);
     await picker.locator('[data-dock="top"]').click();
     assert.equal(Math.round((await drawerBox()).height),352);
@@ -771,16 +771,21 @@ test('settings page: sidebar link, tab title, persistence, live apply across tab
     assert.equal(await page.locator('[data-set-dock="left"]').getAttribute('aria-pressed'),'true');
     const saved=await stored(page);
     assert.equal(saved.ctrlVPaste,false);assert.equal(saved.dock,'left');
-    // Live apply across tabs: Settings changes the open drawer, the drawer picker updates Settings.
+    // A new tab opens at the default. Changing the default does not move an open drawer in another tab,
+    // and the drawer's picker (current dock, this tab only) does not change the default.
     const report=await sibling(page);
     await openReport(report,base);
     await openDrawer(report);
     assert.equal(await report.locator('#term-drawer').getAttribute('data-dock'),'left');
     await page.bringToFront();
     await page.locator('[data-set-dock="top"]').click();
-    await report.waitForFunction(()=>document.querySelector('#term-drawer').dataset.dock==='top');
+    await report.waitForFunction(()=>window.BoardTerminal.prefs.dock==='top');
+    assert.equal(await report.locator('#term-drawer').getAttribute('data-dock'),'left','the open drawer stays');
     await report.locator('[data-term-dock] [data-dock="right"]').click();
-    await page.waitForFunction(()=>document.querySelector('[data-set-dock="right"]').getAttribute('aria-pressed')==='true');
+    assert.equal(await report.locator('#term-drawer').getAttribute('data-dock'),'right');
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('[data-set-dock="top"]').getAttribute('aria-pressed'),'true','the default is unchanged');
+    assert.equal((await stored(page)).dock,'top');
     await page.getByRole('switch',{name:'Ctrl+V pastes'}).check();
     await report.waitForFunction(()=>window.BoardTerminal.prefs.ctrlVPaste===true);
     // Corrupt stored values fall back to the defaults.
@@ -860,8 +865,9 @@ test('typing filter: multi-character input-event insertions are refused unless s
     await page.evaluate(()=>{window.__sent=[];window.BoardTerminal.term.onData(d=>window.__sent.push(d));});
     const marker=path.join(lane,'reports/D1-sqli-login/input-marker');
     const ESC='echo hi\x1b[201~\ntouch input-marker\n';
-    for(const [inputType,data,viaTransfer] of [['insertText',ESC],['insertFromPaste','echo hi⁧; touch input-marker; ⁩'],['insertReplacementText','echo a\ntouch input-marker\n'],
-      ['insertText','echo a\rtouch input-marker'],['insertFromDrop',ESC,true]]){
+    const CONTROL='Paste refused: the clipboard text contains control characters.',MULTI='Multi-line text must be pasted with Ctrl+V.';
+    for(const [inputType,data,viaTransfer,message=CONTROL] of [['insertText',ESC],['insertFromPaste','echo hi\u2067; touch input-marker; \u2069'],['insertReplacementText','echo a\ntouch input-marker\n',false,MULTI],
+      ['insertText','echo a\rtouch input-marker'],['insertFromDrop',ESC,true],['insertText','echo a\r\necho b',false,MULTI]]){
       const result=await page.evaluate(([inputType,data,viaTransfer])=>{
         const area=window.BoardTerminal.term.textarea;area.focus();
         const init=viaTransfer?(()=>{const dt=new DataTransfer();dt.setData('text/plain',data);return {inputType,dataTransfer:dt};})():{inputType,data};
@@ -871,7 +877,7 @@ test('typing filter: multi-character input-event insertions are refused unless s
       },[inputType,data,!!viaTransfer]);
       assert.equal(result.cancelled,true,`${inputType} ${JSON.stringify(data)}: beforeinput cancelled`);
       assert.deepEqual(result.sent,[],`${inputType} ${JSON.stringify(data)}: nothing reached xterm`);
-      await page.locator('[data-term-note]').filter({hasText:'Paste refused: the clipboard text contains control characters.'}).waitFor({timeout:5000});
+      await page.waitForFunction(m=>{const n=document.querySelector('[data-term-note]');return !n.hidden&&n.textContent===m;},message,{timeout:5000});
       await page.evaluate(()=>{document.querySelector('[data-term-note]').hidden=true;});
     }
     await page.waitForTimeout(800);
@@ -913,5 +919,180 @@ test('BoardTerminal session events across report switches: D1, D10, then a repor
       `session:${REPORT}:reports/D1-sqli-login`,`hello:${REPORT}`,null,
       'session:findings/confirmed/D10 - HIGH - stored xss.md:reports/D10-xss','hello:findings/confirmed/D10 - HIGH - stored xss.md',null]);
     assert.deepEqual(page.errors,[]);
+  });
+});
+
+// ---- Drag to dock (follow-up): header drag, preview, current vs default dock, two-line side header ----
+const headerLines=page=>page.evaluate(()=>{
+  const tops=[...document.querySelectorAll('#term-drawer .term-head :is(.term-grip,.term-title,[data-term-status],[data-term-dock],[data-term-sub],.term-actions)')]
+    .filter(e=>e.getBoundingClientRect().height>0).map(e=>{const r=e.getBoundingClientRect();return r.top+r.height/2;});
+  const rows=[];for(const t of tops.sort((a,b)=>a-b))if(!rows.some(r=>Math.abs(r-t)<8))rows.push(t);
+  return rows.length;
+});
+async function headerDrag(page,to,{steps=8,release=true}={}){
+  const b=await page.locator('#term-drawer .term-title').boundingBox();
+  const from={x:b.x+b.width/2,y:b.y+b.height/2};
+  await page.mouse.move(from.x,from.y);await page.mouse.down();
+  await page.mouse.move(to.x,to.y,{steps});
+  if(release)await page.mouse.up();
+}
+test('drag to dock: the header docks the drawer on each edge with a preview; clicks, buttons, Esc, the dead zone and outside drops do not move it',{timeout:300000},async()=>{
+  await withFixture('tailnet',async({base,newPage})=>{
+    const page=await newPage({permissions:CLIP});
+    await openReport(page,base);
+    await openDrawer(page);
+    const grip=page.locator('#term-drawer .term-grip');
+    assert.equal(await grip.getAttribute('aria-label'),'Drag to move the terminal');
+    assert.equal(await grip.isVisible(),true);
+    await typeLine(page,'echo drag-ok');
+    await waitScreen(page,l=>l.some(x=>x.trim()==='drag-ok'),'output');
+    await page.locator('[data-term-screen] textarea').focus();
+    await setClipboard(page,'sentinel-drag');
+    const vw=await page.evaluate(()=>document.documentElement.clientWidth),vh=900;
+    const left=(await rect(page,'.app > .sidebar')).right;
+    const dockOf=()=>page.locator('#term-drawer').getAttribute('data-dock');
+    const preview=page.locator('[data-term-drop-preview]'),edge=page.locator('[data-term-drop-edge]');
+    const targets={right:{x:vw-12,y:450},left:{x:left+12,y:450},top:{x:(left+vw)/2,y:12},bottom:{x:(left+vw)/2,y:vh-12}};
+    const termFocused=()=>page.evaluate(()=>document.activeElement===window.BoardTerminal.term.textarea);
+    const cols0=await page.evaluate(()=>window.BoardTerminal.term.cols);
+    for(const dock of ['right','top','bottom','left']){
+      await headerDrag(page,targets[dock],{release:false});
+      assert.equal(await preview.isVisible(),true,`${dock}: preview visible`);
+      assert.equal(await preview.getAttribute('data-dock'),dock);
+      assert.equal(await edge.getAttribute('data-edge'),dock);
+      await page.waitForTimeout(350);   // the preview animates between targets
+      const p=await rect(page,'[data-term-drop-preview]');
+      if(dock==='right')assert.ok(Math.abs(p.right-vw)<=1&&p.top===0,JSON.stringify(p));
+      if(dock==='left')assert.ok(Math.abs(p.left-left)<=1&&p.top===0,JSON.stringify(p));
+      if(dock==='top')assert.ok(p.top===0&&Math.abs(p.left-left)<=1,JSON.stringify(p));
+      if(dock==='bottom')assert.ok(Math.abs(p.bottom-vh)<=1,JSON.stringify(p));
+      assert.equal(await page.evaluate(()=>document.documentElement.classList.contains('term-dragging')),true);
+      if(dock==='right')for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`drag-preview-right-${t}.png`);}
+      await page.mouse.up();
+      assert.equal(await dockOf(),dock,`${dock}: docked`);
+      assert.equal(await preview.isHidden(),true);
+      await page.waitForTimeout(250);
+      const d=await rect(page,'#term-drawer');
+      if(dock==='right')assert.ok(Math.abs(d.right-vw)<=1&&d.top===0,JSON.stringify(d));
+      if(dock==='left')assert.ok(Math.abs(d.left-left)<=1&&d.top===0,JSON.stringify(d));
+      if(dock==='top')assert.ok(d.top===0,JSON.stringify(d));
+      if(dock==='bottom')assert.ok(Math.abs(d.bottom-vh)<=1,JSON.stringify(d));
+      await page.evaluate(dk=>window.scrollTo(0,dk==='bottom'?document.documentElement.scrollHeight:0),dock);
+      assert.equal(overlaps(await rect(page,'#live-report-host'),await rect(page,'#term-drawer')),false,`${dock}: content not covered`);
+      await page.evaluate(()=>window.scrollTo(0,0));
+      assert.equal(await termFocused(),true,`${dock}: focus stays in the terminal`);
+      if(dock==='right'){
+        await page.waitForFunction(c=>window.BoardTerminal.term.cols!==c,cols0,{timeout:5000});   // refit after the drop
+        for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`drag-result-right-${t}.png`);}
+        await theme(page,'light');
+      }
+      if(dock==='left'||dock==='right')assert.ok(await headerLines(page)<=2,`${dock}: header at most two lines`);
+    }
+    // Side headers stay on two lines down to 360 px; screenshots of both sides.
+    const handle=page.locator('[data-term-resize]');
+    for(const side of ['left','right']){
+      await page.locator(`[data-term-dock] [data-dock="${side}"]`).click();
+      const w=(await rect(page,'#term-drawer')).width,hb=await handle.boundingBox();
+      await page.mouse.move(hb.x+hb.width/2,hb.y+hb.height/2);await page.mouse.down();
+      await page.mouse.move(hb.x+hb.width/2+(side==='right'?1:-1)*(w-360),hb.y+hb.height/2,{steps:4});await page.mouse.up();
+      assert.ok(Math.abs((await rect(page,'#term-drawer')).width-360)<=2);
+      assert.ok(await headerLines(page)<=2,`${side} at 360 px: header at most two lines`);
+      assert.equal(await page.locator('[data-term-reset]').getAttribute('title'),'Reset sandbox');
+      for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);
+        if(shots)await page.locator('#term-drawer .term-head').screenshot({path:path.join(shots,`drawer-head-${side}-360-${t}.png`)});
+        await shot(page,`dock-${side}-360-${t}.png`);}
+      await theme(page,'light');
+    }
+    await page.locator('[data-term-dock] [data-dock="left"]').click();
+    await page.locator('[data-term-screen] textarea').focus();
+    // A click on the header, or a move under 6 px, is not a drag.
+    await page.locator('#term-drawer .term-title').click();
+    let b=await page.locator('#term-drawer .term-title').boundingBox();
+    await page.mouse.move(b.x+5,b.y+5);await page.mouse.down();await page.mouse.move(b.x+8,b.y+7,{steps:2});
+    assert.equal(await preview.isHidden(),true,'no preview under the threshold');
+    await page.mouse.up();
+    assert.equal(await dockOf(),'left');
+    // Pressing a header button and dragging does not start a drag.
+    const btn=await page.locator('[data-term-evidence]').boundingBox();
+    await page.mouse.move(btn.x+btn.width/2,btn.y+btn.height/2);await page.mouse.down();await page.mouse.move(targets.right.x,targets.right.y,{steps:6});
+    assert.equal(await preview.isHidden(),true,'no drag from a button');
+    await page.mouse.up();
+    assert.equal(await dockOf(),'left');
+    // Esc mid-drag cancels.
+    await headerDrag(page,targets.right,{release:false});
+    assert.equal(await preview.isVisible(),true);
+    await page.keyboard.press('Escape');
+    assert.equal(await preview.isHidden(),true);
+    await page.mouse.up();
+    assert.equal(await dockOf(),'left','Esc cancelled');
+    // The middle dead zone keeps the dock (the preview shows the current place, no edge).
+    await headerDrag(page,{x:(left+vw)/2+100,y:450},{release:false});
+    assert.equal(await preview.getAttribute('data-dock'),'left');
+    assert.equal(await edge.isHidden(),true);
+    await page.mouse.up();
+    assert.equal(await dockOf(),'left','dead zone keeps the dock');
+    // Releasing outside the content area (over the sidebar) cancels.
+    await headerDrag(page,{x:40,y:450},{release:false});
+    assert.equal(await preview.isHidden(),true);
+    await page.mouse.up();
+    assert.equal(await dockOf(),'left');
+    // No terminal selection or clipboard write came from the drags.
+    assert.equal(await page.evaluate(()=>window.BoardTerminal.term.hasSelection()),false);
+    assert.equal(await clipboard(page),'sentinel-drag');
+    assert.equal(await page.evaluate(()=>window.getSelection().toString()),'');
+
+    // Current dock: kept on reload in this tab; a new tab opens at the default; a new default does not move this tab.
+    await headerDrag(page,targets.right);
+    assert.equal(await dockOf(),'right');
+    await page.reload();
+    await openReport(page,base);
+    await page.locator('#term-drawer').waitFor();
+    assert.equal(await dockOf(),'right','reload keeps the current dock');
+    const fresh=await sibling(page);
+    await openReport(fresh,base);   // the drawer opens by itself (open is remembered)
+    await fresh.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
+    assert.equal(await fresh.locator('#term-drawer').getAttribute('data-dock'),'bottom','a new tab opens at the default');
+    const settings=await sibling(page);
+    await settings.goto(`${base}/#/settings`);
+    await settings.locator('[data-set-dock="top"]').click();
+    await page.waitForFunction(()=>window.BoardTerminal.prefs.dock==='top');
+    await fresh.waitForFunction(()=>window.BoardTerminal.prefs.dock==='top');
+    assert.equal(await dockOf(),'right','the dragged tab stays');
+    assert.equal(await fresh.locator('#term-drawer').getAttribute('data-dock'),'bottom','an open drawer in another tab stays');
+    const another=await sibling(page);
+    await openReport(another,base);   // the drawer opens by itself (open is remembered)
+    await another.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:20000});
+    assert.equal(await another.locator('#term-drawer').getAttribute('data-dock'),'top','new tabs use the new default');
+    assert.deepEqual([...page.errors,...fresh.errors,...settings.errors,...another.errors],[]);
+  });
+});
+
+test('drag to dock: narrow windows offer no side zones; phones have no grip and no drag',{timeout:180000},async()=>{
+  await withFixture('tailnet',async({base,newPage})=>{
+    const page=await newPage({viewport:{width:1024,height:800}});
+    await openReport(page,base);
+    await openDrawer(page);
+    const vw=await page.evaluate(()=>document.documentElement.clientWidth);
+    await headerDrag(page,{x:vw-12,y:400},{release:false});
+    assert.equal(await page.locator('[data-term-drop-edge]').isHidden(),true,'no right zone');
+    assert.equal(await page.locator('[data-term-drop-preview]').getAttribute('data-dock'),'bottom');
+    await page.mouse.up();
+    assert.equal(await page.locator('#term-drawer').getAttribute('data-dock'),'bottom');
+    await headerDrag(page,{x:(vw+232)/2,y:12},{release:false});
+    assert.equal(await page.locator('[data-term-drop-edge]').getAttribute('data-edge'),'top','top is still offered');
+    await page.keyboard.press('Escape');await page.mouse.up();
+    assert.deepEqual(page.errors,[]);
+    const phone=await newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true,deviceScaleFactor:2});
+    await openReport(phone,base);
+    await openDrawer(phone);
+    assert.equal(await phone.locator('#term-drawer .term-grip').isHidden(),true,'no grip on phones');
+    const t=await phone.locator('#term-drawer .term-title').boundingBox();
+    await phone.mouse.move(t.x+5,t.y+5);await phone.mouse.down();await phone.mouse.move(380,40,{steps:6});
+    assert.equal(await phone.locator('[data-term-drop-preview]').count(),0,'no drag preview on phones');
+    await phone.mouse.up();
+    const pb=await phone.locator('#term-drawer').boundingBox();
+    assert.equal(Math.round(pb.x),0);assert.equal(Math.round(pb.y+pb.height),844);
+    assert.equal(await phone.locator('#term-drawer').getAttribute('data-dock'),'bottom');
+    assert.deepEqual(phone.errors,[]);
   });
 });

@@ -29,13 +29,35 @@
 .term-drawer[data-dock="right"] .term-resize{left:0}
 .term-drawer[data-dock="left"] .term-resize::after,.term-drawer[data-dock="right"] .term-resize::after{left:2px;top:50%;width:4px;height:40px;margin:-20px 0 0}
 .term-drawer[data-dock="top"] .term-head,.term-drawer[data-dock="left"] .term-head,.term-drawer[data-dock="right"] .term-head,.term-drawer[data-dock="max"] .term-head{padding-top:var(--space-2)}
-.term-head{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2) var(--space-3);padding:0 var(--space-4) var(--space-2)}
+.term-head{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2) var(--space-3);padding:0 var(--space-4) var(--space-2);cursor:grab;-webkit-user-select:none;user-select:none;touch-action:none}
+/* Header rows: [grip, title, status, slots, dock picker] and [session text, actions].
+   Wide docks flatten both rows into one line (display:contents plus order);
+   side docks keep two lines with icon-only buttons. */
+.term-row{display:contents}
+.term-grip{display:inline-flex;align-items:center;color:var(--text-3);margin-right:-4px}
+.term-sub{order:1;margin-right:auto;display:inline-flex;align-items:center;gap:var(--space-3);min-width:0;color:var(--text-2);font-size:var(--text-sm)}
+.term-slot{order:2}
+.term-dock{order:3}
+.term-actions{order:4}
+.term-title-text{white-space:nowrap}
+.term-actions .button{gap:6px}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-head{gap:var(--space-1)}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-row{display:flex;align-items:center;gap:var(--space-2);width:100%;min-width:0}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-slots{display:inline-flex;align-items:center;gap:var(--space-2);margin-left:auto}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-sub{flex:1;overflow:hidden;margin-right:0}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-sub>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-actions{flex:none;flex-wrap:nowrap}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-actions .button{padding-inline:8px}
+.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-title-text,.term-drawer:is([data-dock="left"],[data-dock="right"]) .term-actions .button:not(.armed) .term-btn-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+/* Drag to dock: preview of where the drawer lands and the highlighted target edge. */
+.term-dragging,.term-dragging *{cursor:grabbing!important;-webkit-user-select:none!important;user-select:none!important}
+.term-drop-preview{position:fixed;z-index:45;pointer-events:none;box-sizing:border-box;border:2px dashed var(--accent);border-radius:var(--radius-lg);background:color-mix(in srgb,var(--accent) 14%,transparent);transition:left var(--dur) var(--ease),top var(--dur) var(--ease),width var(--dur) var(--ease),height var(--dur) var(--ease)}
+.term-drop-edge{position:fixed;z-index:46;pointer-events:none;background:var(--accent);border-radius:var(--radius-pill)}
 .term-title,.term-pill,.term-flash,.term-steps{white-space:nowrap}
 .term-flash{font-size:var(--text-xs);font-weight:600;color:var(--success)}
 .term-flash[data-tone="warn"]{color:var(--warning)}
 .term-flash::before{content:"\f00c";font-family:FontAwesome;margin-right:4px}
 .term-flash[data-tone="warn"]::before{content:"\f071"}
-.term-tools{margin-left:auto;display:inline-flex;align-items:center;flex-wrap:wrap;gap:var(--space-2) var(--space-3)}
 .term-slots{display:contents}
 .term-slot{display:inline-flex;align-items:center;gap:var(--space-2)}
 .term-slot:empty{display:none}
@@ -51,9 +73,9 @@
 .term-pill[data-state="connected"]{color:var(--success);background:var(--success-soft)}
 .term-pill[data-state="connecting"],.term-pill[data-state="reconnecting"]{color:var(--info);background:var(--info-soft)}
 .term-pill[data-state="signin"],.term-pill[data-state="unavailable"],.term-pill[data-state="error"]{color:var(--warning);background:var(--warning-soft)}
-.term-meta{min-width:0}
+.term-meta{min-width:0;white-space:nowrap}
 .term-steps{font-size:var(--text-sm);font-weight:600;color:var(--text-2)}
-.term-actions{display:inline-flex;gap:var(--space-2);flex-wrap:wrap}
+.term-actions{display:inline-flex;align-items:center;gap:var(--space-2);flex-wrap:wrap}
 .term-actions .button{white-space:nowrap}
 .term-note{flex:none;padding:0 var(--space-4) var(--space-2)}
 .term-note[hidden]{display:none}
@@ -74,9 +96,11 @@
 .term-copy-holder{position:fixed;left:-10000px;top:0;white-space:pre-wrap}
 @media (max-width:700px){
   .term-drawer{left:0 !important;right:0;border-radius:var(--radius-lg) var(--radius-lg) 0 0}
-  .term-head{padding:0 var(--space-3) var(--space-2)}
-  .term-tools{margin-left:0;width:100%}
-  .term-dock{display:none}
+  .term-head{padding:0 var(--space-3) var(--space-2);cursor:auto;touch-action:auto}
+  .term-grip,.term-dock{display:none}
+  .term-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2) var(--space-3);width:100%}
+  .term-sub{flex-wrap:wrap;margin-right:0}
+  .term-meta{white-space:normal}
   .term-actions{width:100%}
   .term-actions .button{flex:1}
   .term-actions [data-term-close]{flex:none}

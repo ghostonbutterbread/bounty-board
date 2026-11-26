@@ -32,7 +32,8 @@
   let mount = null;
   const blocked = () => mount?.ok === false;
   // -- preferences (localStorage, per browser) ---------------------------------
-  // {open, height, width, dock, maximized, copyOnSelect, ctrlCCopy, ctrlVPaste, shortcut}.
+  // {open, height, width, dock, copyOnSelect, ctrlCCopy, ctrlVPaste, shortcut}; dock is the
+  // default position (Settings). The current position of this tab is in sessionStorage.
   // open and height keep their original meaning; every field is validated on
   // read, so old or corrupt values fall back to the defaults.
   const DOCKS = ['bottom', 'top', 'left', 'right'];
@@ -87,13 +88,23 @@
     const flag = (v, fallback) => (typeof v === 'boolean' ? v : fallback);
     const s = raw.shortcut;
     return {open: raw.open === true, height: size(raw.height, defaultHeight), width: size(raw.width, null), dock: DOCKS.includes(raw.dock) ? raw.dock : 'bottom',
-      maximized: raw.maximized === true, copyOnSelect: flag(raw.copyOnSelect, true), ctrlCCopy: flag(raw.ctrlCCopy, true), ctrlVPaste: flag(raw.ctrlVPaste, true),
+      copyOnSelect: flag(raw.copyOnSelect, true), ctrlCCopy: flag(raw.ctrlCCopy, true), ctrlVPaste: flag(raw.ctrlVPaste, true),
       shortcut: shortcutProblem(s) ? {...DEFAULT_SHORTCUT} : {ctrl: !!s.ctrl, alt: !!s.alt, shift: !!s.shift, code: s.code}};
   }
   const prefs = cleanPrefs(readStored());
   // Unknown fields written by a newer Board are kept.
   const savePrefs = () => { try { localStorage.setItem(STORE, JSON.stringify({...readStored(), ...prefs})); } catch {} };
   const prefListeners = new Set();
+  // Current dock of this tab ({dock, maximized}), set by dragging the header or
+  // the dock picker. sessionStorage: a reload keeps it, a new tab starts at the
+  // default (prefs.dock). null until the tab moves the drawer.
+  const CURRENT = 'bounty-board-terminal-dock:v1';
+  let current = (() => {
+    try { const v = JSON.parse(sessionStorage.getItem(CURRENT) || 'null'); return v && DOCKS.includes(v.dock) ? {dock: v.dock, maximized: v.maximized === true} : null; } catch { return null; }
+  })();
+  const saveCurrent = () => { try { sessionStorage.setItem(CURRENT, JSON.stringify(current)); } catch {} };
+  const dockPref = () => current?.dock ?? prefs.dock;
+  const maxPref = () => current?.maximized === true;
 
   // -- extension points for other modules (window.BoardTerminal) ----------------
   // slot(name): a stable, initially empty element in the drawer header (hidden
@@ -185,6 +196,7 @@
   // newline here. A lone CR is still refused, and nothing is ever stripped.
   const unsafePaste = text => unsafeText(String(text).replace(/\r\n/g, '\n'));
   const PASTE_REFUSED = 'Paste refused: the clipboard text contains control characters.';
+  const MULTILINE_REFUSED = 'Multi-line text must be pasted with Ctrl+V.';
   const INSERT_TYPES = new Set(['insertText', 'insertFromPaste', 'insertReplacementText', 'insertFromDrop']);
 
   // -- transport -------------------------------------------------------------
@@ -257,7 +269,7 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.type === 'input' && event.target?.value != null) event.target.value = '';
-      note(PASTE_REFUSED);
+      note(unsafePaste(text) ? PASTE_REFUSED : MULTILINE_REFUSED);
     };
     screenEl.addEventListener('beforeinput', guardInput, true);
     screenEl.addEventListener('input', guardInput, true);
@@ -406,6 +418,7 @@
   ];
   const MAX_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const RESTORE_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M6 2.5V6H2.5M13.5 6H10V2.5M10 13.5V10h3.5M2.5 10H6v3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const GRIP_ICON = '<svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true" focusable="false"><g fill="currentColor"><circle cx="3" cy="4" r="1.2"/><circle cx="7" cy="4" r="1.2"/><circle cx="3" cy="8" r="1.2"/><circle cx="7" cy="8" r="1.2"/><circle cx="3" cy="12" r="1.2"/><circle cx="7" cy="12" r="1.2"/></g></svg>';
   const shortcutText = () => shortcutLabel(prefs.shortcut);
 
   function buildDrawer() {
@@ -415,21 +428,23 @@
     drawer.setAttribute('aria-label', 'Sandbox terminal');
     drawer.hidden = true;
     drawer.innerHTML = `<div class="term-resize" data-term-resize role="separator" aria-orientation="horizontal" aria-label="Resize terminal" tabindex="0"></div>
-      <div class="term-head">
-        <span class="term-title"><i class="fa fa-terminal" aria-hidden="true"></i> Sandbox</span>
-        <span class="term-pill" data-term-status role="status" aria-live="polite"></span>
-        <span class="term-flash" data-term-flash role="status" aria-live="polite" hidden></span>
-        <span class="hint term-meta" data-term-meta></span>
-        <span class="term-steps" data-term-steps></span>
-        <span class="term-tools">
+      <div class="term-head" data-term-head>
+        <div class="term-row">
+          <span class="term-grip" role="img" aria-label="Drag to move the terminal" title="Drag to move the terminal">${GRIP_ICON}</span>
+          <span class="term-title"><i class="fa fa-terminal" aria-hidden="true"></i><span class="term-title-text">Sandbox</span></span>
+          <span class="term-pill" data-term-status role="status" aria-live="polite"></span>
+          <span class="term-flash" data-term-flash role="status" aria-live="polite" hidden></span>
           <span class="term-slots" data-term-slots></span>
           <span class="term-dock" role="group" aria-label="Terminal position" data-term-dock>${DOCK_BUTTONS.map(([dock, label, svg]) => `<button type="button" class="term-dock-btn" data-dock="${dock}" aria-pressed="false" aria-label="${label}" title="${label}">${svg}</button>`).join('')}<span class="term-dock-sep" aria-hidden="true"></span><button type="button" class="term-dock-btn" data-dock-max aria-pressed="false" aria-label="Maximize" title="Maximize">${MAX_ICON}</button></span>
+        </div>
+        <div class="term-row term-row-2">
+          <span class="term-sub" data-term-sub><span class="term-meta" data-term-meta></span><span class="term-steps" data-term-steps></span></span>
           <span class="term-actions">
-            <button type="button" class="button sm" data-term-reset>Reset sandbox</button>
-            <button type="button" class="button sm" data-term-evidence>Save output as evidence</button>
+            <button type="button" class="button sm" data-term-reset title="Reset sandbox"><i class="fa fa-undo" aria-hidden="true"></i><span class="term-btn-label">Reset sandbox</span></button>
+            <button type="button" class="button sm" data-term-evidence title="Save output as evidence"><i class="fa fa-floppy-o" aria-hidden="true"></i><span class="term-btn-label">Save output as evidence</span></button>
             <button type="button" class="button sm ghost icon-only" data-term-close aria-label="Close terminal"><i class="fa fa-times" aria-hidden="true"></i></button>
           </span>
-        </span>
+        </div>
       </div>
       <div class="term-note hint" data-term-note role="status" hidden></div>
       <div class="term-body">
@@ -441,6 +456,7 @@
     const slotHost = drawer.querySelector('[data-term-slots]');
     slots.forEach(el => slotHost.appendChild(el));
     drawer.addEventListener('click', onDrawerClick);
+    bindDrag(drawer.querySelector('[data-term-head]'));
     const handle = drawer.querySelector('[data-term-resize]');
     handle.addEventListener('pointerdown', event => {
       event.preventDefault();
@@ -478,8 +494,8 @@
     return window.innerWidth - (sidebar ? Math.max(0, Math.round(sidebar.getBoundingClientRect().right)) : 0);
   }
   const sideFits = () => columnWidth() - SIDE_CONTENT >= SIDE_MIN;
-  const currentDock = () => (narrow() || (!vertical(prefs.dock) && !sideFits()) ? 'bottom' : prefs.dock);
-  const isMaximized = () => !narrow() && prefs.maximized;
+  const currentDock = () => (narrow() || (!vertical(dockPref()) && !sideFits()) ? 'bottom' : dockPref());
+  const isMaximized = () => !narrow() && maxPref();
   const vertical = dock => dock === 'top' || dock === 'bottom';
   // The sidebar stays visible: docks and maximize cover only the content column.
   // EasyMDE's full-screen modes cover the sidebar too, so the drawer spans the window then.
@@ -529,10 +545,10 @@
   }
   function paintDock() {
     if (!drawer) return;
-    const max = !!prefs.maximized;
+    const max = maxPref();
     const fits = sideFits();
     drawer.querySelectorAll('[data-dock]').forEach(b => {
-      b.setAttribute('aria-pressed', String(b.dataset.dock === prefs.dock));
+      b.setAttribute('aria-pressed', String(b.dataset.dock === dockPref()));
       const label = DOCK_BUTTONS.find(([dock]) => dock === b.dataset.dock)[1];
       b.title = !fits && !vertical(b.dataset.dock) ? `${label} (needs a wider window; using the bottom dock)` : label;
     });
@@ -542,13 +558,117 @@
     maxButton.setAttribute('aria-label', maxButton.title);
     maxButton.innerHTML = max ? RESTORE_ICON : MAX_ICON;
   }
-  // The dock picker and Settings share one stored choice; picking a side leaves maximize.
+  // Dragging and the dock picker move this tab's drawer (current dock); picking a side leaves maximize.
   function setDock(dock) {
     if (!DOCKS.includes(dock)) return;
-    prefs.dock = dock; prefs.maximized = false;
+    current = {dock, maximized: false};
+    saveCurrent(); layout();
+  }
+  function setMaximized(value) { current = {dock: dockPref(), maximized: !!value}; saveCurrent(); layout(); }
+  // Settings: the default dock, where the drawer opens in a new tab. It moves
+  // this tab's drawer only while the tab has not moved it.
+  function setDefaultDock(dock) {
+    if (!DOCKS.includes(dock)) return;
+    prefs.dock = dock;
     savePrefs(); layout(); notifyPrefs();
   }
-  function setMaximized(value) { prefs.maximized = !!value; savePrefs(); layout(); notifyPrefs(); }
+
+  // -- drag to dock ----------------------------------------------------------------
+  // Pressing the header (not its buttons, the picker or the slots) and moving
+  // DRAG_START px starts a drag. The nearest edge of the content area within
+  // DEAD of its size is the target (side edges only when a side dock fits); the
+  // middle keeps the current dock. Releasing outside the content area or Esc
+  // cancels. Maximize stays a button.
+  const DRAG_START = 6, DEAD = 0.3;
+  let drag = null, dropPreview = null, dropEdge = null;
+  function dropArea() { return {left: contentLeft(), top: 0, right: document.documentElement.clientWidth, bottom: window.innerHeight}; }
+  function dropTarget(x, y) {
+    const a = dropArea();
+    if (x < a.left || x > a.right || y < a.top || y > a.bottom) return null;
+    const w = a.right - a.left, h = a.bottom - a.top;
+    const dist = {left: (x - a.left) / w, right: (a.right - x) / w, top: (y - a.top) / h, bottom: (a.bottom - y) / h};
+    const sides = sideFits() ? DOCKS : ['bottom', 'top'];
+    const near = sides.reduce((best, side) => (dist[side] < dist[best] ? side : best));
+    return dist[near] > DEAD ? {dock: currentDock(), edge: null} : {dock: near, edge: near};
+  }
+  function landingRect(target) {
+    const a = dropArea(), w = a.right - a.left, h = a.bottom - a.top, dock = target.dock;
+    if (!target.edge && isMaximized()) return {left: a.left, top: a.top, width: w, height: h};
+    const size = clampSize(dock, vertical(dock) ? prefs.height : sideWidth());
+    return {left: dock === 'right' ? a.right - size : a.left, top: dock === 'bottom' ? a.bottom - size : a.top,
+      width: vertical(dock) ? w : size, height: vertical(dock) ? size : h};
+  }
+  const place = (el, r) => Object.assign(el.style, {left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`});
+  function beginDrag() {
+    drag.active = true;
+    document.documentElement.classList.add('term-dragging');
+    if (!dropPreview) {
+      dropPreview = Object.assign(document.createElement('div'), {className: 'term-drop-preview', hidden: true});
+      dropPreview.dataset.termDropPreview = '';
+      dropEdge = Object.assign(document.createElement('div'), {className: 'term-drop-edge', hidden: true});
+      dropEdge.dataset.termDropEdge = '';
+      document.body.append(dropPreview, dropEdge);
+    }
+    window.addEventListener('keydown', onDragKey, true);
+  }
+  function updateDrag(x, y) {
+    const target = dropTarget(x, y);
+    drag.target = target;
+    const appearing = dropPreview.hidden;
+    dropPreview.hidden = !target;
+    dropEdge.hidden = !target?.edge;
+    if (!target) return;
+    dropPreview.dataset.dock = target.edge || (isMaximized() ? 'max' : target.dock);
+    // Appear in place; animate only between targets.
+    if (appearing) dropPreview.style.transition = 'none';
+    place(dropPreview, landingRect(target));
+    if (appearing) { void dropPreview.offsetWidth; dropPreview.style.transition = ''; }
+    if (target.edge) {
+      const a = dropArea(), t = 4;
+      dropEdge.dataset.edge = target.edge;
+      place(dropEdge, {left: target.edge === 'right' ? a.right - t : a.left, top: target.edge === 'bottom' ? a.bottom - t : a.top,
+        width: vertical(target.edge) ? a.right - a.left : t, height: vertical(target.edge) ? t : a.bottom - a.top});
+    }
+  }
+  function endDrag() {
+    if (!drag) return;
+    const head = drawer?.querySelector('[data-term-head]');
+    if (head?.hasPointerCapture?.(drag.id)) head.releasePointerCapture(drag.id);
+    drag = null;
+    document.documentElement.classList.remove('term-dragging');
+    if (dropPreview) { dropPreview.hidden = true; dropEdge.hidden = true; }
+    window.removeEventListener('keydown', onDragKey, true);
+  }
+  function onDragKey(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopPropagation();
+    endDrag();
+  }
+  function bindDrag(head) {
+    head.addEventListener('pointerdown', event => {
+      if (narrow() || drag || !event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
+      if (event.target.closest('button, a, input, select, textarea, label, [data-term-dock], [data-term-slots]')) return;
+      event.preventDefault();   // focus stays where it was (the terminal) and nothing is selected
+      head.setPointerCapture(event.pointerId);
+      drag = {id: event.pointerId, x0: event.clientX, y0: event.clientY, active: false, target: null};
+    });
+    head.addEventListener('pointermove', event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      if (!drag.active) {
+        if (Math.hypot(event.clientX - drag.x0, event.clientY - drag.y0) < DRAG_START) return;
+        beginDrag();
+      }
+      updateDrag(event.clientX, event.clientY);
+    });
+    head.addEventListener('pointerup', event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const {active, target} = drag;
+      endDrag();
+      if (active && target?.edge && (target.edge !== currentDock() || isMaximized())) setDock(target.edge);
+    });
+    head.addEventListener('pointercancel', endDrag);
+    head.addEventListener('lostpointercapture', endDrag);
+  }
 
   function showDrawer(visible) {
     if (!drawer) buildDrawer();
@@ -595,6 +715,8 @@
   window.addEventListener('storage', event => {
     if (event.key !== STORE && event.key !== null) return;
     const {open, ...next} = cleanPrefs(readStored());
+    // A new default never moves an open drawer that follows it: pin its position first.
+    if (!current && drawer && !drawer.hidden && next.dock !== prefs.dock) { current = {dock: prefs.dock, maximized: false}; saveCurrent(); }
     Object.assign(prefs, next);
     layout(); paintTitles(); notifyPrefs();
   });
@@ -612,6 +734,8 @@
       if (info.folder) meta.push(`Folder ${info.folder}`);
     }
     drawer.querySelector('[data-term-meta]').textContent = meta.join(' · ');
+    const sub = drawer.querySelector('[data-term-sub]');
+    sub.title = [meta.join(' · '), drawer.querySelector('[data-term-steps]').textContent].filter(Boolean).join(' · ');
     drawer.querySelector('[data-term-signin]').hidden = status !== 'signin';
     drawer.querySelector('[data-term-down]').hidden = status !== 'unavailable';
     drawer.querySelector('[data-term-screen]').hidden = status === 'signin' || status === 'unavailable';
@@ -621,20 +745,26 @@
     drawer.querySelector('[data-term-evidence]').disabled = status !== 'connected';
   }
 
+  // The armed reset shows its label even where the buttons are icon-only.
+  function resetLabel(button, armed) {
+    button.querySelector('.term-btn-label').textContent = armed ? 'Confirm reset' : 'Reset sandbox';
+    button.title = armed ? 'Confirm reset' : 'Reset sandbox';
+    button.classList.toggle('armed', armed);
+  }
   async function onDrawerClick(event) {
     const target = event.target.closest('button,a');
     if (!target) return;
     if (target.matches('[data-term-close]')) toggle(false);
     else if (target.matches('[data-dock]')) setDock(target.dataset.dock);
-    else if (target.matches('[data-dock-max]')) setMaximized(!prefs.maximized);
+    else if (target.matches('[data-dock-max]')) setMaximized(!maxPref());
     else if (target.matches('[data-term-retry]')) { retry = 0; connect(); }
     else if (target.matches('[data-term-reset]')) {
       if (!resetArmed) {
-        target.textContent = 'Confirm reset';
-        resetArmed = setTimeout(() => { resetArmed = null; target.textContent = 'Reset sandbox'; }, 5000);
+        resetLabel(target, true);
+        resetArmed = setTimeout(() => { resetArmed = null; resetLabel(target, false); }, 5000);
         return;
       }
-      clearTimeout(resetArmed); resetArmed = null; target.textContent = 'Reset sandbox';
+      clearTimeout(resetArmed); resetArmed = null; resetLabel(target, false);
       target.disabled = true; note('Resetting the sandbox.');
       try { await api('api/reset', sel); note('Sandbox reset. The shell restarted in the report folder.'); }
       catch (error) { note(`Reset failed: ${error.message}`); }
@@ -875,7 +1005,7 @@
     host.innerHTML = `${SETTING_TOGGLES.map(([key, label, hint]) => `<div class="set-row"><div class="set-text"><label for="${id(key)}">${esc(label)}</label><p class="hint" id="${id(key)}-hint">${esc(hint)}</p></div><input type="checkbox" role="switch" class="set-switch" id="${id(key)}" data-term-pref="${key}" aria-describedby="${id(key)}-hint"></div>`).join('')}
       <div class="set-row"><div class="set-text"><span class="set-label" id="${id('shortcut')}-label">Toggle shortcut</span><p class="hint" id="${id('shortcut')}-hint" data-shortcut-msg role="status" aria-live="polite"></p></div>
         <div class="set-controls"><button type="button" class="button sm set-recorder" data-shortcut-recorder aria-labelledby="${id('shortcut')}-label ${id('shortcut')}-key" aria-describedby="${id('shortcut')}-hint"><span id="${id('shortcut')}-key" data-shortcut-key></span></button><button type="button" class="button sm ghost" data-shortcut-reset>Reset to Ctrl+E</button></div></div>
-      <div class="set-row"><div class="set-text"><span class="set-label" id="${id('dock')}-label">Default dock</span><p class="hint">The picker in the terminal header changes it too. Phones always use a bottom sheet.</p></div>
+      <div class="set-row"><div class="set-text"><span class="set-label" id="${id('dock')}-label">Default dock position</span><p class="hint">Where the terminal opens. Drag the terminal by its header to move it.</p></div>
         <div class="segmented" role="group" aria-labelledby="${id('dock')}-label">${['bottom', 'top', 'left', 'right'].map(d => `<button type="button" data-set-dock="${d}" aria-pressed="false">${d[0].toUpperCase()}${d.slice(1)}</button>`).join('')}</div></div>`;
     const recorder = host.querySelector('[data-shortcut-recorder]'), message = host.querySelector('[data-shortcut-msg]');
     const idleHint = () => `Opens and closes the terminal of the open report. Ctrl+\` also works.`;
@@ -905,7 +1035,7 @@
         if (recording) { recorder.querySelector('[data-shortcut-key]').textContent = 'Press keys'; message.textContent = 'Press Ctrl or Alt (and Shift if you like) with one key. Esc cancels.'; sync(); }
         else stop();
       } else if (target.matches('[data-shortcut-reset]')) saveShortcut({...DEFAULT_SHORTCUT});
-      else if (target.dataset.setDock) setDock(target.dataset.setDock);
+      else if (target.dataset.setDock) setDefaultDock(target.dataset.setDock);
     });
     recorder.addEventListener('keydown', event => {
       if (!recording || event.key === 'Tab') return;
@@ -928,6 +1058,6 @@
   // (documented in docs/integrations/terminal-ux.md); the rest is for synthetic
   // browser tests and diagnostics only.
   window.BoardTerminal = {blockKeys, sha256hex, commandText, unsafeText, unsafePaste, shortcutProblem, shortcutLabel,
-    get status() { return status; }, get checks() { return checks; }, get term() { return term; }, get prefs() { return {...prefs, shortcut: {...prefs.shortcut}}; },
+    get status() { return status; }, get checks() { return checks; }, get term() { return term; }, get prefs() { return {...prefs, shortcut: {...prefs.shortcut}}; }, get dock() { return {current: currentDock(), maximized: isMaximized(), moved: !!current}; },
     slot, on, off, selector: () => (sel ? {...sel} : null), session: () => (sel && info && drawer && !drawer.hidden ? info : null)};
 })();
