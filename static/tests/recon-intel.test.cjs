@@ -52,6 +52,32 @@ test('depth gap ranks surface per test run', () => {
   assert.ok(ri.depthGap(big) > ri.depthGap(tested));
 });
 
+test('scope: oos hash key, hiding, copy gating and in-scope ranking', () => {
+  assert.equal(ri.parseQuery('oos=1').oos, true);
+  assert.equal(ri.parseQuery('oos=yes').oos, false);              // unknown values fall back to hiding
+  assert.equal(ri.buildQuery({...ri.parseQuery(''), oos: true}), 'oos=1');
+  assert.equal(ri.parseQuery(ri.buildQuery(ri.parseQuery('p=web_bounty%2Fa&lane=web&oos=1'))).oos, true);
+  const items = [{scope: {state: 'in'}}, {scope: {state: 'out'}}, {scope: {state: 'partial'}}, {scope: null}, {}];
+  assert.equal(ri.visible(items, false).length, 4);
+  assert.equal(ri.visible(items, true).length, 5);
+  assert.equal(ri.copyBlockReason({state: 'out'}, 'checked'), 'out of scope');
+  assert.equal(ri.copyBlockReason({state: 'unchecked', reason: 'scope check failed: x'}, 'failed'), 'scope not checked');
+  assert.equal(ri.copyBlockReason({state: 'unchecked', reason: 'scope check pending'}, 'pending'), 'scope not checked');
+  assert.equal(ri.copyBlockReason({state: 'unchecked', reason: 'no scope on file'}, 'no_scope'), null); // open scope
+  assert.equal(ri.copyBlockReason({state: 'partial'}, 'checked'), null);
+  assert.equal(ri.copyBlockReason(null, 'checked'), null);
+  // Hunt-next parameters: an out-of-scope example blocks only the example copies; bbh next stays usable.
+  assert.deepEqual(ri.paramBlocks({state: 'out'}, 'checked'), {example: 'example out of scope', next: null});
+  assert.deepEqual(ri.paramBlocks({state: 'in'}, 'checked'), {example: null, next: null});
+  assert.deepEqual(ri.paramBlocks({state: 'unchecked', reason: 'scope check failed: x'}, 'failed'), {example: 'scope not checked', next: 'scope not checked'});
+  assert.deepEqual(ri.paramBlocks({state: 'unchecked', reason: 'no scope on file'}, 'no_scope'), {example: null, next: null});
+  // Out-of-scope surface does not count toward the dashboard rank.
+  const mostlyOos = {urls: {value: 1000}, in_scope_urls: {value: 10, approximate: true}, js_files: {value: 0}, test_runs: {value: 0}};
+  const small = {urls: {value: 200}, js_files: {value: 0}, test_runs: {value: 0}};
+  assert.ok(ri.depthGap(small) > ri.depthGap(mostlyOos));
+  assert.equal(ri.metric(ri.inScopeUrls({urls: {value: 5}, in_scope_urls: null})), 5);
+});
+
 // Review 9 blocker 2: nothing with terminal-active or invisible characters reaches the clipboard.
 test('command builders refuse control, C1, bidi and invisible characters', () => {
   const hostile = {

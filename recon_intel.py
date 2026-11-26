@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import threading
 import time
 from collections import Counter, OrderedDict
@@ -466,6 +467,7 @@ def url_index_summary(path, budget=QUERY_BUDGET, detail=True, exact_limit=EXACT_
         # --- hosts ---------------------------------------------------------
         hosts, complete = skip_scan(db, 'urls', 'host', SKIP_SCAN_LIMIT, budget)
         result['hosts'] = number(len(hosts), exact=complete, method=None if complete else 'skip_scan_partial')
+        result['host_list'] = [c.host(h) for h in hosts]  # scope check targets (scope_check.py); not sent to clients
         if not complete:
             c.approximate = True
         # --- per-host, routes, parameterized urls (program view only) ------
@@ -920,6 +922,7 @@ def board_summary(lane, read_file, ledger_fn, coverage_fn, map_fn):
     warnings = []
     findings = ledger_fn(lane, warnings)
     hosts = Counter()
+    host_fids = {}
     if findings is None:
         out['errors']['findings'] = {'code': 'missing' if 'ledger_missing' in warnings else 'invalid'}
     else:
@@ -931,6 +934,9 @@ def board_summary(lane, read_file, ledger_fn, coverage_fn, map_fn):
                 host = next((h for h in (host_of(entry.get(k)) for k in ('asset', 'url', 'endpoint')) if h), None)
                 if host:
                     hosts[text(host)] += 1
+                    fid = entry.get('fid')
+                    if isinstance(fid, str) and len(host_fids.setdefault(text(host), [])) < LIST_LIMIT:
+                        host_fids[text(host)].append(text(fid, 40))
         except (OSError, ValueError, UnicodeError, RecursionError):
             pass
         live = [f for f in findings if str(f.get('status') or '').lower() not in ('archive', 'archived')]
@@ -941,6 +947,7 @@ def board_summary(lane, read_file, ledger_fn, coverage_fn, map_fn):
         out['findings'] = {'total': len(live), 'archived': len(findings) - len(live),
                            'by_severity': dict(sev), 'by_class': dict(cls.most_common(30)), 'by_category': dict(cat.most_common(30)),
                            'by_status': dict(status), 'by_host': dict(hosts.most_common(HOST_LIMIT)),
+                           'by_host_fids': {h: host_fids.get(h, []) for h, _ in hosts.most_common(HOST_LIMIT)},
                            'last_seen': max((e for e in (to_epoch(f.get('last_seen')) for f in findings) if e), default=None)}
     warnings = []
     cov = coverage_fn(lane, warnings)
@@ -971,7 +978,7 @@ class ReconIntel:
 
     def __init__(self, root_fn, discover_fn, read_file, ledger_fn, coverage_fn, map_fn, artifact_root=None,
                  query_budget=QUERY_BUDGET, refresh_interval=REFRESH_INTERVAL, exact_limit=EXACT_ROW_LIMIT,
-                 sample_windows_n=SAMPLE_WINDOWS, sample_rows=SAMPLE_WINDOW_ROWS, start=True):
+                 sample_windows_n=SAMPLE_WINDOWS, sample_rows=SAMPLE_WINDOW_ROWS, start=True, scope=None):
         self.root_fn = root_fn
         self.discover_fn = discover_fn
         self.read_file = read_file
@@ -981,6 +988,7 @@ class ReconIntel:
         self.refresh_interval = refresh_interval
         self.exact_limit = exact_limit
         self.sample_windows_n, self.sample_rows = sample_windows_n, sample_rows
+        self.scope = scope           # scope_check.ScopeChecker or None (no scope columns)
         self.cache = OrderedDict()   # (kind, path) -> {'sig', 'result', 'error', 'computed_at', 'level', 'elapsed'}
         self.lock = threading.Lock()
         self.wake = threading.Condition(self.lock)
@@ -988,6 +996,9 @@ class ReconIntel:
         self.running = None
         self.stopped = False
         self.lanes_cache = (0.0, None)
+        self.url_slots = threading.BoundedSemaphore(2)
+        self.mark_debounce = MARK_REFRESH_DEBOUNCE
+        self.refresh_last, self.refresh_timers = {}, {}
         self.thread = threading.Thread(target=self._worker, name='recon-intel', daemon=True)
         if start:
             self.thread.start()
@@ -1084,6 +1095,14 @@ class ReconIntel:
                 job, path = self.queue.popitem(last=False)
                 self.running = job
             kind, _, level = job
+            if kind == 'scope':  # one classify call per program per pass (scope_check.py)
+                try:
+                    self.scope.classify(path['program'], path['targets'])
+                except Exception as exc:  # keep the worker alive
+                    print(f'bounty-board: scope pass failed: {type(exc).__name__}', file=sys.stderr, flush=True)
+                with self.lock:
+                    self.running = None
+                continue
             started = time.monotonic()
             try:
                 result, error, sig = self._compute(kind, Path(path), level)
@@ -1190,6 +1209,21 @@ class ReconIntel:
             lane_path / 'ledgers' / 'surface_coverage.sqlite-wal', lane_path / 'recon' / 'maps' / 'map.jsonl'))
         return sources
 
+    # -- scope (scope_check.py) ----------------------------------------------
+    def _scope_lookup(self, program, targets, front):
+        """Cached verdicts; queues one background classify pass for targets that are due."""
+        verdicts, summary, missing = self.scope.lookup(program, targets)
+        if missing:
+            job = ('scope', program, 0)
+            with self.lock:
+                if self.running != job:
+                    queued = self.queue.get(job)
+                    self.queue[job] = {'program': program, 'targets': list(dict.fromkeys((queued or {}).get('targets', []) + missing))}
+                    if front:
+                        self.queue.move_to_end(job, last=False)
+                    self.wake.notify()
+        return verdicts, summary
+
     # -- API payloads --------------------------------------------------------
     def overview(self):
         rows = []
@@ -1197,7 +1231,15 @@ class ReconIntel:
         for family, program, lane, path in self.lanes():
             sources = self.lane_sources(family, program, lane, path, 0)
             partial |= any(s.get('state') == 'computing' or s.get('pending') for s in sources.values())
-            rows.append(headline_row(family, program, lane, sources))
+            row = headline_row(family, program, lane, sources)
+            if self.scope is not None:
+                from scope_check import overview_fields
+                url, js = _val(sources.get('url_index', {})), _val(sources.get('js', {}))
+                targets = list((url or {}).get('host_list') or []) + [h['host'] for h in ((js or {}).get('detail') or {}).get('hosts') or []]
+                verdicts, summary = self._scope_lookup(program, targets, front=False)
+                row.update(overview_fields(summary, verdicts, url, js))
+                partial |= summary['state'] == 'pending'
+            rows.append(row)
         return {'computed_at': time.time(), 'partial': partial, 'programs': rows,
                 'artifact_root': self.artifact_state(), 'budget': {'query_seconds': self.budget, 'exact_row_limit': self.exact_limit,
                                                                    'refresh_interval': self.refresh_interval}}
@@ -1214,14 +1256,135 @@ class ReconIntel:
                                                                            or (self.artifact_root and k[1].startswith(str(self.artifact_root / program / lane) + os.sep)))]:
                         self.cache[key]['computed_at'] = 0
                         self.cache[key]['sig'] = None
+            if self.scope is not None:
+                self.scope.forget(program)
         sources = self.lane_sources(family, program, lane, path, 1)
         partial = any(s.get('state') == 'computing' or s.get('pending') for s in sources.values())
+        verdicts, scope_summary = None, None
+        if self.scope is not None:
+            from scope_check import item_targets, program_summary
+            verdicts, scope_summary = self._scope_lookup(program, sorted(host_names(sources)) + item_targets(sources), front=True)
+            partial |= scope_summary['state'] == 'pending'
+        hosts = host_rows(sources, verdicts)
+        if self.scope is not None:
+            scope_summary = program_summary(scope_summary, hosts.pop('all_rows'))
+        from scope_check import annotate_sources
+        sources = annotate_sources(sources, verdicts)
         lanes = sorted({entry[2] for entry in self.lanes() if entry[1] == program})
         return {'computed_at': time.time(), 'partial': partial, 'family': family, 'program': escape_unsafe(program), 'lane': escape_unsafe(lane),
                 'unsafe_chars': is_unsafe(program, lane),
                 'lanes': [escape_unsafe(l) for l in lanes], 'lane_path': escape_unsafe(path), 'headline': headline_row(family, program, lane, sources),
-                'sources': sources, 'hosts': host_rows(sources), 'artifact_root': self.artifact_state(),
+                'sources': sources, 'hosts': hosts, 'scope_summary': scope_summary, 'artifact_root': self.artifact_state(),
                 'budget': {'query_seconds': self.budget, 'exact_row_limit': self.exact_limit, 'refresh_interval': self.refresh_interval}}
+
+    # -- URL browser and BBH mark support ----------------------------------
+    def lane_path(self, family, program, lane):
+        """The discovered lane directory, or None: never built from request values."""
+        match = [entry for entry in self.lanes() if entry[:3] == (family, program, lane)]
+        return match[0][3] if match else None
+
+    def url_index_path(self, family, program, lane):
+        """(lane directory, checked url_index.sqlite path); SourceError when unusable, None for an unknown lane."""
+        path = self.lane_path(family, program, lane)
+        if path is None:
+            return None
+        return path, checked_path(path, URL_INDEX_REL)
+
+    def _url_call(self, family, program, lane, fn):
+        found = None
+        try:
+            found = self.url_index_path(family, program, lane)
+        except SourceError as error:
+            return 200, {'error': {'code': error.code, **({'detail': error.detail} if error.detail else {})},
+                         'expected': escape_unsafe(Path(self.lane_path(family, program, lane), *URL_INDEX_REL))}
+        if found is None:
+            return 404, {'error': 'recon_lane_not_found'}
+        if not self.url_slots.acquire(blocking=False):
+            return 503, {'error': 'recon_busy', 'message': 'Another URL query is running. Retry in a moment.'}
+        try:
+            return 200, fn(found[1])
+        except SourceError as error:
+            return 200, {'error': {'code': error.code, **({'detail': error.detail} if error.detail else {})}}
+        except QueryTimeout:
+            return 200, {'error': {'code': 'timeout'}}
+        finally:
+            self.url_slots.release()
+
+    def annotate_urls(self, program, items):
+        """Scope verdicts for URL browser items, from the scope cache only (scope_check.py).
+
+        Missing URLs are queued as one background classify job for the program
+        (front of the queue); a request never starts BBH. Returns the summary, or
+        None without a scope checker. Items are fresh per request, so they are
+        annotated in place."""
+        if self.scope is None:
+            return None
+        targets = [item['url'] for item in items if isinstance(item, dict) and item.get('url')]
+        verdicts, summary = self._scope_lookup(program, list(dict.fromkeys(targets)), front=True)
+        for item in items:
+            if isinstance(item, dict):
+                item['scope'] = verdicts.get(item.get('url')) if item.get('url') else None
+        return summary
+
+    def urls(self, family, program, lane, filters, cursor=0, limit=50, order='desc'):
+        status, body = self._url_call(family, program, lane, lambda path: list_urls(path, filters, cursor, limit, self.budget, order))
+        if status == 200:
+            body['filters'] = {k: (text(v, 300) if isinstance(v, str) else v) for k, v in filters.items() if v}
+            if isinstance(body.get('items'), list):
+                body['scope_summary'] = self.annotate_urls(program, body['items'])
+        return status, body
+
+    def url(self, family, program, lane, url_id):
+        status, body = self._url_call(family, program, lane, lambda path: url_history(path, url_id, self.budget))
+        if status == 200 and body is None:
+            return 404, {'error': 'url_not_found'}
+        if status == 200 and isinstance(body, dict) and body.get('url'):
+            body['scope_summary'] = self.annotate_urls(program, [body])
+        return status, body
+
+    def refresh_url_index(self, family, program, lane):
+        """Recompute one lane's URL index summary after a write, ahead of the refresh interval.
+
+        Leading and trailing debounce per index: the first write recomputes at
+        once (a single mark shows up immediately); writes within MARK_REFRESH_DEBOUNCE
+        of the previous one (a bulk mark) coalesce into one recompute that runs
+        MARK_REFRESH_DEBOUNCE after the last write, so the summary is current
+        at the end without recomputing the full detail after every mark."""
+        try:
+            found = self.url_index_path(family, program, lane)
+        except SourceError:
+            return
+        if found is None:
+            return
+        path = found[1]
+        with self.lock:
+            now = time.monotonic()
+            last = self.refresh_last.get(str(path))
+            self.refresh_last[str(path)] = now
+            timer = self.refresh_timers.pop(str(path), None)
+            if timer is not None:
+                timer.cancel()
+            if last is None or now - last >= self.mark_debounce:
+                self._refresh_now(path)
+                return
+            timer = threading.Timer(self.mark_debounce, self._refresh_trailing, (path,))
+            timer.daemon = True
+            self.refresh_timers[str(path)] = timer
+            timer.start()
+
+    def _refresh_trailing(self, path):
+        with self.lock:
+            self.refresh_timers.pop(str(path), None)
+            if not self.stopped:
+                self._refresh_now(path)
+
+    def _refresh_now(self, path):
+        """Caller holds the lock."""
+        key = ('url_index', str(path))
+        if key in self.cache:
+            self.cache[key]['sig'] = None
+            self.cache[key]['computed_at'] = 0
+        self._schedule('url_index', path, 1, front=True)
 
     def wait_idle(self, timeout=30.0):
         """Test helper: block until the queue drains."""
@@ -1235,9 +1398,215 @@ class ReconIntel:
 
     def close(self):
         with self.lock:
+            for timer in self.refresh_timers.values():
+                timer.cancel()
+            self.refresh_timers.clear()
             self.stopped = True
             self.queue.clear()
             self.wake.notify_all()
+
+
+
+# ---------------------------------------------------------------------------
+# URL browser (GET /api/recon/urls, GET /api/recon/url)
+# ---------------------------------------------------------------------------
+
+# BBH url_ingest.py VALID_STATUSES and VALID_LANES (the only values `mark` accepts
+# without a warning). "untested" and "tested" are Board filters, not BBH statuses.
+MARK_STATUSES = ('discovered', 'surface_reviewed', 'deep_reviewed', 'validated_signal', 'dismissed')
+BBH_LANES = ('recon', 'xss', 'sqli', 'ssrf', 'idor', 'lfi', 'access-control', 'ssti', 'open-redirect', 'xxe', 'race', 'csrf')
+FILTER_STATUSES = ('untested', 'tested', *MARK_STATUSES)
+URL_PAGE_LIMIT = 100
+URL_SCAN_FIRST = 5000       # first id window; doubles while windows come back empty
+URL_SCAN_MAX = 200_000
+URL_HISTORY_LIMIT = 200
+URL_ENRICH_LIMIT = 2000     # observation rows fetched for one page
+MARK_REFRESH_DEBOUNCE = 2.0 # seconds: marks closer than this share one summary recompute
+
+
+def url_filter_sql(filters):
+    """WHERE fragments for a URL browser filter dict (values already validated)."""
+    where, args = [], []
+    if filters.get('host'):
+        where.append('host = ?')
+        args.append(filters['host'])
+    if filters.get('q'):
+        pattern = filters['q'].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        where.append("canonical_url LIKE ? ESCAPE '\\'")
+        args.append(f'%{pattern}%')
+    if filters.get('params'):
+        where.append("param_keys IS NOT NULL AND param_keys NOT IN ('', '[]')")
+    if filters.get('param'):
+        where.append('instr(param_keys, ?) > 0')  # param_keys is a JSON array of strings
+        args.append(json.dumps(filters['param']))
+    lane, status = filters.get('lane'), filters.get('status')
+    lane_sql = ' AND lane = ?' if lane else ''
+    if status in ('untested', 'tested'):
+        where.append(f"{'NOT ' if status == 'untested' else ''}EXISTS (SELECT 1 FROM test_runs t WHERE t.url_id = urls.id{lane_sql.replace('lane', 't.lane')})")
+        args += [lane] if lane else []
+    elif status:
+        where.append(f"EXISTS (SELECT 1 FROM observations o WHERE o.url_id = urls.id AND o.status = ?{lane_sql.replace('lane', 'o.lane')})")
+        args += [status] + ([lane] if lane else [])
+    elif lane:
+        where.append('(EXISTS (SELECT 1 FROM test_runs t WHERE t.url_id = urls.id AND t.lane = ?) '
+                     'OR EXISTS (SELECT 1 FROM observations o WHERE o.url_id = urls.id AND o.lane = ?))')
+        args += [lane, lane]
+    return where, args
+
+
+def split_url(raw):
+    """(path with query) of a stored canonical URL, as stored (not re-encoded)."""
+    value = _as_str(raw or '')
+    rest = value.split('://', 1)[1] if '://' in value else value
+    cut = min([i for i in (rest.find('/'), rest.find('?')) if i >= 0] or [len(rest)])
+    return rest[cut:] or '/'
+
+
+def list_urls(path, filters, cursor=0, limit=50, budget=QUERY_BUDGET, order='desc'):
+    """One keyset page of URLs matching filters, newest first (order='desc') or
+    oldest first (order='asc').
+
+    cursor: 0 starts at the newest (or oldest) URL; otherwise the page holds ids
+    below it (desc) or above it (asc). Never OFFSET and never a full scan in one
+    statement: rows are read in id windows (first URL_SCAN_FIRST ids, doubling
+    while windows are empty), each window a bounded statement, until the page is
+    full, the table ends or the page budget (2 query budgets) runs out. The
+    returned cursor is the last id on a full page, else the far edge of the last
+    window read, so the next page continues exactly where this one stopped."""
+    started = time.monotonic()
+    db = ReadOnlyDB(path, budget)
+    try:
+        cols = {t: db.columns(t) for t in ('urls', 'test_runs', 'observations')}
+        need = {'id', 'canonical_url', 'host', 'param_keys'}
+        if not need <= cols['urls']:
+            raise SourceError('schema_mismatch', 'urls lacks ' + ', '.join(sorted(need - cols['urls'])))
+        if filters.get('status') or filters.get('lane'):
+            if not {'url_id', 'lane'} <= cols['test_runs'] or not {'url_id', 'lane', 'status'} <= cols['observations']:
+                raise SourceError('schema_mismatch', 'test_runs or observations lack url_id, lane or status')
+        where, args = url_filter_sql(filters)
+        extra = ''.join(f' AND {w}' for w in where)
+        seen = ', '.join(c if c in cols['urls'] else f'NULL AS {c}' for c in ('first_seen', 'last_seen'))
+        max_id = db.one('SELECT MAX(id) FROM urls') or 0
+        desc = order == 'desc'
+        rows, window, partial = [], URL_SCAN_FIRST, None
+        # edge: the next id boundary still to read (exclusive): ids above it (asc) or below it (desc).
+        edge = max(0, cursor) if not desc else (min(cursor, max_id + 1) if cursor > 0 else max_id + 1)
+        deadline = started + 2 * budget
+        more = lambda e: e < max_id if not desc else e > 1
+        while len(rows) < limit and more(edge):
+            lo, hi = (edge, min(max_id, edge + window)) if not desc else (max(0, edge - 1 - window), edge - 1)
+            try:
+                got = db.query(f'SELECT id, canonical_url, host, param_keys, {seen} FROM urls '
+                               f'WHERE id > ? AND id <= ?{extra} ORDER BY id {"DESC" if desc else "ASC"} LIMIT ?',
+                               (lo, hi, *args, limit - len(rows)))
+            except QueryTimeout:
+                partial = 'timeout'
+                break
+            rows += got
+            if len(rows) >= limit:
+                break
+            edge = hi if not desc else lo + 1
+            window = window if got else min(URL_SCAN_MAX, window * 2)
+            if time.monotonic() > deadline:
+                partial = 'budget'
+                break
+        full = len(rows) >= limit
+        next_cursor = rows[-1][0] if full else edge
+        items = enrich_urls(db, cols, rows)
+        return {'items': items, 'order': order, 'next': next_cursor, 'done': not full and not more(edge) and partial is None,
+                'max_id': max_id, 'partial': partial, 'open_mode': db.mode, 'elapsed': round(time.monotonic() - started, 3)}
+    finally:
+        db.close()
+
+
+def enrich_urls(db, cols, rows):
+    """Per-lane status (observations) and test counts (test_runs) for one page of URLs."""
+    ids = [r[0] for r in rows]
+    lanes, tests = {}, {}
+    if ids:
+        marks = ','.join('?' * len(ids))
+        if {'url_id', 'lane', 'status'} <= cols['observations']:
+            pk = 'param_key' if 'param_key' in cols['observations'] else "''"
+            at = 'created_at' if 'created_at' in cols['observations'] else 'NULL'
+            try:
+                for url_id, lane, key, status, when in db.query(
+                        f'SELECT url_id, lane, {pk}, status, {at} FROM observations WHERE url_id IN ({marks}) '
+                        f'ORDER BY id DESC LIMIT {URL_ENRICH_LIMIT}', ids):
+                    lanes.setdefault(url_id, []).append({'lane': text(lane, 80), 'param_key': text(key, 120) or None,
+                                                         'status': text(status, 40), 'at': text(when, 40)})
+            except QueryTimeout:
+                pass
+        if {'url_id'} <= cols['test_runs']:
+            last = 'MAX(completed_at)' if 'completed_at' in cols['test_runs'] else 'NULL'
+            try:
+                for url_id, n, when in db.query(f'SELECT url_id, COUNT(*), {last} FROM test_runs WHERE url_id IN ({marks}) GROUP BY url_id', ids):
+                    tests[url_id] = (n, text(when, 40))
+            except QueryTimeout:
+                pass
+    out = []
+    for url_id, raw, host, keys, first, last_seen in rows:
+        params = parse_keys(keys)
+        out.append({'id': url_id, 'url': text(raw, 2000), 'host': text(host) or '', 'path': text(split_url(raw), 2000),
+                    'params': [text(k, 120) for k in params[:50]], 'first_seen': text(first, 40), 'last_seen': text(last_seen, 40),
+                    'lanes': lanes.get(url_id, []), 'tests': tests.get(url_id, (0, None))[0], 'last_test': tests.get(url_id, (0, None))[1],
+                    # Copy, link and Mark are offered only when the raw URL and keys are safe.
+                    'unsafe_chars': is_unsafe(raw, host, *params)})
+    return out
+
+
+def url_history(path, url_id, budget=QUERY_BUDGET):
+    """One URL with its test runs and observations (newest first, capped)."""
+    db = ReadOnlyDB(path, budget)
+    try:
+        cols = {t: db.columns(t) for t in ('urls', 'test_runs', 'observations')}
+        row = db.query('SELECT id, canonical_url, host, param_keys FROM urls WHERE id = ?', (url_id,))
+        if not row:
+            return None
+        _, raw, host, keys = row[0]
+        params = parse_keys(keys)
+        def pick(table, wanted, order):
+            have = [k for k in wanted if k in cols[table]]
+            if 'url_id' not in cols[table] or not have:
+                return []
+            rows = db.query(f'SELECT {", ".join(have)} FROM {table} WHERE url_id = ? ORDER BY {order} DESC LIMIT {URL_HISTORY_LIMIT + 1}', (url_id,))
+            return [{k: text(v, 600 if k in ('notes', 'response_summary') else TEXT_LIMIT) for k, v in zip(have, r)} for r in rows]
+        runs = pick('test_runs', ('id', 'lane', 'param_key', 'param_location', 'skill', 'test_family', 'technique', 'status', 'depth',
+                                  'agent_id', 'run_id', 'evidence_path', 'request_variant', 'response_summary', 'notes', 'completed_at'), 'id')
+        obs = pick('observations', ('id', 'lane', 'param_key', 'param_location', 'status', 'agent_id', 'run_id', 'evidence_path',
+                                    'notes', 'created_at'), 'id')
+        return {'id': url_id, 'url': text(raw, 2000), 'host': text(host) or '', 'path': text(split_url(raw), 2000),
+                'params': [text(k, 120) for k in params[:50]], 'unsafe_chars': is_unsafe(raw, host, *params),
+                'test_runs': runs[:URL_HISTORY_LIMIT], 'observations': obs[:URL_HISTORY_LIMIT],
+                'truncated': len(runs) > URL_HISTORY_LIMIT or len(obs) > URL_HISTORY_LIMIT}
+    finally:
+        db.close()
+
+
+def raw_url(path, url_id, budget=QUERY_BUDGET):
+    """(canonical_url, test run count, max test run id) for one URL, read the same way; None when absent."""
+    db = ReadOnlyDB(path, budget)
+    try:
+        row = db.query('SELECT canonical_url FROM urls WHERE id = ?', (url_id,))
+        if not row:
+            return None
+        n, top = db.query('SELECT COUNT(*), COALESCE(MAX(id), 0) FROM test_runs WHERE url_id = ?', (url_id,))[0]
+        return row[0][0], n, top
+    finally:
+        db.close()
+
+
+def board_runs(path, url_id, after_id, agent='bounty-board', budget=QUERY_BUDGET):
+    """Test runs of one URL with id > after_id recorded by agent: (id, lane, status, param_key).
+
+    Used to verify a Board mark without assuming nobody else wrote meanwhile."""
+    db = ReadOnlyDB(path, budget)
+    try:
+        if 'agent_id' not in db.columns('test_runs'):
+            return []
+        return db.query('SELECT id, lane, status, param_key FROM test_runs WHERE url_id = ? AND id > ? AND agent_id = ? '
+                        'ORDER BY id LIMIT 20', (url_id, after_id, agent))
+    finally:
+        db.close()
 
 
 def _val(source, *keys):
@@ -1274,13 +1643,26 @@ def headline_row(family, program, lane, sources):
             'approximate': bool(_val(url, 'approximate') or _val(js, 'approximate') or _val(agg, 'approximate'))}
 
 
-def host_rows(sources):
-    """Merge per-host URL index, JS library, findings and coverage into one table."""
+def host_names(sources):
+    """Every host the host table will list."""
+    names = {h['host'] for h in _val(sources.get('url_index', {}), 'detail', 'hosts') or []}
+    names |= {h['host'] for h in _val(sources.get('js', {}), 'detail', 'hosts') or []}
+    names |= set(_val(sources.get('board', {}), 'findings', 'by_host') or {})
+    names |= set(_val(sources.get('board', {}), 'coverage', 'by_host') or {})
+    return {n for n in names if n}
+
+
+def host_rows(sources, scope=None):
+    """Merge per-host URL index, JS library, findings and coverage into one table.
+
+    scope: {host: verdict} from scope_check, or None. Out-of-scope hosts are never
+    under-tested and are capped last; all_rows (every row) is added for the summary."""
     url_hosts = _val(sources.get('url_index', {}), 'detail', 'hosts') or []
     approximate_urls = _val(sources.get('url_index', {}), 'host_counts') == 'sample'
     js_hosts = {h['host']: h for h in (_val(sources.get('js', {}), 'detail', 'hosts') or [])}
     unsafe = set(_val(sources.get('url_index', {}), 'detail', 'unsafe_hosts') or [])
     findings = _val(sources.get('board', {}), 'findings', 'by_host') or {}
+    finding_ids = _val(sources.get('board', {}), 'findings', 'by_host_fids') or {}
     coverage = _val(sources.get('board', {}), 'coverage', 'by_host') or {}
     rows = {}
     for h in url_hosts:
@@ -1293,16 +1675,26 @@ def host_rows(sources):
         row['js_files'] = js.get('files', 0)
         row['js_bytes'] = js.get('bytes', 0)
         row['findings'] = findings.get(name, 0)
+        row['finding_ids'] = finding_ids.get(name, [])  # non-archived findings whose asset/url/endpoint names this host
         row['coverage_questions'] = coverage.get(name, {}).get('questions', 0)
         row['coverage_reviewed'] = coverage.get(name, {}).get('reviewed', 0)
         row['urls_approximate'] = approximate_urls
         row['under_tested'] = under_tested(row)
         row['unsafe_chars'] = name in unsafe or bool(js.get('unsafe_chars'))
         row['surface_score'] = (row.get('urls') or 0) + 20 * row['js_files'] + 5 * (row.get('param_urls') or 0)
-    ordered = sorted(rows.values(), key=lambda r: (-r['surface_score'], r['host']))
+        if scope is not None:
+            row['scope'] = scope.get(name)
+            if (row['scope'] or {}).get('state') == 'out':
+                row['under_tested'] = False
+    out = lambda r: (r.get('scope') or {}).get('state') == 'out'
+    ordered = sorted(rows.values(), key=lambda r: (out(r), -r['surface_score'], r['host']))
     truncated = len(ordered) > HOST_LIMIT
-    return {'rows': ordered[:HOST_LIMIT], 'total': len(ordered), 'truncated': truncated, 'urls_approximate': approximate_urls,
-            'rule': 'Under-tested: at least 50 URLs or 3 JS files, and no test runs or fewer than one test run per 200 URLs.'}
+    result = {'rows': ordered[:HOST_LIMIT], 'total': len(ordered), 'truncated': truncated, 'urls_approximate': approximate_urls,
+              'rule': 'Under-tested: at least 50 URLs or 3 JS files, and no test runs or fewer than one test run per 200 URLs.'}
+    if scope is not None:
+        result['all_rows'] = ordered
+        result['out_of_scope'] = sum(1 for r in ordered if out(r))
+    return result
 
 
 def under_tested(row):
@@ -1327,6 +1719,8 @@ def handle_request(handler, url, service):
         if url.query:
             return handler.reply(400, {'error': 'invalid_recon_request'})
         return handler.reply(200, service.overview())
+    if url.path in ('/api/recon/urls', '/api/recon/url'):
+        return handle_url_request(handler, url, service)
     try:
         params = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=4,
                           encoding='utf-8', errors='strict')
@@ -1343,3 +1737,56 @@ def handle_request(handler, url, service):
     if result is None:
         return handler.reply(404, {'error': 'recon_lane_not_found'})
     return handler.reply(200, result)
+
+
+def parse_url_filters(params):
+    """Validated URL browser filters from query parameters; ValueError when invalid."""
+    def one(name, limit=300):
+        value = params.get(name, [''])[0]
+        if len(value) > limit or '\0' in value:
+            raise ValueError(name)
+        return value
+    filters = {'host': one('host'), 'q': one('q'), 'param': one('param', 200), 'lane': one('test_lane', 40),
+               'status': one('status', 40), 'params': one('params', 1) == '1'}
+    if filters['lane'] and not re.fullmatch(r'[a-z][a-z0-9-]{0,39}', filters['lane']):
+        raise ValueError('lane')
+    if filters['status'] and filters['status'] not in FILTER_STATUSES:
+        raise ValueError('status')
+    if params.get('params', ['0'])[0] not in ('0', '1'):
+        raise ValueError('params')
+    return filters
+
+
+def handle_url_request(handler, url, service):
+    """GET /api/recon/urls?family=&program=&lane=[&host=&q=&test_lane=&status=&params=1&param=&order=desc|asc&cursor=&limit=]
+    and GET /api/recon/url?family=&program=&lane=&id=."""
+    from urllib.parse import parse_qs
+    listing = url.path == '/api/recon/urls'
+    allowed = {'family', 'program', 'lane'} | ({'host', 'q', 'test_lane', 'status', 'params', 'param', 'cursor', 'order', 'limit'} if listing else {'id'})
+    try:
+        params = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=12,
+                          encoding='utf-8', errors='strict')
+        if (not {'family', 'program', 'lane'} <= set(params) or set(params) - allowed or any(len(v) != 1 for v in params.values())
+                or (not listing and 'id' not in params)):
+            raise ValueError('invalid parameters')
+        family, program, lane = (params[k][0] for k in ('family', 'program', 'lane'))
+        if len(program) > 200 or '\0' in program or '/' in program:
+            raise ValueError('invalid program')
+        def integer(name, default, low, high):
+            raw = params.get(name, [str(default)])[0]
+            if not raw.isascii() or not raw.isdecimal() or len(raw) > 19 or not low <= int(raw) <= high:
+                raise ValueError(name)
+            return int(raw)
+        if listing:
+            filters = parse_url_filters(params)
+            cursor, limit = integer('cursor', 0, 0, 2 ** 62), integer('limit', 50, 1, URL_PAGE_LIMIT)
+            order = params.get('order', ['desc'])[0]
+            if order not in ('asc', 'desc'):
+                raise ValueError('order')
+        else:
+            url_id = integer('id', 0, 1, 2 ** 62)
+    except (ValueError, UnicodeError):
+        return handler.reply(400, {'error': 'invalid_recon_request'})
+    status, body = (service.urls(family, program, lane, filters, cursor, limit, order) if listing
+                    else service.url(family, program, lane, url_id))
+    return handler.reply(status, body)

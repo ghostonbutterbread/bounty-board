@@ -5,7 +5,7 @@
   const state = {showArchived:(()=>{try{return localStorage.getItem('bounty-board-show-archived')==='true';}catch{return false;}})(), data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:[],class:[],status:[],submission:[],query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], metadataDrafts:new Map(), rationaleDrafts:new Map(),
     // Presentation state (UI redesign): persisted sort, dashboard work filter,
     // expanded breakdown row, program search, how the program was chosen.
-    sort:{key:'',dir:'asc'}, dashWork:'all', dashExpanded:'', programQuery:'', programOrigin:'default', highlight:''};
+    sort:{key:'',dir:'asc'}, dashWork:'all', dashExpanded:'', scopedExpanded:{}, programQuery:'', programOrigin:'default', highlight:''};
   const sections = [['findings','Findings'],['coverage','Coverage'],['reports','Reports'],['map','MapStore'],['gadgets','Gadgets']];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const metadataFailure = error => error.code==='finding_changed' ? 'Conflict: finding changed.' : error.code==='root_changed' ? 'Conflict: source root changed.' : error.code==='finding_not_found' ? 'Finding is no longer available.' : 'Update failed or was not verified.';
@@ -879,10 +879,14 @@
       return `<li data-finding-row class="frow" data-finding-id="${esc(f.id??'')}" data-program="${esc(p.id)}" data-lane="${esc(l.name)}" data-sev="${sevKey(f.severity)}"><span class="frow-main"><a class="link-button frow-title truncate" href="${esc(hrefFor({program:p.id,lane:l.name,section:'findings',finding:f.id??undefined}))}" data-goto-finding="${esc(f.id??'')}" ${target}>${esc(f.title||'Untitled finding')}</a><span class="meta frow-sub">${sub}</span></span><span class="frow-pills"><span class="frow-sev">${pickButton('sev',`Severity ${f.severity==null||f.severity===''?'not recorded':f.severity}. Change severity`,sevBadge(f.severity))}</span><span class="frow-subm">${window.BoardFindingActions?pickButton('submission',`Submission: ${submissionLabel(f)}. Change submission`,submissionBadge(f)):submissionBadge(f)}</span></span><span class="row-links">${report?`<a class="row-icon report-icon${reportNa?' is-na-link':''}" href="${esc(hrefFor({program:p.id,lane:l.name,section:'reports',report}))}" data-goto-report="${esc(report)}" ${target} aria-label="Report${reportNa?' (marked N/A)':''}: ${esc(report)}" data-tip="${reportNa?'Report (marked N/A on the Board)':'Open report'}: ${esc(report)}">${icon('file-text-o')}</a>`:''}${evidenceIcon(p,l,f,target)}</span></li>`;
     }).join('')}</ul></div>`).join('')}</div>`;
   }
-  function breakdown(kind, groups, total) {
+  // scope: '' for the dashboard (state.dashExpanded), or a key such as
+  // 'recon:<program>|<lane>' for a scoped copy elsewhere (state.scopedExpanded).
+  // Row ids (data-breakdown) keep one format, so finding-actions drops work everywhere.
+  function breakdown(kind, groups, total, scope='') {
     const max=Math.max(1,...groups.map(g=>g.items.length));
+    const expanded=scope ? (state.scopedExpanded[scope]||'') : state.dashExpanded;
     return `<div class="breakdown">${groups.map(group=>{
-      const id=`${kind}:${group.key}`, open=state.dashExpanded===id;
+      const id=`${kind}:${group.key}`, open=expanded===id;
       const label=kind==='sev' ? `<span class="sev" data-sev="${group.sev}">${esc(group.label)}</span>` : esc(group.label);
       const hook=kind==='class' && group.key!=='none' ? ` data-class-name="${esc(group.key)}"` : kind==='cat' ? ` data-category-row="${esc(group.key)}"` : '';
       return `<button type="button" class="breakdown-row"${hook} data-breakdown="${esc(id)}" aria-expanded="${open}" title="Show matching findings by program"><i class="fa fa-angle-right" aria-hidden="true"></i><span class="label">${label}</span><span class="bar${kind==='sev'?' sev-bar':''}" ${kind==='sev'?`data-sev="${group.sev}"`:''} aria-hidden="true"><i style="width:${group.items.length/max*100}%"></i></span><strong>${group.items.length}</strong></button>${open?drill(kind,group):''}`;
@@ -1793,7 +1797,33 @@
   // Recon intel view: the page frame only; static/modules/recon-intel.js fills
   // #recon-intel-host from /api/recon/* and owns the #/recon?<query> keys.
   function reconView() {
-    return `${title('Recon intel','URL index, JS library and test depth per program: what has been looked for and what to hunt next.')}<div class="stack">${rootWarning()}<div id="recon-intel-host"><div class="panel state">Loading recon intel…</div></div></div>`;
+    // A Recon program page (#/recon?p=<program>&lane=<lane>, keys owned by
+    // recon-intel.js): its scoped findings panels and Reports host render here,
+    // with the page, so finding-actions and recent-reports decorate them in their
+    // normal afterRender pass; recon-intel.js then moves them into its layout.
+    const scope=reconScope(), panels=scope ? scopedFindingPanels(scope.program,scope.lane) : '';
+    const extra=panels ? `<div id="recon-scope-panels" data-program="${esc(scope.program)}" data-lane="${esc(scope.lane)}">${panels}<div id="recon-reports-host" data-recent-scope data-program="${esc(scope.program)}" data-lane="${esc(scope.lane)}"></div></div>` : '';
+    return `${title('Recon intel','URL index, JS library and test depth per program: what has been looked for and what to hunt next.')}<div class="stack">${rootWarning()}<div id="recon-intel-host"><div class="panel state">Loading recon intel…</div></div>${extra}</div>`;
+  }
+  function reconScope() {
+    const q=new URLSearchParams(String(state.reconQuery||'')), program=programs().find(p=>String(p.id)===q.get('p'));
+    if(!program)return null;
+    const lanes=(list(program.lanes)||[]).map(l=>String(l.name)), lane=lanes.includes(q.get('lane')) ? q.get('lane') : lanes.includes('web') ? 'web' : lanes[0];
+    return lane ? {program:String(program.id),lane} : null;
+  }
+  // The dashboard's severity and class panels for one program and lane: same
+  // breakdown rows, drill rows, pills, selection, context menu and drops
+  // (finding-actions), with expansion kept per scope.
+  function scopedFindingPanels(programId, laneName) {
+    const p=programs().find(x=>String(x.id)===String(programId)), l=p && (list(p.lanes)||[]).find(x=>String(x.name)===String(laneName));
+    if(!l)return '';
+    const scope=`recon:${p.id}|${l.name}`, loaded=list(l.findings);
+    if(!loaded)return `<section class="panel panel-pad" aria-label="Findings"><h2>Findings</h2><div class="state">Findings are not loaded for this lane.</div></section>`;
+    const entries=loaded.map(f=>({p,l,f})).filter(e=>shownFinding(e.f));
+    const sevGroups=severityGroups(entries), clsGroups=classGroups(entries), catGroups=categoryGroups(entries.filter(e=>e.f.class!=null && e.f.class!==''));
+    const byCategory=state.classGroupBy==='category' && catGroups.length>0;
+    const where=`${esc(programLabel(p))} / ${esc(l.name)}`;
+    return `<div class="recon-findings-grid" data-breakdown-scope="${esc(scope)}"><section class="panel panel-pad" aria-label="Severity breakdown for this lane"><div class="blockhead"><h2>Findings by severity</h2>${archiveToggle(loaded.filter(isArchived).length)}</div><p class="hint">${entries.length} ${entries.length===1?'finding':'findings'} in ${where}. Select a row to list them; edit pills, right-click, or drag rows onto a severity or class.</p>${sevGroups.length?breakdown('sev',sevGroups,null,scope):'<div class="state">No findings recorded for this lane.</div>'}</section><section class="panel panel-pad" aria-label="Finding classes for this lane"><div class="blockhead"><h2>Finding classes</h2>${catGroups.length?`<div class="segmented" role="group" aria-label="Group classes"><button type="button" data-class-group="class" aria-pressed="${!byCategory}">By class</button><button type="button" data-class-group="category" aria-pressed="${byCategory}">By category</button></div>`:''}</div><p class="hint">${byCategory?'Raw classes grouped by display-time category rules.':'Raw classes as recorded.'} Select a row to list matches.</p>${byCategory?breakdown('cat',catGroups,null,scope):clsGroups.length?breakdown('class',clsGroups,null,scope):'<div class="state">No classified findings for this lane.</div>'}</section></div>`;
   }
   function skeleton() {
     const line=w=>`<span class="skeleton sk-line" style="width:${w}%"></span>`;
@@ -1928,8 +1958,13 @@
       if(popover)popover.reanchor=()=>null;
     }
     else if(target.hasAttribute('data-dash-work')){state.dashWork=target.dataset.dashWork==='open'?'open':'all';writeStore('bounty-board-dashboard-work',state.dashWork);render();}
-    else if(target.hasAttribute('data-class-group')){state.classGroupBy=target.dataset.classGroup==='category'?'category':'class';writeStore('bounty-board-class-group',state.classGroupBy);state.dashExpanded='';render();}
-    else if(target.hasAttribute('data-breakdown')){state.dashExpanded=state.dashExpanded===target.dataset.breakdown?'':target.dataset.breakdown;render();}
+    else if(target.hasAttribute('data-class-group')){state.classGroupBy=target.dataset.classGroup==='category'?'category':'class';writeStore('bounty-board-class-group',state.classGroupBy);state.dashExpanded='';state.scopedExpanded={};render();}
+    else if(target.hasAttribute('data-breakdown')){
+      const scope=target.closest('[data-breakdown-scope]')?.dataset.breakdownScope;
+      if(scope)state.scopedExpanded[scope]=state.scopedExpanded[scope]===target.dataset.breakdown?'':target.dataset.breakdown;
+      else state.dashExpanded=state.dashExpanded===target.dataset.breakdown?'':target.dataset.breakdown;
+      render();
+    }
     else if(target.hasAttribute('data-dismiss-route-notice')){state.routeNotice='';render();}
     else if(target.hasAttribute('data-sort')){
       const key=target.dataset.sort, current=state.sort||{};

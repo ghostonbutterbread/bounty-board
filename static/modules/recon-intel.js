@@ -6,7 +6,9 @@
  *  - #dashboard-recon-host: a compact card this module inserts into the
  *    dashboard grid (after the recent reports panel), linking into the view.
  * URL: #/recon?p=<family/program>&lane=<lane>&sort=..&dir=..&q=..&hsort=..&hdir=..
- * &hq=..&under=1&hint=<lane> so filtered views can be bookmarked. Values are
+ * &hq=..&under=1&hint=<lane>&oos=1 so filtered views can be bookmarked. Scope (scope_check.py):
+ * out-of-scope hosts and items are hidden unless oos=1; copy buttons are disabled
+ * on out-of-scope rows and on rows whose scope could not be checked. Values are
  * parsed with URLSearchParams and validated; server strings are escaped with
  * ctx.esc before they reach innerHTML. Hosts and URLs are target data: they are
  * never fetched; links to them are http(s) only and open in a new tab with
@@ -17,7 +19,10 @@
   'use strict';
   const OVERVIEW_SORTS = ['program', 'urls', 'hosts', 'parameters', 'js_files', 'js_bytes', 'tested_urls', 'tested_params', 'test_runs', 'findings', 'last_activity'];
   const HOST_SORTS = ['host', 'urls', 'routes', 'param_urls', 'js_files', 'js_bytes', 'test_runs', 'tested_urls', 'findings', 'coverage_reviewed', 'last_test', 'surface_score'];
-  const DEFAULTS = {p: '', lane: '', sort: 'urls', dir: 'desc', q: '', hsort: 'surface_score', hdir: 'desc', hq: '', under: false, hint: ''};
+  const DEFAULTS = {p: '', lane: '', sort: 'urls', dir: 'desc', q: '', hsort: 'surface_score', hdir: 'desc', hq: '', under: false, hint: '', oos: false,
+    // URL browser (recon-urls.js): open flag, filters and keyset cursor.
+    u: false, uh: '', uq: '', ul: '', us: '', up: false, un: '', ua: 0, uo: ''};
+  const URL_STATUSES = ['untested', 'tested', 'discovered', 'surface_reviewed', 'deep_reviewed', 'validated_signal', 'dismissed'];
 
   // ---- pure helpers (exported for Node tests) ------------------------------
   const clean = value => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
@@ -37,6 +42,18 @@
     out.under = params.get('under') === '1';
     const hint = clean(params.get('hint'));
     if (/^[a-z][a-z-]{0,30}$/.test(hint)) out.hint = hint;
+    out.oos = params.get('oos') === '1';
+    out.u = params.get('u') === '1';
+    out.uh = clean(params.get('uh')).slice(0, 300);
+    out.uq = String(params.get('uq') || '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 300);
+    const ul = clean(params.get('ul'));
+    if (/^[a-z][a-z0-9-]{0,39}$/.test(ul)) out.ul = ul;
+    if (URL_STATUSES.includes(params.get('us'))) out.us = params.get('us');
+    out.up = params.get('up') === '1';
+    out.un = clean(params.get('un')).slice(0, 200);
+    if (params.get('uo') === 'asc') out.uo = 'asc'; // oldest first; newest first is the default
+    const ua = params.get('ua') || '';
+    if (/^[0-9]{1,15}$/.test(ua)) out.ua = Number(ua);
     return out;
   }
   function buildQuery(state) {
@@ -48,10 +65,18 @@
       if (state.hq) params.set('hq', state.hq);
       if (state.under) params.set('under', '1');
       if (state.hint) params.set('hint', state.hint);
+      if (state.u) {
+        params.set('u', '1');
+        for (const [key, value] of [['uh', state.uh], ['uq', state.uq], ['ul', state.ul], ['us', state.us], ['un', state.un]]) if (value) params.set(key, value);
+        if (state.up) params.set('up', '1');
+        if (state.uo === 'asc') params.set('uo', 'asc');
+        if (state.ua > 0) params.set('ua', String(state.ua));
+      }
     } else {
       if (state.sort !== DEFAULTS.sort || state.dir !== DEFAULTS.dir) { params.set('sort', state.sort); params.set('dir', state.dir); }
       if (state.q) params.set('q', state.q);
     }
+    if (state.oos) params.set('oos', '1');
     return params.toString();
   }
   // Metric values arrive as {value, approximate} objects, plain numbers or null.
@@ -103,12 +128,38 @@
     : `bbh agents/url_ingest.py next ${shellQuote(program)} --lane ${shellQuote(lane)}`
     + (param ? ` --param ${shellQuote(param)}` : '') + (host ? ` --host ${shellQuote(host)}` : '') + ' --limit 20';
   const bbhStatus = (program, host) => isCopySafe(program) && isCopySafe(host) ? `bbh agents/url_ingest.py status ${shellQuote(program)} --host ${shellQuote(host)} --limit 50` : null;
-  // "Surface without testing": what the dashboard card and default ranks use.
+  // Scope (scope_check.py): {state: in|out|partial|unchecked, rule, reason} per host or URL item.
+  // Programs with no scope on file run open scope: their rows stay copyable.
+  const isOut = item => item?.scope?.state === 'out';
+  const visible = (items, showOos) => (items || []).filter(item => showOos || !isOut(item));
+  const copyBlockReason = (scope, summaryState) => {
+    if (!scope) return null;
+    if (scope.state === 'out') return 'out of scope';
+    if (scope.state === 'unchecked' && summaryState !== 'no_scope') return 'scope not checked';
+    return null;
+  };
+  // A hunt-next parameter is a program lead; its scope is the scope of its one example URL.
+  // An out-of-scope example hides only the URL and its URL/curl copies; bbh next stays usable
+  // because BBH applies scope itself.
+  const paramBlocks = (scope, summaryState) => {
+    const example = copyBlockReason(scope, summaryState);
+    return {example: example === 'out of scope' ? 'example out of scope' : example,
+      next: scope?.state === 'out' ? null : example};
+  };
+  // In-scope surface when the server knows it (scope checked), else the raw totals.
+  const inScopeUrls = row => row.in_scope_urls && metric(row.in_scope_urls) != null ? row.in_scope_urls : row.urls;
+  const inScopeJs = row => row.in_scope_js_files && metric(row.in_scope_js_files) != null ? row.in_scope_js_files : row.js_files;
+  // "Surface without testing": what the dashboard card and default ranks use; out-of-scope surface does not count.
   const depthGap = row => {
-    const urls = metric(row.urls) || 0, js = metric(row.js_files) || 0, runs = metric(row.test_runs) || 0;
+    const urls = metric(inScopeUrls(row)) || 0, js = metric(inScopeJs(row)) || 0, runs = metric(row.test_runs) || 0;
     return (urls + 20 * js) / (1 + runs);
   };
-  const helpers = {parseQuery, buildQuery, sortRows, fmtNum, fmtBytes, shellQuote, isCopySafe, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap};
+  // URL browser filters <-> hash state.
+  const urlFilters = s => ({host: s.uh, q: s.uq, lane: s.ul, status: s.us, params: s.up, param: s.un, order: s.uo});
+  const urlState = (f, cursor = 0) => ({u: true, uh: f.host || '', uq: f.q || '', ul: f.lane || '', us: f.status || '', up: !!f.params, un: f.param || '',
+    uo: f.order === 'asc' ? 'asc' : '', ua: cursor});
+  const helpers = {parseQuery, buildQuery, urlFilters, urlState, sortRows, fmtNum, fmtBytes, shellQuote, isCopySafe, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap,
+    isOut, visible, copyBlockReason, paramBlocks, inScopeUrls};
   if (typeof module === 'object' && module.exports) { module.exports = helpers; return; }
   root.BoardReconIntel = helpers;
 
@@ -139,8 +190,10 @@
     return href ? `<a class="ri-ext" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${text}${icon('external-link')}</a>` : `<span class="ri-mono">${text}</span>`;
   };
   // unsafe: the server flagged a raw value of this item (unsafe_chars); the displayed text is escaped.
-  const copyBtn = (value, label, title, unsafe) => (unsafe || !isCopySafe(value))
-    ? `<span class="ri-copy-blocked"><button type="button" class="button sm ghost ri-copy" disabled data-ri-copy-blocked title="Not copied: contains control characters">${icon('ban')}<span>${esc(label)}</span></button><span class="ri-unsafe">contains control characters</span></span>`
+  // blocked: a scope reason ("out of scope", "scope not checked") from copyBlockReason.
+  const blockedBtn = (label, reason) => `<span class="ri-copy-blocked"><button type="button" class="button sm ghost ri-copy" disabled data-ri-copy-blocked title="Not copied: ${esc(reason)}">${icon('ban')}<span>${esc(label)}</span></button><span class="ri-unsafe">${esc(reason)}</span></span>`;
+  const copyBtn = (value, label, title, unsafe, blocked) => (unsafe || !isCopySafe(value)) ? blockedBtn(label, 'contains control characters')
+    : blocked ? blockedBtn(label, blocked)
     : `<button type="button" class="button sm ghost ri-copy" data-ri-copy="${esc(value)}" title="${esc(title || 'Copy ' + label)}">${icon('clipboard')}<span>${esc(label)}</span></button>`;
   const badge = (text, kind = '') => `<span class="badge ${kind}">${esc(text)}</span>`;
   const statusKind = status => ({validated_signal: 'danger', deep_reviewed: 'success', surface_reviewed: 'accent', dismissed: 'outline', discovered: '',
@@ -150,7 +203,33 @@
     return `<th ${on ? `aria-sort="${dir === 'asc' ? 'ascending' : 'descending'}"` : ''} class="${['host', 'program'].includes(key) ? '' : 'num'}"><button type="button" class="sort-button" ${attr}="${esc(key)}" title="Sort by ${esc(label.toLowerCase())}">${esc(label)}${icon(on ? (dir === 'asc' ? 'sort-asc' : 'sort-desc') : 'sort')}</button></th>`;
   };
   const href = state => ctx.hrefFor({view: 'recon', query: buildQuery({...DEFAULTS, ...state})});
+  // Scope pill for a row; nothing for in-scope rows and open-scope programs (calm by default).
+  const scopeOf = d => d?.scope_summary?.state || '';
+  const blockOf = (d, item) => copyBlockReason(item?.scope, scopeOf(d));
+  const scopePill = (d, scope) => {
+    if (!scope) return '';
+    if (scope.state === 'out') return ` <span class="badge outline ri-scope-pill ri-scope-out" data-ri-scope="out" title="${esc(scope.reason || 'Out of scope')}">OOS</span>`;
+    if (scope.state === 'partial') return ` <span class="badge outline ri-scope-pill ri-scope-partial" data-ri-scope="partial" title="${esc([scope.reason, scope.rule ? `rule: ${scope.rule}` : ''].filter(Boolean).join(' · '))}">Partly in scope</span>`;
+    if (scope.state === 'unchecked' && scopeOf(d) !== 'no_scope') return ` <span class="badge outline ri-scope-pill" data-ri-scope="unchecked" title="${esc(scope.reason || 'Scope not checked')}">Scope not checked</span>`;
+    return '';
+  };
+  const oosClass = item => isOut(item) ? ' ri-oos' : '';
+  // "12 out-of-scope hosts hidden · Show" (a real link setting oos=1), or the Hide link while shown.
+  function oosLine(d, items, noun, section, total) {
+    const n = total ?? (items || []).filter(isOut).length;
+    if (!n) return '';
+    const shown = view.state.oos;
+    const label = `${n} out-of-scope ${noun}${n === 1 ? '' : 's'}`;
+    return `<p class="hint ri-oos-line" data-ri-oos-hidden="${esc(section)}">${icon(shown ? 'eye' : 'eye-slash')} ${esc(label)} ${shown ? 'shown' : 'hidden'} · <a href="${esc(href({...view.state, oos: !shown}))}" data-ri-oos="${shown ? '0' : '1'}">${shown ? 'Hide' : 'Show'}</a></p>`;
+  }
   const programName = id => String(id || '').split('/').slice(1).join('/');
+  // A number or name that opens the URL browser with filters: a real link (new tab works).
+  // Escaped values (unsafe_chars) are not real filter values, so they stay plain text.
+  const urlsHref = filters => href({...view.state, ...urlState(filters, 0)});
+  const urlsLink = (inner, filters, label, unsafe) => unsafe ? inner
+    : `<a class="ri-num-link" href="${esc(urlsHref(filters))}" data-ri-urls title="${esc(label || 'Show these URLs')}">${inner}</a>`;
+  const jumpLink = (inner, target, label) => `<a class="ri-num-link" href="#${esc(target)}" data-ri-jump="${esc(target)}" title="${esc(label)}">${inner}</a>`;
+  const boardLink = (inner, target, label) => `<a class="ri-num-link" href="${esc(ctx.hrefFor(target))}" title="${esc(label)}">${inner}</a>`;
 
   function writeUrl(push = false) {
     const query = buildQuery(view.state);
@@ -214,6 +293,15 @@
     if (st.state === 'missing') return `<span class="muted" title="${key === 'js' ? 'No JS library' : 'No URL index'}">—</span>`;
     return `<span class="ri-err" title="${esc(errorText(st.error))}">${icon('exclamation-triangle')}</span>`;
   }
+  function scopeCell(r) {
+    const sc = r.scope;
+    if (!sc) return '<span class="muted">—</span>';
+    if (sc.state === 'no_scope') return `<span class="muted ri-scope-open" title="${esc(sc.reason || 'No scope on file')}">open</span>`;
+    if (sc.state === 'pending') return '<span class="muted" title="Checking scope">…</span>';
+    if (sc.state === 'failed' || sc.state === 'unconfigured') return `<span class="ri-err" title="${esc(sc.reason || 'Scope not checked')}">${icon('exclamation-triangle')}</span>`;
+    const urls = r.in_scope_urls;
+    return `<span title="${esc(`${sc.in_scope_hosts} of ${sc.hosts} hosts in scope${urls ? ` · ${approx(urls) ? '≈' : ''}${fmtNum(metric(urls))} in-scope URLs` : ''}`)}">${esc(fmtNum(sc.in_scope_hosts))}<span class="ri-of"> / ${esc(fmtNum(sc.hosts))}</span></span>`;
+  }
   function overviewHtml() {
     const d = view.overview;
     if (!d) return view.error ? '' : '<div class="state">Loading recon intel…</div>';
@@ -225,13 +313,13 @@
     const th = (label, key) => sortTh(label, key, s.sort, s.dir, 'data-ri-sort');
     const body = rows.map(r => `<tr data-ri-program="${esc(r.id)}" data-lane="${esc(r.lane)}">
       <td><a class="ri-program-link" href="${esc(href({p: r.id, lane: r.lane}))}">${esc(r.program)}</a> <span class="id">${esc(r.lane)}</span>${r.approximate ? ' <span class="badge outline" title="Some values are estimates">approx.</span>' : ''}</td>
-      <td class="num">${sourceCell(r, 'url_index', r.urls)}</td><td class="num">${sourceCell(r, 'url_index', r.hosts)}</td><td class="num">${sourceCell(r, 'url_index', r.parameters)}</td>
+      <td class="num">${sourceCell(r, 'url_index', r.urls)}</td><td class="num">${sourceCell(r, 'url_index', r.hosts)}</td><td class="num" data-ri-scope-cell>${scopeCell(r)}</td><td class="num">${sourceCell(r, 'url_index', r.parameters)}</td>
       <td class="num">${sourceCell(r, 'js', r.js_files)}</td><td class="num">${sourceCell(r, 'js', r.js_bytes, true)}</td>
       <td class="num">${sourceCell(r, 'url_index', r.tested_urls)}</td><td class="num">${sourceCell(r, 'url_index', r.tested_params)}</td>
       <td class="num">${sourceCell(r, 'url_index', r.test_runs)}${r.tests_recent?.last_7d ? ` <span class="hint" title="Test runs in the last 7 days">+${esc(r.tests_recent.last_7d)} 7d</span>` : ''}</td>
       <td class="num">${r.findings == null ? '<span class="muted">—</span>' : esc(r.findings)}</td>
       <td class="date">${when(r.last_activity)}</td></tr>`).join('');
-    return `<section class="panel ri-overview-panel" aria-label="All programs"><div class="panel-head"><div><h2>All programs</h2><p class="hint">One row per web lane. Select a program for hosts, tests, hunt-next items and JavaScript.</p></div></div><div class="table-wrap"><table class="ri-table ri-overview"><thead><tr>${th('Program', 'program')}${th('URLs', 'urls')}${th('Hosts', 'hosts')}${th('Params', 'parameters')}${th('JS files', 'js_files')}${th('JS bytes', 'js_bytes')}${th('Tested URLs', 'tested_urls')}${th('Tested params', 'tested_params')}${th('Test runs', 'test_runs')}${th('Findings', 'findings')}${th('Last activity', 'last_activity')}</tr></thead><tbody>${body || '<tr><td colspan="11"><div class="state">No programs match this filter.</div></td></tr>'}</tbody></table></div></section>`;
+    return `<section class="panel ri-overview-panel" aria-label="All programs"><div class="panel-head"><div><h2>All programs</h2><p class="hint">One row per web lane. Select a program for hosts, tests, hunt-next items and JavaScript.</p></div></div><div class="table-wrap"><table class="ri-table ri-overview"><thead><tr>${th('Program', 'program')}${th('URLs', 'urls')}${th('Hosts', 'hosts')}<th class="num" title="Hosts in scope (BBH scope_validator)">In scope</th>${th('Params', 'parameters')}${th('JS files', 'js_files')}${th('JS bytes', 'js_bytes')}${th('Tested URLs', 'tested_urls')}${th('Tested params', 'tested_params')}${th('Test runs', 'test_runs')}${th('Findings', 'findings')}${th('Last activity', 'last_activity')}</tr></thead><tbody>${body || '<tr><td colspan="12"><div class="state">No programs match this filter.</div></td></tr>'}</tbody></table></div></section>`;
   }
 
   // ---- program ---------------------------------------------------------------
@@ -257,7 +345,10 @@
     return bits.length ? `<p class="hint ri-source-note" data-ri-source="${esc(key)}">${bits.join(' · ')}</p>` : '';
   }
   function stat(label, value, opts = {}) {
-    return `<div class="ri-stat${opts.warn ? ' ri-stat-warn' : ''}" ${opts.attr || ''}><strong>${opts.raw ?? num(value, opts.bytes)}</strong><span>${esc(label)}</span>${opts.sub ? `<small>${opts.sub}</small>` : ''}</div>`;
+    const inner = opts.raw ?? num(value, opts.bytes);
+    const known = opts.raw != null || metric(value) != null;
+    const strong = known && opts.link ? opts.link(inner) : inner;
+    return `<div class="ri-stat${opts.warn ? ' ri-stat-warn' : ''}" ${opts.attr || ''}><strong>${strong}</strong><span>${esc(label)}</span>${opts.sub ? `<small>${opts.sub}</small>` : ''}</div>`;
   }
   function emptyUrlIndex(d) {
     const src = d.sources?.url_index || {};
@@ -277,27 +368,51 @@
     const u = res(d, 'url_index') || {}, j = res(d, 'js') || {}, agg = res(d, 'aggregates') || {}, b = res(d, 'board') || {};
     const tr = u.tests_recent || {};
     const findings = b.findings || null, cov = b.coverage || null;
-    const sev = findings ? Object.entries(findings.by_severity || {}).sort((a, b2) => ui().severityRank(a[0]) - ui().severityRank(b2[0])) : [];
-    const cls = findings ? Object.entries(findings.by_class || {}).slice(0, 8) : [];
     const aggItems = Object.entries(agg.files || {}).concat(Object.entries(agg.js_lists || {}).map(([k, v]) => ['js/' + k, v]));
-    return `<section class="panel panel-pad ri-section" id="ri-depth" aria-label="Depth summary"><div class="blockhead"><h2>Depth summary</h2></div>
-      ${sourceNote(d, 'url_index', 'URL index')}${emptyUrlIndex(d)}
+    const sc = d.scope_summary;
+    const scopeTiles = sc && sc.state === 'checked'
+      ? stat('In-scope hosts', null, {raw: `${esc(fmtNum(sc.in_scope_hosts))} <small class="ri-of">of ${esc(fmtNum(sc.hosts))}</small>`, attr: 'data-ri-scope-hosts', sub: sc.partial ? `${esc(sc.partial)} partly in scope` : ''})
+        + stat('In-scope URLs', sc.in_scope_urls, {attr: 'data-ri-scope-urls', sub: 'summed from in-scope hosts'})
+      : '';
+    return `<section class="panel panel-pad ri-section" id="ri-depth" aria-label="Depth summary"><div class="blockhead"><h2>Depth summary</h2>${scopeBadge(d)}</div>
+      ${sourceNote(d, 'url_index', 'URL index')}${scopeNote(d)}${emptyUrlIndex(d)}
       <div class="ri-stats" data-ri-depth>
-        ${stat('URLs', u.urls)}${stat('Unique routes', u.routes)}${stat('Hosts', u.hosts)}${stat('Parameters', u.parameters)}
-        ${stat('URLs with params', u.param_urls)}${stat('Tested URLs', u.tested_urls)}${stat('Tested params', u.tested_params)}
-        ${stat('Test runs', u.test_runs, {sub: u.test_runs ? `${esc(tr.last_24h ?? 0)} in 24 h · ${esc(tr.last_7d ?? 0)} in 7 d` : ''})}
-        ${stat('URL observations', u.observations)}
-        ${stat('JS files', j.files)}${stat('JS bytes', j.bytes, {bytes: true})}${stat('Source maps', j.source_maps)}
-        ${stat('JS observations', j.observations, {sub: metric(j.open_observations) ? `${esc(metric(j.open_observations))} open with a next action` : ''})}${stat('JS leads', j.leads)}
-        ${stat('Findings', findings ? findings.total : null, {sub: findings?.archived ? `${esc(findings.archived)} archived not counted` : ''})}
-        ${stat('Coverage questions', cov ? cov.questions : null, {sub: cov?.by_status?.bounded_review ? `${esc(cov.by_status.bounded_review)} bounded reviews` : ''})}
-        ${stat('MapStore entries', b.map_entries ?? null)}
+        ${stat('URLs', u.urls, {link: x => urlsLink(x, {}, 'Browse all URLs')})}${stat('Unique routes', u.routes, {link: x => urlsLink(x, {}, 'Browse all URLs')})}
+        ${stat('Hosts', u.hosts, {link: x => jumpLink(x, 'ri-hosts', 'Go to the hosts table')})}${scopeTiles}${stat('Parameters', u.parameters, {link: x => urlsLink(x, {params: true}, 'Browse URLs with parameters')})}
+        ${stat('URLs with params', u.param_urls, {link: x => urlsLink(x, {params: true}, 'Browse URLs with parameters')})}
+        ${stat('Tested URLs', u.tested_urls, {link: x => urlsLink(x, {status: 'tested'}, 'Browse tested URLs')})}
+        ${stat('Tested params', u.tested_params, {link: x => urlsLink(x, {status: 'tested', params: true}, 'Browse tested URLs with parameters')})}
+        ${stat('Test runs', u.test_runs, {sub: u.test_runs ? `${esc(tr.last_24h ?? 0)} in 24 h · ${esc(tr.last_7d ?? 0)} in 7 d` : '', link: x => jumpLink(x, 'ri-looked', 'Go to what has been looked for')})}
+        ${stat('URL observations', u.observations, {link: x => jumpLink(x, 'ri-looked', 'Go to what has been looked for')})}
+        ${stat('JS files', j.files, {link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}${stat('JS bytes', j.bytes, {bytes: true, link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}
+        ${stat('Source maps', j.source_maps, {link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}
+        ${stat('JS observations', j.observations, {sub: metric(j.open_observations) ? `${esc(metric(j.open_observations))} open with a next action` : '', link: x => jumpLink(x, 'ri-js', 'Go to JavaScript')})}
+        ${stat('JS leads', j.leads, {link: x => jumpLink(x, 'ri-hunt', 'Go to what to hunt next')})}
+        ${stat('Findings', findings ? findings.total : null, {sub: findings?.archived ? `${esc(findings.archived)} archived not counted` : '', link: x => jumpLink(x, 'ri-findings', 'Go to the findings panels')})}
+        ${stat('Coverage questions', cov ? cov.questions : null, {sub: cov?.by_status?.bounded_review ? `${esc(cov.by_status.bounded_review)} bounded reviews` : '', link: x => boardLink(x, {program: `${d.family}/${programName(view.state.p)}`, lane: d.lane, section: 'coverage'}, 'Open coverage for this lane')})}
+        ${stat('MapStore entries', b.map_entries ?? null, {link: x => boardLink(x, {program: `${d.family}/${programName(view.state.p)}`, lane: d.lane, section: 'map'}, 'Open MapStore for this lane')})}
       </div>
       <div class="ri-split">
-        <div><h3>Findings by severity</h3>${sev.length ? `<div class="ri-chips">${sev.map(([k, n]) => `${ui().severityBadge(k)} <span class="num">${esc(n)}</span>`).join(' ')}</div>` : '<p class="hint">No findings recorded for this lane.</p>'}
-        ${cls.length ? `<h3>Top classes</h3><ul class="ri-bars">${cls.map(([k, n]) => bar(k, n, cls[0][1])).join('')}</ul>` : ''}</div>
         <div><h3>Recon aggregates</h3>${aggItems.length ? `<ul class="ri-kv">${aggItems.map(([k, v]) => `<li><code>${esc(k)}</code><span>${v.error ? `<span class="ri-err">${esc(errorText({code: v.error}))}</span>` : num(v)} lines</span></li>`).join('')}</ul>` : '<p class="hint">No recon/aggregated files. BBH <code>url_ingest.py aggregate</code> writes them.</p>'}</div>
       </div></section>`;
+  }
+  function scopeBadge(d) {
+    const sc = d.scope_summary;
+    if (!sc) return '';
+    const at = typeof sc.checked_at === 'number' ? ui().relativeTime(sc.checked_at) : '';
+    const [text, kind, title] = {
+      checked: [`Scope checked${at ? ' ' + at : ''}`, 'success', `${sc.in} in, ${sc.partial} partly, ${sc.out} out of scope (BBH scope_validator)`],
+      no_scope: ['No scope on file', 'outline', sc.reason && sc.reason !== 'no scope on file' ? sc.reason : 'Run as open scope: rows are shown and copyable'],
+      pending: ['Checking scope…', 'outline', 'BBH is classifying hosts and URLs'],
+      failed: ['Scope check failed', 'danger', sc.reason || ''],
+      unconfigured: ['Scope not checked', 'warning', sc.reason || ''],
+    }[sc.state] || ['Scope unknown', 'outline', ''];
+    return `<span class="badge ${kind} ri-scope-badge" data-ri-scope-badge="${esc(sc.state)}" title="${esc(title)}">${icon(sc.state === 'checked' ? 'check' : sc.state === 'pending' ? 'circle-o-notch fa-spin' : sc.state === 'no_scope' ? 'circle-o' : 'exclamation-triangle')} ${esc(text)}</span>`;
+  }
+  function scopeNote(d) {
+    const sc = d.scope_summary;
+    if (!sc || !['failed', 'unconfigured'].includes(sc.state)) return '';
+    return `<p class="hint ri-scope-note" data-ri-scope-note>${esc(String(sc.reason || '').replace(/^scope check failed: /, 'Scope check failed: '))}. Rows are shown but copy is disabled until the check succeeds${sc.state === 'unconfigured' ? ' (start the Board with --bbh)' : sc.source === 'scope_dir' ? '; a fixed scope folder is picked up on the next refresh' : '; retried within a minute or on Refresh'}.</p>`;
   }
   const bar = (label, n, max, extra = '') => `<li><span class="ri-bar-label">${esc(label)}</span><span class="ri-bar"><span style="width:${Math.max(2, Math.round(100 * n / (max || 1)))}%"></span></span><span class="num">${esc(fmtNum(n))}</span>${extra}</li>`;
 
@@ -306,23 +421,26 @@
     const s = view.state;
     const q = s.hq.toLowerCase();
     const valueOf = (row, key) => key === 'host' ? row.host : key === 'last_test' ? (Date.parse(row.last_test || '') || null) : row[key];
-    let rows = h.rows.filter(r => (!q || String(r.host).toLowerCase().includes(q)) && (!s.under || r.under_tested));
+    let rows = h.rows.filter(r => (!q || String(r.host).toLowerCase().includes(q)) && (!s.under || r.under_tested) && (s.oos || !isOut(r)));
     rows = sortRows(rows, s.hsort, s.hdir, valueOf);
     const under = h.rows.filter(r => r.under_tested).length;
     const th = (label, key) => sortTh(label, key, s.hsort, s.hdir, 'data-ri-hsort');
     const cell = (v, approxFlag, bytes) => v == null ? '<span class="muted">—</span>' : approxFlag ? `<span class="ri-approx" title="Sample estimate">≈${esc(bytes ? fmtBytes(v) : fmtNum(v))}</span>` : esc(bytes ? fmtBytes(v) : fmtNum(v));
-    const body = rows.map(r => `<tr class="${r.under_tested ? 'ri-under' : ''}" data-ri-host="${esc(r.host)}">
-      <td class="ri-host"><span class="ri-mono">${esc(r.host || '(no host)')}</span>${r.under_tested ? ` ${badge('Under-tested', 'warning')}` : ''}</td>
-      <td class="num">${cell(r.urls, r.urls_approximate && !r.urls_exact)}</td><td class="num">${cell(r.routes, r.urls_approximate)}</td><td class="num">${cell(r.param_urls, r.urls_approximate)}</td>
-      <td class="num">${cell(r.js_files)}</td><td class="num">${cell(r.js_bytes, false, true)}</td>
-      <td class="num">${cell(r.test_runs)}</td><td class="num">${cell(r.tested_urls)}</td><td class="num">${cell(r.findings)}</td>
-      <td class="num" title="${esc(r.coverage_questions)} coverage questions">${cell(r.coverage_reviewed)}</td>
+    const linked = (inner, value, filters, row, label) => value ? urlsLink(inner, filters, label || `Browse URLs on ${row.host}`, row.unsafe_chars || !row.host) : inner;
+    const body = rows.map(r => `<tr class="${r.under_tested ? 'ri-under' : ''}${oosClass(r)}" data-ri-host="${esc(r.host)}">
+      <td class="ri-host">${urlsLink(`<span class="ri-mono">${esc(r.host || '(no host)')}</span>`, {host: r.host}, `Browse URLs on ${r.host}`, r.unsafe_chars || !r.host || r.urls == null)}${r.under_tested ? ` ${badge('Under-tested', 'warning')}` : ''}${scopePill(d, r.scope)}</td>
+      <td class="num">${linked(cell(r.urls, r.urls_approximate && !r.urls_exact), r.urls, {host: r.host}, r)}</td><td class="num">${linked(cell(r.routes, r.urls_approximate), r.routes, {host: r.host}, r)}</td><td class="num">${linked(cell(r.param_urls, r.urls_approximate), r.param_urls, {host: r.host, params: true}, r, 'Browse URLs with parameters on this host')}</td>
+      <td class="num">${r.js_files ? jumpLink(cell(r.js_files), 'ri-js', 'Go to JavaScript') : cell(r.js_files)}</td><td class="num">${cell(r.js_bytes, false, true)}</td>
+      <td class="num">${linked(cell(r.test_runs), r.test_runs, {host: r.host, status: 'tested'}, r, 'Browse tested URLs on this host')}</td><td class="num">${linked(cell(r.tested_urls), r.tested_urls, {host: r.host, status: 'tested'}, r, 'Browse tested URLs on this host')}</td>
+      <td class="num">${r.findings && (r.finding_ids || []).length ? `<button type="button" class="ri-num-link ri-num-button" data-ri-host-findings="${esc(r.host)}" aria-haspopup="dialog" title="Show these findings">${cell(r.findings)}</button>` : cell(r.findings)}</td>
+      <td class="num" title="${esc(r.coverage_questions)} coverage questions">${r.coverage_reviewed ? boardLink(cell(r.coverage_reviewed), {program: d.family + '/' + programName(view.state.p), lane: d.lane, section: 'coverage'}, 'Open coverage for this lane') : cell(r.coverage_reviewed)}</td>
       <td class="date">${isoWhen(r.last_test)}</td>
-      <td class="ri-actions">${r.host ? copyBtn(bbhStatus(d.program, r.host), 'status', 'Copy bbh url_ingest status command for this host', r.unsafe_chars || d.unsafe_chars) : ''}</td></tr>`).join('');
+      <td class="ri-actions">${r.host ? copyBtn(bbhStatus(d.program, r.host), 'status', 'Copy bbh url_ingest status command for this host', r.unsafe_chars || d.unsafe_chars, blockOf(d, r)) : ''}</td></tr>`).join('');
     return `<section class="panel ri-section" id="ri-hosts" aria-label="Hosts"><div class="panel-head"><div><h2>Hosts</h2><p class="hint">Per host: URL index surface, JS library files, test runs, findings and coverage reviews. ${esc(h.rule || '')}</p></div></div>
       <div class="ri-toolbar panel-pad"><div class="input-icon">${icon('search')}<input id="ri-host-filter" type="search" aria-label="Filter hosts" placeholder="Filter hosts" value="${esc(s.hq)}" autocomplete="off"></div>
       <label class="ri-check"><input type="checkbox" id="ri-under"${s.under ? ' checked' : ''}> Under-tested only <span class="count">${esc(under)}</span></label>
       <span class="hint num" data-ri-host-count>${esc(rows.length)} of ${esc(h.total ?? h.rows.length)} hosts${h.truncated ? ` (top ${esc(h.rows.length)} by surface shown)` : ''}${h.urls_approximate ? ' · URL counts are sample estimates where marked ≈' : ''}</span></div>
+      ${(line => line ? `<div class="panel-pad ri-oos-pad">${line}</div>` : '')(oosLine(d, h.rows, 'host', 'hosts', h.out_of_scope))}
       ${h.rows.length ? `<div class="table-wrap"><table class="ri-table ri-hosts"><thead><tr>${th('Host', 'host')}${th('URLs', 'urls')}${th('Routes', 'routes')}${th('Param URLs', 'param_urls')}${th('JS files', 'js_files')}${th('JS bytes', 'js_bytes')}${th('Test runs', 'test_runs')}${th('Tested URLs', 'tested_urls')}${th('Findings', 'findings')}${th('Reviewed', 'coverage_reviewed')}${th('Last test', 'last_test')}<th><span class="sr-only">Actions</span></th></tr></thead><tbody>${body || '<tr><td colspan="12"><div class="state">No hosts match these filters.</div></td></tr>'}</tbody></table></div>`
         : `<div class="state">${d.sources?.url_index?.state === 'computing' ? 'Computing hosts…' : 'No host data: the URL index and JS library have no hosts for this lane.'}</div>`}</section>`;
   }
@@ -339,6 +457,7 @@
   }
   function lookedForHtml(d) {
     const det = res(d, 'url_index')?.detail || {};
+    const s = view.state;
     const groups = det.coverage_matrix || [];
     const lanes = [...new Set(groups.map(g => g.lane))].sort();
     const fams = [...new Set(groups.map(g => g.test_family))].sort();
@@ -346,25 +465,28 @@
     const max = Math.max(1, ...groups.map(g => g.runs));
     const matrix = lanes.length ? `<div class="ri-scroll"><table class="ri-table ri-matrix" data-ri-matrix><thead><tr><th>Lane \\ test family</th>${fams.map(f => `<th class="num">${esc(f)}</th>`).join('')}<th class="num">Total</th></tr></thead><tbody>${lanes.map(lane => {
       const total = groups.filter(g => g.lane === lane).reduce((a, g) => a + g.runs, 0);
-      return `<tr><th scope="row">${esc(lane)}</th>${fams.map(f => {
+      return `<tr><th scope="row">${urlsLink(esc(lane), {lane}, `Browse URLs with ${lane} activity`)}</th>${fams.map(f => {
         const c = cellOf(lane, f); const runs = c.reduce((a, g) => a + g.runs, 0);
         if (!runs) return '<td class="num ri-cell-empty">·</td>';
         const last = c.map(g => g.last_run).sort().pop();
         const statuses = c.map(g => `${g.status}: ${g.runs}`).join(', ');
         const skills = [...new Set(c.map(g => g.skill))].join(', ');
-        return `<td class="num ri-cell" style="--ri-heat:${(0.15 + 0.85 * runs / max).toFixed(2)}" title="${esc(`${runs} runs · ${statuses} · skills ${skills} · last ${last || 'unknown'}`)}">${esc(fmtNum(runs))}</td>`;
+        return `<td class="num ri-cell" style="--ri-heat:${(0.15 + 0.85 * runs / max).toFixed(2)}" title="${esc(`${runs} runs · ${statuses} · skills ${skills} · last ${last || 'unknown'}`)}">${urlsLink(esc(fmtNum(runs)), {lane, status: 'tested'}, `Browse URLs tested for ${lane}`)}</td>`;
       }).join('')}<td class="num"><strong>${esc(fmtNum(total))}</strong></td></tr>`;
     }).join('')}</tbody></table></div>` : '';
     const detailRows = groups.slice().sort((a, b) => String(b.last_run || '').localeCompare(String(a.last_run || ''))).map(g => `<tr><td>${esc(g.lane)}</td><td>${esc(g.skill)}</td><td>${esc(g.test_family)}</td><td>${badge(g.status, statusKind(g.status))}</td><td class="num">${esc(g.runs)}</td><td class="num">${esc(g.urls)}</td><td class="num">${esc(g.last_24h)}</td><td class="num">${esc(g.last_7d)}</td><td class="date">${isoWhen(g.last_run)}</td></tr>`).join('');
-    const recent = (det.recent_tests || []).map(t => `<tr><td class="date">${isoWhen(t.completed_at)}</td><td>${esc(t.lane)}<span class="id">${esc(t.skill)} / ${esc(t.test_family)}</span></td><td>${badge(t.status, statusKind(t.status))}</td><td>${esc(t.agent_id || '—')}</td><td class="ri-url">${t.url ? ext(t.url, null, t.unsafe_chars) : '<span class="muted">—</span>'}${t.param_key ? `<span class="id">param ${esc(t.param_key)}</span>` : ''}</td><td><span class="ri-notes" title="${esc(t.notes || t.response_summary || '')}">${esc(t.notes || t.response_summary || '')}</span></td><td>${evidenceCell(d, t.evidence_path)}</td></tr>`).join('');
-    const obs = (det.recent_observations || []).map(o => `<tr><td class="date">${isoWhen(o.created_at)}</td><td>${esc(o.lane)}</td><td>${badge(o.status, statusKind(o.status))}</td><td>${esc(o.agent_id || '—')}</td><td class="ri-url">${o.url ? ext(o.url, null, o.unsafe_chars) : '<span class="muted">—</span>'}</td><td><span class="ri-notes" title="${esc(o.notes || '')}">${esc(o.notes || '')}</span></td><td>${evidenceCell(d, o.evidence_path)}</td></tr>`).join('');
+    const recentTests = visible(det.recent_tests, s.oos), recentObs = visible(det.recent_observations, s.oos);
+    const recent = recentTests.map(t => `<tr class="${oosClass(t).trim()}"><td class="date">${isoWhen(t.completed_at)}</td><td>${esc(t.lane)}<span class="id">${esc(t.skill)} / ${esc(t.test_family)}</span></td><td>${badge(t.status, statusKind(t.status))}</td><td>${esc(t.agent_id || '—')}</td><td class="ri-url">${t.url ? ext(t.url, null, t.unsafe_chars) : '<span class="muted">—</span>'}${scopePill(d, t.scope)}${t.param_key ? `<span class="id">param ${esc(t.param_key)}</span>` : ''}</td><td><span class="ri-notes" title="${esc(t.notes || t.response_summary || '')}">${esc(t.notes || t.response_summary || '')}</span></td><td>${evidenceCell(d, t.evidence_path)}</td></tr>`).join('');
+    const obs = recentObs.map(o => `<tr class="${oosClass(o).trim()}"><td class="date">${isoWhen(o.created_at)}</td><td>${esc(o.lane)}</td><td>${badge(o.status, statusKind(o.status))}</td><td>${esc(o.agent_id || '—')}</td><td class="ri-url">${o.url ? ext(o.url, null, o.unsafe_chars) : '<span class="muted">—</span>'}${scopePill(d, o.scope)}</td><td><span class="ri-notes" title="${esc(o.notes || '')}">${esc(o.notes || '')}</span></td><td>${evidenceCell(d, o.evidence_path)}</td></tr>`).join('');
     const none = d.sources?.url_index?.state === 'ready' && !groups.length;
     return `<section class="panel panel-pad ri-section" id="ri-looked" aria-label="What has been looked for"><div class="blockhead"><h2>What has been looked for</h2></div>
       <p class="hint">Test runs recorded in the URL index (<code>url_ingest.py mark</code>), by lane and test family. Hover a cell for statuses, skills and the last run.</p>
       ${none ? `<div class="empty" data-ri-empty="tests">${icon('flask')}<strong>No test runs recorded</strong><span>Agents record them with <code>bbh agents/url_ingest.py mark ${esc(d.program)} --url &lt;url&gt; --lane &lt;lane&gt; --status &lt;status&gt; --skill &lt;skill&gt; --test-family &lt;family&gt;</code>.</span></div>` : ''}
       ${matrix}
       ${detailRows ? `<details class="ri-details"><summary>By lane, skill, family and status (${esc(groups.length)})</summary><div class="ri-scroll"><table class="ri-table"><thead><tr><th>Lane</th><th>Skill</th><th>Test family</th><th>Status</th><th class="num">Runs</th><th class="num">URLs</th><th class="num">24 h</th><th class="num">7 d</th><th class="date">Last run</th></tr></thead><tbody>${detailRows}</tbody></table></div></details>` : ''}
+      ${oosLine(d, det.recent_tests, 'test run', 'recent_tests')}
       ${recent ? `<h3>Recent test runs</h3><div class="ri-scroll"><table class="ri-table ri-recent" data-ri-recent><thead><tr><th class="date">When</th><th>Lane / skill</th><th>Status</th><th>Agent</th><th>URL</th><th>Notes</th><th>Evidence</th></tr></thead><tbody>${recent}</tbody></table></div>` : ''}
+      ${oosLine(d, det.recent_observations, 'observation', 'recent_observations')}
       ${obs ? `<h3>Recent observations</h3><div class="ri-scroll"><table class="ri-table ri-recent"><thead><tr><th class="date">When</th><th>Lane</th><th>Status</th><th>Agent</th><th>URL</th><th>Notes</th><th>Evidence</th></tr></thead><tbody>${obs}</tbody></table></div>` : ''}
     </section>`;
   }
@@ -373,46 +495,56 @@
     const det = res(d, 'url_index')?.detail || {};
     const jsd = res(d, 'js')?.detail || {};
     const s = view.state;
-    const params = det.untested_params || [];
+    const params = det.untested_params || [];  // never hidden: only an out-of-scope example URL is
     const hints = [...new Set(params.flatMap(p => p.untested_lanes || []))].sort();
     const shown = params.filter(p => !s.hint || (p.untested_lanes || []).includes(s.hint));
     const lane = s.hint;
     const paramItems = shown.slice(0, 60).map(p => {
       const target = lane || p.untested_lanes[0];
-      return `<li class="ri-hunt-item" data-ri-hunt="param" data-param="${esc(p.param_key)}"><div class="ri-hunt-main"><strong class="ri-mono">${esc(p.param_key)}</strong> ${(p.untested_lanes || []).map(h => badge(h, 'warning')).join(' ')}
+      const blocked = paramBlocks(p.scope, scopeOf(d));
+      const exampleOut = isOut(p), showExample = p.example_url && (!exampleOut || s.oos);
+      const example = !p.example_url ? '' : showExample
+        ? `<div class="ri-url${exampleOut ? ' ri-oos' : ''}" data-ri-example${exampleOut ? '="out"' : ''}>${ext(p.example_url, null, p.unsafe_chars)}${scopePill(d, p.scope)}</div>`
+        : `<div class="ri-url muted" data-ri-example="hidden">Example URL out of scope</div>`;
+      const exampleCopies = showExample ? copyBtn(p.example_url, 'URL', '', p.unsafe_chars, blocked.example)
+        + copyBtn(curlCommand(p.example_url), 'curl', 'Copy a curl command for the example URL', p.unsafe_chars, blocked.example) : '';
+      return `<li class="ri-hunt-item" data-ri-hunt="param" data-param="${esc(p.param_key)}"><div class="ri-hunt-main">${urlsLink(`<strong class="ri-mono">${esc(p.param_key)}</strong>`, {param: p.param_key, status: 'untested', lane: target}, `Browse URLs with ${p.param_key} not tested for ${target}`, p.unsafe_chars)} ${(p.untested_lanes || []).map(h => badge(h, 'warning')).join(' ')}${exampleOut ? '' : scopePill(d, p.scope)}
         <span class="hint">${esc(p.location || 'query')}${p.value_shape ? ` · ${esc(p.value_shape)}` : ''} · seen ${esc(p.observations_capped ? '1000+' : p.observations)}×</span>
-        ${p.example_url ? `<div class="ri-url">${ext(p.example_url, null, p.unsafe_chars)}</div>` : ''}</div>
-        <div class="ri-hunt-actions">${p.example_url ? copyBtn(p.example_url, 'URL', '', p.unsafe_chars) + copyBtn(curlCommand(p.example_url), 'curl', 'Copy a curl command for the example URL', p.unsafe_chars) : ''}${copyBtn(bbhNext(d.program, target, p.param_key), 'bbh next', `Copy bbh url_ingest next for lane ${target}`, p.unsafe_chars || d.unsafe_chars)}</div></li>`;
+        ${example}</div>
+        <div class="ri-hunt-actions">${exampleCopies}${copyBtn(bbhNext(d.program, target, p.param_key), 'bbh next', `Copy bbh url_ingest next for lane ${target}`, p.unsafe_chars || d.unsafe_chars, blocked.next)}</div></li>`;
     }).join('');
-    const hosts = (d.hosts?.rows || []).filter(r => r.under_tested).slice(0, 10).map(r => `<li class="ri-hunt-item" data-ri-hunt="host"><div class="ri-hunt-main"><strong class="ri-mono">${esc(r.host)}</strong> <span class="hint">${r.urls != null ? `${r.urls_approximate && !r.urls_exact ? '≈' : ''}${esc(fmtNum(r.urls))} URLs · ` : ''}${esc(r.js_files)} JS files · ${esc(r.test_runs)} test runs</span></div><div class="ri-hunt-actions">${copyBtn(r.host, 'host', '', r.unsafe_chars)}${copyBtn(bbhStatus(d.program, r.host), 'bbh status', '', r.unsafe_chars || d.unsafe_chars)}</div></li>`).join('');
-    const jsOpen = (jsd.open_observations || []).slice(0, 20).map(o => `<li class="ri-hunt-item" data-ri-hunt="js"><div class="ri-hunt-main"><strong>${esc(o.title || 'Observation')}</strong> ${badge(o.lens || 'lens', 'accent')} ${badge(o.status || 'open', statusKind(o.status))} ${o.confidence ? `<span class="hint">confidence ${esc(o.confidence)}</span>` : ''}
-        <div class="ri-next">${icon('arrow-right')} ${esc(o.next_action)}</div>${o.js_url ? `<div class="ri-url">${ext(o.js_url, null, o.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${o.js_url ? copyBtn(o.js_url, 'URL', '', o.unsafe_chars) : ''}${copyBtn(o.next_action, 'next action', '', o.unsafe_chars)}</div></li>`).join('');
-    const leads = (jsd.leads || []).slice(0, 20).map(l => `<li class="ri-hunt-item" data-ri-hunt="lead"><div class="ri-hunt-main"><strong>${esc(l.related_endpoint || l.lead_id || 'Lead')}</strong> ${l.lane ? badge(l.lane, 'warning') : ''} ${l.confidence ? `<span class="hint">confidence ${esc(l.confidence)}</span>` : ''}<div class="ri-next">${icon('arrow-right')} ${esc(l.next_action || '')}</div>${l.js_url ? `<div class="ri-url">${ext(l.js_url, null, l.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${l.js_url ? copyBtn(l.js_url, 'URL', '', l.unsafe_chars) : ''}</div></li>`).join('');
+    const hosts = (d.hosts?.rows || []).filter(r => r.under_tested && !isOut(r)).slice(0, 10).map(r => `<li class="ri-hunt-item" data-ri-hunt="host"><div class="ri-hunt-main">${urlsLink(`<strong class="ri-mono">${esc(r.host)}</strong>`, {host: r.host}, `Browse URLs on ${r.host}`, r.unsafe_chars || r.urls == null)}${scopePill(d, r.scope)} <span class="hint">${r.urls != null ? `${r.urls_approximate && !r.urls_exact ? '≈' : ''}${esc(fmtNum(r.urls))} URLs · ` : ''}${esc(r.js_files)} JS files · ${esc(r.test_runs)} test runs</span></div><div class="ri-hunt-actions">${copyBtn(r.host, 'host', '', r.unsafe_chars, blockOf(d, r))}${copyBtn(bbhStatus(d.program, r.host), 'bbh status', '', r.unsafe_chars || d.unsafe_chars, blockOf(d, r))}</div></li>`).join('');
+    const openObs = visible(jsd.open_observations, s.oos), openLeads = visible(jsd.leads, s.oos);
+    const jsOpen = openObs.slice(0, 20).map(o => `<li class="ri-hunt-item${oosClass(o)}" data-ri-hunt="js"><div class="ri-hunt-main"><strong>${esc(o.title || 'Observation')}</strong>${scopePill(d, o.scope)} ${badge(o.lens || 'lens', 'accent')} ${badge(o.status || 'open', statusKind(o.status))} ${o.confidence ? `<span class="hint">confidence ${esc(o.confidence)}</span>` : ''}
+        <div class="ri-next">${icon('arrow-right')} ${esc(o.next_action)}</div>${o.js_url ? `<div class="ri-url">${ext(o.js_url, null, o.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${o.js_url ? copyBtn(o.js_url, 'URL', '', o.unsafe_chars, blockOf(d, o)) : ''}${copyBtn(o.next_action, 'next action', '', o.unsafe_chars, blockOf(d, o))}</div></li>`).join('');
+    const leads = openLeads.slice(0, 20).map(l => `<li class="ri-hunt-item${oosClass(l)}" data-ri-hunt="lead"><div class="ri-hunt-main"><strong>${esc(l.related_endpoint || l.lead_id || 'Lead')}</strong>${scopePill(d, l.scope)} ${l.lane ? badge(l.lane, 'warning') : ''} ${l.confidence ? `<span class="hint">confidence ${esc(l.confidence)}</span>` : ''}<div class="ri-next">${icon('arrow-right')} ${esc(l.next_action || '')}</div>${l.js_url ? `<div class="ri-url">${ext(l.js_url, null, l.unsafe_chars)}</div>` : ''}</div><div class="ri-hunt-actions">${l.js_url ? copyBtn(l.js_url, 'URL', '', l.unsafe_chars, blockOf(d, l)) : ''}</div></li>`).join('');
     const hintBar = hints.length ? `<div class="segmented ri-hints" role="group" aria-label="Filter by lane hint"><button type="button" data-ri-hint="" aria-pressed="${!s.hint}">All</button>${hints.map(h => `<button type="button" data-ri-hint="${esc(h)}" aria-pressed="${s.hint === h}">${esc(h)}</button>`).join('')}</div>` : '';
     return `<section class="panel panel-pad ri-section" id="ri-hunt" aria-label="What to hunt next"><div class="blockhead"><h2>What to hunt next</h2></div>
       <p class="hint">Suggestions only: copy a URL or command and run it yourself. Nothing here sends a request.</p>
       <div class="ri-hunt-grid">
-        <div><h3>Hinted parameters without a test in that lane <span class="count">${esc(params.length)}</span></h3>${hintBar}
+        <div><h3>Hinted parameters without a test in that lane <span class="count">${esc(params.length)}</span></h3>${oosLine(d, det.untested_params, 'example URL', 'untested_params')}${hintBar}
           ${paramItems ? `<ul class="ri-hunt">${paramItems}</ul>${shown.length > 60 ? `<p class="hint">Showing 60 of ${esc(shown.length)}.</p>` : ''}` : `<p class="hint">${d.sources?.url_index?.state === 'computing' ? 'Computing…' : params.length ? 'No parameters for this lane hint.' : 'No hinted parameters without tests. Parameter hints come from url_ingest.py parameter observations.'}</p>`}</div>
-        <div><h3>Surface or JS without tests <span class="count">${esc((d.hosts?.rows || []).filter(r => r.under_tested).length)}</span></h3>${hosts ? `<ul class="ri-hunt">${hosts}</ul>` : '<p class="hint">No under-tested hosts.</p>'}
-          <h3>Open JS observations and leads <span class="count">${esc((jsd.open_observations || []).length + (jsd.leads || []).length)}</span></h3>${jsOpen || leads ? `<ul class="ri-hunt">${jsOpen}${leads}</ul>` : `<p class="hint">${res(d, 'js') ? 'No JS observations with an open next action.' : 'No JS library for this lane.'}</p>`}</div>
+        <div><h3>Surface or JS without tests <span class="count">${esc((d.hosts?.rows || []).filter(r => r.under_tested && !isOut(r)).length)}</span></h3>${hosts ? `<ul class="ri-hunt">${hosts}</ul>` : '<p class="hint">No under-tested hosts.</p>'}
+          <h3>Open JS observations and leads <span class="count">${esc(openObs.length + openLeads.length)}</span></h3>${oosLine(d, [...(jsd.open_observations || []), ...(jsd.leads || [])], 'JS item', 'js_open')}${jsOpen || leads ? `<ul class="ri-hunt">${jsOpen}${leads}</ul>` : `<p class="hint">${res(d, 'js') ? 'No JS observations with an open next action.' : 'No JS library for this lane.'}</p>`}</div>
       </div></section>`;
   }
 
   function jsHtml(d) {
     const j = res(d, 'js');
     const jsd = j?.detail || {};
+    const s = view.state;
     const empty = emptyJs(d);
-    const hostMax = Math.max(1, ...(jsd.hosts || []).map(h => h.bytes || 0));
-    const hosts = (jsd.hosts || []).slice(0, 15).map(h => `<tr><td class="ri-mono">${esc(h.host || '(no host)')}</td><td class="num">${esc(fmtNum(h.files))}</td><td class="num">${esc(fmtBytes(h.bytes))}<span class="ri-bar ri-bar-inline"><span style="width:${Math.max(2, Math.round(100 * (h.bytes || 0) / hostMax))}%"></span></span></td><td class="num">${esc(fmtNum(h.source_maps))}</td></tr>`).join('');
+    const jsHosts = visible(jsd.hosts, s.oos), mapFiles = visible(jsd.source_map_files, s.oos), latest = visible(jsd.recent_observations, s.oos);
+    const hostMax = Math.max(1, ...jsHosts.map(h => h.bytes || 0));
+    const hosts = jsHosts.slice(0, 15).map(h => `<tr class="${oosClass(h).trim()}"><td><span class="ri-mono">${esc(h.host || '(no host)')}</span>${scopePill(d, h.scope)}</td><td class="num">${esc(fmtNum(h.files))}</td><td class="num">${esc(fmtBytes(h.bytes))}<span class="ri-bar ri-bar-inline"><span style="width:${Math.max(2, Math.round(100 * (h.bytes || 0) / hostMax))}%"></span></span></td><td class="num">${esc(fmtNum(h.source_maps))}</td></tr>`).join('');
     const sigMax = Math.max(1, ...(jsd.signals || []).map(x => x.count));
     const signals = (jsd.signals || []).slice(0, 16).map(x => bar(x.signal, x.count, sigMax, `<span class="hint">${esc(fmtNum(x.files))} files</span>`)).join('');
-    const maps = (jsd.source_map_files || []).slice(0, 15).map(f => `<li><span class="ri-url">${f.js_url ? ext(f.js_url, null, f.unsafe_chars) : `<span class="ri-mono">${esc(String(f.sha256 || '').slice(0, 16))}</span>`}</span><span class="hint">${esc(fmtBytes(f.bytes))} · map ${f.source_map ? ext(f.source_map, 'link', f.unsafe_chars) : ''}</span></li>`).join('');
+    const maps = mapFiles.slice(0, 15).map(f => `<li class="${oosClass(f).trim()}"><span class="ri-url">${f.js_url ? ext(f.js_url, null, f.unsafe_chars) : `<span class="ri-mono">${esc(String(f.sha256 || '').slice(0, 16))}</span>`}</span><span class="hint">${esc(fmtBytes(f.bytes))} · map ${f.source_map ? ext(f.source_map, 'link', f.unsafe_chars) : ''}${scopePill(d, f.scope)}</span></li>`).join('');
     const lens = (jsd.lens_counts || []).slice(0, 12).map(l => `<li><span>${badge(l.lens || '—', 'accent')} ${badge(l.status || '—', statusKind(l.status))}</span><span class="num">${esc(l.count)}</span></li>`).join('');
-    const obs = (jsd.recent_observations || []).slice(0, 15).map(o => `<tr><td class="date">${isoWhen(o.updated_at || o.created_at)}</td><td>${badge(o.lens || '—', 'accent')}</td><td>${badge(o.status || '—', statusKind(o.status))}</td><td>${esc(o.confidence || '—')}</td><td><strong>${esc(o.title || '')}</strong>${o.summary ? `<span class="ri-notes">${esc(o.summary)}</span>` : ''}</td><td class="ri-url">${o.js_url ? ext(o.js_url) : ''}</td></tr>`).join('');
+    const obs = latest.slice(0, 15).map(o => `<tr class="${oosClass(o).trim()}"><td class="date">${isoWhen(o.updated_at || o.created_at)}</td><td>${badge(o.lens || '—', 'accent')}</td><td>${badge(o.status || '—', statusKind(o.status))}</td><td>${esc(o.confidence || '—')}</td><td><strong>${esc(o.title || '')}</strong>${o.summary ? `<span class="ri-notes">${esc(o.summary)}</span>` : ''}</td><td class="ri-url">${o.js_url ? ext(o.js_url, null, o.unsafe_chars) : ''}${scopePill(d, o.scope)}</td></tr>`).join('');
     return `<section class="panel panel-pad ri-section" id="ri-js" aria-label="JavaScript"><div class="blockhead"><h2>JavaScript</h2>${d.sources?.js?.origin ? `<span class="badge outline" title="Where the JS library was read from">${esc(d.sources.js.origin === 'artifact' ? 'artifact tier' : 'Shared lane')}</span>` : ''}</div>
       ${sourceNote(d, 'js', 'JS library')}${empty}
-      ${j ? `<div class="ri-split"><div><h3>Top hosts by JS</h3>${hosts ? `<div class="ri-scroll"><table class="ri-table" data-ri-js-hosts><thead><tr><th>Host</th><th class="num">Files</th><th class="num">Bytes</th><th class="num">Maps</th></tr></thead><tbody>${hosts}</tbody></table></div>` : '<p class="hint">No JS files.</p>'}</div>
+      ${j ? `${oosLine(d, [...(jsd.hosts || []), ...(jsd.source_map_files || []), ...(jsd.recent_observations || [])], 'JS row', 'js')}<div class="ri-split"><div><h3>Top hosts by JS</h3>${hosts ? `<div class="ri-scroll"><table class="ri-table" data-ri-js-hosts><thead><tr><th>Host</th><th class="num">Files</th><th class="num">Bytes</th><th class="num">Maps</th></tr></thead><tbody>${hosts}</tbody></table></div>` : '<p class="hint">No JS files.</p>'}</div>
         <div><h3>Signals across files</h3>${signals ? `<ul class="ri-bars" data-ri-signals>${signals}</ul>${jsd.signals_capped ? '<p class="hint">≈ first 50,000 files only.</p>' : ''}` : '<p class="hint">No signal counts recorded.</p>'}</div></div>
         <div class="ri-split"><div><h3>Files with source maps <span class="count">${esc(metric(j.source_maps) ?? 0)}</span></h3>${maps ? `<ul class="ri-list">${maps}</ul>` : '<p class="hint">No source maps recorded.</p>'}</div>
         <div><h3>Observations by lens and status</h3>${lens ? `<ul class="ri-kv">${lens}</ul>` : '<p class="hint">No JS observations.</p>'}</div></div>
@@ -423,8 +555,9 @@
   function programHtml() {
     const d = view.program;
     if (!d) return view.error ? '' : '<div class="state">Loading recon intel…</div>';
-    return `<nav class="ri-jump" aria-label="Recon sections"><a href="#ri-depth" data-ri-jump="ri-depth">Depth</a><a href="#ri-hosts" data-ri-jump="ri-hosts">Hosts</a><a href="#ri-looked" data-ri-jump="ri-looked">Looked for</a><a href="#ri-hunt" data-ri-jump="ri-hunt">Hunt next</a><a href="#ri-js" data-ri-jump="ri-js">JavaScript</a></nav>
-      ${depthHtml(d)}${hostsHtml(d)}${lookedForHtml(d)}${huntHtml(d)}${jsHtml(d)}
+    const s = view.state;
+    return `<nav class="ri-jump" aria-label="Recon sections"><a href="#ri-depth" data-ri-jump="ri-depth">Depth</a><a href="${esc(s.u ? '#ri-urls' : urlsHref({}))}" ${s.u ? 'data-ri-jump="ri-urls"' : 'data-ri-urls'}>URLs</a><a href="#ri-findings" data-ri-jump="ri-findings">Findings</a><a href="#ri-reports" data-ri-jump="ri-reports">Reports</a><a href="#ri-hosts" data-ri-jump="ri-hosts">Hosts</a><a href="#ri-looked" data-ri-jump="ri-looked">Looked for</a><a href="#ri-hunt" data-ri-jump="ri-hunt">Hunt next</a><a href="#ri-js" data-ri-jump="ri-js">JavaScript</a></nav>
+      ${depthHtml(d)}${s.u ? '<div data-ri-slot="urls"></div>' : ''}<div id="ri-findings" class="ri-anchor" data-ri-slot="findings"></div>${hostsHtml(d)}${lookedForHtml(d)}${huntHtml(d)}${jsHtml(d)}
       <p class="footnote">Read-only view over BBH stores. Counts from large stores are estimates where marked ≈ (MAX(id) for table sizes, rowid-window samples for distributions); "unique routes" counts distinct paths across hosts. Budget ${esc(d.budget?.query_seconds)} s per query.</p>`;
   }
 
@@ -464,18 +597,48 @@
     if (!box) return;
     const active = document.activeElement;
     const keep = active && host.contains(active) && active.id ? {id: active.id, start: active.selectionStart, end: active.selectionEnd} : null;
+    // The URL browser and the app-rendered findings/Reports block survive repaints.
+    const kept = {urls: box.querySelector('#ri-urls'), findings: ctx.app.querySelector('#recon-scope-panels')};
+    for (const node of Object.values(kept)) node?.remove();
     box.innerHTML = view.state.p ? programHtml() : overviewHtml();
+    placeSlots(box, kept);
     if (keep) { const el = host.querySelector('#' + CSS.escape(keep.id)); if (el) { el.focus({preventScroll: true}); try { if (keep.start != null) el.setSelectionRange(keep.start, keep.end); } catch {} } }
+  }
+  function placeSlots(box, kept) {
+    const d = view.program, s = view.state;
+    const findingsSlot = box.querySelector('[data-ri-slot="findings"]');
+    const panels = kept.findings;
+    if (findingsSlot && panels && panels.dataset.program === s.p) {
+      findingsSlot.append(panels);
+      const reports = panels.querySelector('#recon-reports-host');
+      if (reports && !reports.previousElementSibling?.matches?.('#ri-reports')) reports.insertAdjacentHTML('beforebegin', '<span id="ri-reports" class="ri-anchor"></span>');
+    } else if (panels) ctx.app.querySelector('.stack')?.append(panels); // keep it alive for the next paint
+    const urlsSlot = box.querySelector('[data-ri-slot="urls"]');
+    if (!urlsSlot || !d || !window.BoardReconUrls) return;
+    const node = kept.urls || Object.assign(document.createElement('section'), {id: 'ri-urls', className: 'panel ri-section ri-urls'});
+    node.setAttribute('aria-label', 'URLs');
+    urlsSlot.replaceWith(node);
+    const cap = ctx.state.data?.capabilities?.ledger_actions?.url_mark;
+    const lane = s.lane || d.lane;
+    window.BoardReconUrls.update(node, {ctx, program: s.p, programName: programName(s.p), lane, filters: urlFilters(s), cursor: s.ua,
+      hrefWith: (filters, cursor) => href({...s, ...urlState(filters, cursor)}), closeHref: href({...s, ...urlState({}, 0), u: false}),
+      onFilters: (filters, cursor) => { go({...urlState(filters, cursor)}, false); paint(); },
+      canMark: !!cap?.enabled, markOff: cap?.enabled ? '' : (window.BoardFindingActions?.OFF_HINT || 'Editing is off: the backend has not enabled the BBH writer.'),
+      // Scope: same hiding (oos=1 shows), pills and copy gate as the other Recon lists.
+      oos: s.oos, oosHref: show => href({...s, oos: show}), scopePill: (scope, state) => scopePill({scope_summary: {state}}, scope)});
   }
   function mountView(host) {
     const linked = parseQuery(ctx.state.reconQuery || '');
-    const changed = buildQuery(linked) !== buildQuery(view.state);
+    const before = view.state;
+    const changed = linked.p !== before.p || linked.lane !== before.lane || (!linked.p && buildQuery(linked) !== buildQuery(before));
+    const urlsMoved = linked.u && (!before.u || JSON.stringify(urlFilters(linked)) !== JSON.stringify(urlFilters(before)) || linked.ua !== before.ua);
     view.state = linked;
     if (view.state.p && !ctx.programs().some(p => String(p.id) === view.state.p)) { view.error = 'The linked program was not found in this Board root.'; }
     writeUrl();
     host.innerHTML = `<section class="panel ri-panel" aria-label="Recon intel"><div class="panel-pad" data-ri-controls>${controlsHtml()}</div><p class="hint ri-status" data-ri-status role="status">${statusHtml()}</p></section><div class="ri-body" data-ri-body></div>`;
     host.onclick = onClick; host.onchange = onChange; host.oninput = onInput;
     paint();
+    if (urlsMoved && view.program) requestAnimationFrame(() => ctx.app.querySelector('#ri-urls')?.scrollIntoView({block: 'start'}));
     const key = view.state.p ? `${view.state.p}|${view.state.lane || laneFor(view.state.p)}` : '';
     const have = view.state.p ? view.program && view.programKey === key : view.overview && Date.now() - view.overviewAt < 10000;
     if (changed || !have) { if (view.state.p && view.programKey !== key) view.program = null; view.polls = 0; load(); }
@@ -489,9 +652,12 @@
   function onClick(event) {
     const copy = event.target.closest('[data-ri-copy]');
     if (copy) { copyText(copy.dataset.riCopy); return; }
+    const oos = event.target.closest('[data-ri-oos]');
+    if (oos && event.button === 0 && !event.metaKey && !event.ctrlKey) { event.preventDefault(); go({oos: oos.dataset.riOos === '1'}, false); paint(); return; }
     const jump = event.target.closest('[data-ri-jump]');
     if (jump && event.button === 0 && !event.metaKey && !event.ctrlKey) { event.preventDefault(); ctx.app.querySelector('#' + CSS.escape(jump.dataset.riJump))?.scrollIntoView({block: 'start', behavior: 'smooth'}); return; }
     const t = event.target.closest('button'); if (!t) return;
+    if (t.dataset.riHostFindings != null) { openHostFindings(t); return; }
     if (t.dataset.riSort) { const k = t.dataset.riSort; go({sort: k, dir: view.state.sort === k && view.state.dir === 'desc' ? 'asc' : 'desc'}, false); paint(); }
     else if (t.dataset.riHsort) { const k = t.dataset.riHsort; go({hsort: k, hdir: view.state.hsort === k && view.state.hdir === 'desc' ? 'asc' : 'desc'}, false); paint(); }
     else if (t.dataset.riHint != null) { go({hint: t.dataset.riHint}, false); paint(); }
@@ -509,6 +675,22 @@
     view.state[id === 'ri-filter' ? 'q' : 'hq'] = clean(event.target.value).slice(0, 200);
     clearTimeout(view.qTimer);
     view.qTimer = setTimeout(() => { writeUrl(); paint(); }, 150);
+  }
+  // Findings whose asset, url or endpoint names this host: real links to each finding.
+  function openHostFindings(trigger) {
+    const d = view.program, row = d?.hosts?.rows?.find(r => r.host === trigger.dataset.riHostFindings);
+    if (!row) return;
+    const program = ctx.programs().find(p => String(p.id) === view.state.p);
+    const lane = (program?.lanes || []).find(l => String(l.name) === String(d.lane));
+    const byId = new Map((lane?.findings || []).map(f => [String(f.id ?? f.fid), f]));
+    const box = document.createElement('div');
+    const items = row.finding_ids.map(fid => {
+      const f = byId.get(String(fid));
+      return `<li><a class="link-button" href="${esc(ctx.hrefFor({program: view.state.p, lane: d.lane, section: 'findings', finding: fid}))}">${esc(f?.title || fid)}</a> <span class="id">${esc(fid)}</span> ${f ? ui().severityBadge(f.severity) : ''}</li>`;
+    }).join('');
+    box.innerHTML = `<div class="menu-label">Findings on ${esc(row.host)}</div><ul class="ri-host-findings">${items}</ul>${row.findings > row.finding_ids.length ? `<p class="hint">Showing ${row.finding_ids.length} of ${row.findings}.</p>` : ''}`;
+    ui().openPopover(trigger, box, {className: 'filter-popover ri-host-findings-popover', label: `Findings on ${row.host}`, trapTab: true});
+    box.querySelector('a')?.focus();
   }
   async function copyText(value) {
     if (!isCopySafe(value)) { ui().toast('Not copied: the value contains control characters.', 'warning'); return; }
@@ -531,13 +713,13 @@
     const anyApprox = rows.some(r => approx(r.urls));
     const withIndex = rows.filter(r => metric(r.urls) != null).length;
     const top = rows.filter(r => metric(r.urls) != null || metric(r.js_files) != null).sort((a, b) => depthGap(b) - depthGap(a)).slice(0, 5);
-    const list = top.map(r => `<li data-ri-card-row><a class="ri-program-link" href="${esc(href({p: r.id, lane: r.lane}))}">${esc(r.program)}</a> <span class="id">${esc(r.lane)}</span><span class="ri-card-meta">${num(r.urls)} URLs · ${num(r.js_files)} JS · ${num(r.test_runs)} tests</span></li>`).join('');
+    const list = top.map(r => `<li data-ri-card-row class="ri-card-row"><a class="ri-program-link ri-row-link" href="${esc(href({p: r.id, lane: r.lane}))}">${esc(r.program)}</a> <span class="id">${esc(r.lane)}</span><span class="ri-card-meta">${num(inScopeUrls(r))} ${r.in_scope_urls ? 'in-scope URLs' : 'URLs'} · ${num(inScopeJs(r))} JS · ${num(r.test_runs)} tests</span></li>`).join('');
     return `<section class="panel ri-card" aria-label="Recon depth">${head}<div class="ri-card-stats">
       <div><strong>${anyApprox ? '≈' : ''}${esc(fmtNum(sum('urls')))}</strong><span>URLs in ${esc(withIndex)} indexes</span></div>
       <div><strong>${esc(fmtNum(sum('js_files')))}</strong><span>JS files (${esc(fmtBytes(sum('js_bytes')))})</span></div>
       <div><strong>${esc(fmtNum(sum('tested_urls')))}</strong><span>tested URLs</span></div>
       <div><strong>${esc(fmtNum(rows.reduce((a, r) => a + (r.tests_recent?.last_7d || 0), 0)))}</strong><span>test runs in 7 days</span></div></div>
-      ${list ? `<h3 class="ri-card-h">Most surface per test run</h3><ul class="ri-card-list">${list}</ul>` : `<div class="state">${d.partial ? 'Computing…' : 'No URL index or JS library found yet.'}</div>`}
+      ${list ? `<h3 class="ri-card-h" title="In-scope surface where the scope was checked; out-of-scope hosts do not count">Most in-scope surface per test run</h3><ul class="ri-card-list">${list}</ul>` : `<div class="state">${d.partial ? 'Computing…' : 'No URL index or JS library found yet.'}</div>`}
       ${!d.artifact_root?.available ? `<p class="hint ri-card-foot">${esc(d.artifact_root?.message || '')}</p>` : ''}</section>`;
   }
   async function loadCard() {
@@ -574,6 +756,9 @@
     };
     card.timer = setTimeout(attempt, 0);
   }
+
+  // A URL mark recomputes the lane's summary on the server: fetch it again (polls while partial).
+  window.addEventListener('board-recon-marked', () => { if (ctx?.app.querySelector('#recon-intel-host') && view.state.p) { view.polls = 0; load({quiet: true}); } });
 
   setInterval(() => {
     if (!ctx || document.visibilityState !== 'visible') return;

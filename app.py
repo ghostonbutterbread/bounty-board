@@ -7,6 +7,10 @@ from typing import Literal, overload
 from urllib.parse import urlsplit, parse_qs
 
 from taxonomy import annotate_finding
+from recon_intel import BBH_LANES, MARK_STATUSES
+
+# Parameter locations accepted for a Board URL mark (BBH stores any string; these are its documented examples plus path/json).
+MARK_LOCATIONS = ('query', 'body', 'header', 'cookie', 'path', 'json')
 
 FAMILIES = {'web_bounty': {'web', 'api'}, 'binaries': {'apk', 'exe', 'mac'}}
 SEVERITIES = ('EXCEPTIONAL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', 'UNKNOWN')
@@ -377,6 +381,16 @@ def writer_features(writer):
             features.add('reclassify')
     except (OSError, subprocess.SubprocessError):
         pass
+    try:
+        # Recon URL marks (recon_intel.py): BBH url_ingest.py mark.
+        ingest = subprocess.run([str(writer), 'agents/url_ingest.py', '--help'], capture_output=True, text=True, timeout=15)
+        # argparse prints several {choice,...} groups (options too); look for the command group.
+        commands = [group.split(',') for group in re.findall(r'\{([a-z,-]+)\}', ingest.stdout or '')]
+        if (ingest.returncode == 0 and any('mark' in group for group in commands) and
+                all(o in ingest.stdout for o in ('--url', '--lane', '--status', '--param', '--param-location', '--notes', '--agent-id'))):
+            features.add('url_mark')
+    except (OSError, subprocess.SubprocessError):
+        pass
     return frozenset(features)
 
 
@@ -391,6 +405,9 @@ def ledger_action_capabilities(server):
         'delete': {'enabled': 'delete' in features, 'requires_status': 'archive'},
         'reclassify': {store: ({'enabled': True} if 'reclassify' in features else {'enabled': False, 'reason': RECLASSIFY_UNSUPPORTED})
                        for store in ('gadgets', 'map')},
+        # BBH url_ingest.py mark writes <program>/web only (see recon_mark).
+        'url_mark': {'enabled': 'url_mark' in features, 'statuses': list(MARK_STATUSES), 'lanes': list(BBH_LANES),
+                     'locations': list(MARK_LOCATIONS), 'board_lane': 'web'},
     }
 
 
@@ -724,10 +741,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     search_index = SearchIndex(root_snapshot, FAMILIES, read_file, ledger, _generated_navigation)
     search_slots = threading.BoundedSemaphore(4)
     # Recon intel (recon_intel.py): read-only URL index / JS library summaries, computed in the background.
+    # Scope check (scope_check.py): BBH classify through the --bbh launcher, read-only, on the recon worker.
     from recon_intel import ReconIntel, QUERY_BUDGET
-    recon = ReconIntel(lambda: (root_snapshot() or (None,))[0], lambda r: discover(r, inventory_only=True),
+    from scope_check import ScopeChecker
+    recon_root = lambda: (root_snapshot() or (None,))[0]
+    recon = ReconIntel(recon_root, lambda r: discover(r, inventory_only=True),
                        read_file, ledger, coverage, map_entries, artifact_root=artifact_root,
-                       query_budget=recon_query_budget or QUERY_BUDGET)
+                       query_budget=recon_query_budget or QUERY_BUDGET, scope=ScopeChecker(recon_root, writer))
     collaboration_lock = threading.RLock()
     portfolio_scan = threading.BoundedSemaphore(1)
     lane_reads = threading.BoundedSemaphore(8)
@@ -1333,7 +1353,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 found = ra.associate(lane_fd, family, program, lane, path)
                 if view == 'list':
                     # 'upload' (feat/board-artifact-uploads): whether the panel may upload here.
-                    from artifact_uploads import upload_state
+                    # 'deletable' per entry (feat/board-artifact-delete): whether the panel may offer Delete.
+                    from artifact_uploads import upload_state, mark_deletable
+                    mark_deletable(self.server.artifact_uploads, found)
                     return self.reply(200, {**found, 'max_zip_bytes': ra.MAX_ZIP_BYTES,
                                             'upload': upload_state(self.server.artifact_uploads, found)})
                 if view == 'zip':
@@ -1367,6 +1389,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         def artifact_upload(self):
             from artifact_uploads import handle_upload
             return handle_upload(self, self.server.artifact_uploads, root, root_snapshot, FAMILIES)
+
+        # --- Artifact delete (feat/board-artifact-delete) ----------------------
+        # Same opt-in flag; removes one listed, non-Markdown file from the
+        # report's dedicated folder. Logic in artifact_uploads.handle_delete.
+        def artifact_delete(self):
+            from artifact_uploads import handle_delete
+            return handle_delete(self, self.server.artifact_uploads, root, root_snapshot, FAMILIES)
 
         def artifact_headers(self, content_type, disposition):
             self.send_header('Content-Type', content_type)
@@ -1544,7 +1573,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.search_request(url)
             if url.path == '/api/recent-reports':
                 return self.recent_reports_request(url)
-            if url.path in ('/api/recon/overview', '/api/recon/program'):
+            if url.path in ('/api/recon/overview', '/api/recon/program', '/api/recon/urls', '/api/recon/url'):
                 from recon_intel import handle_request
                 return handle_request(self, url, recon)
             if url.path == '/api/archive-state':
@@ -1783,6 +1812,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         def do_POST(self):
             if urlsplit(self.path).path == '/api/report-artifact-upload':  # feat/board-artifact-uploads
                 return self.artifact_upload()
+            if urlsplit(self.path).path == '/api/report-artifact-delete':  # feat/board-artifact-delete
+                return self.artifact_delete()
             if urlsplit(self.path).path.startswith('/api/live/'):
                 if live is None:
                     return self.reply(404, {'error': 'live_edit_disabled'})
@@ -1794,7 +1825,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return self.report_na_request()
             # Ledger actions share the metadata lock with PATCH /api/finding.
             action = {'/api/finding/submission': self.set_submission, '/api/finding/new': self.add_finding,
-                      '/api/finding/reclassify': self.reclassify_finding, '/api/finding/delete': self.delete_finding}.get(urlsplit(self.path).path)
+                      '/api/finding/reclassify': self.reclassify_finding, '/api/finding/delete': self.delete_finding,
+                      '/api/recon/mark': self.recon_mark}.get(urlsplit(self.path).path)
             if action:
                 with metadata_write_lock:
                     return action()
@@ -1962,7 +1994,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             the writer because the update may be partial."""
             import subprocess
             try:
-                result = subprocess.run([str(self.server.writer), *argv], capture_output=True, text=True, timeout=60)
+                result = subprocess.run([str(self.server.writer), *argv], capture_output=True, text=True,
+                                        timeout=getattr(self.server, 'writer_timeout', 60))
                 # The ledger may have changed (even after a failure): let Recent re-read it.
                 search_index.touch()
                 if result.returncode != 0:
@@ -2227,6 +2260,101 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 patchfile = Path(temp) / 'patch.json'
                 patchfile.write_text(json.dumps(patch), encoding='utf-8')
                 return self.run_writer(self.hunter_args(program, family, lane, '--edit-finding', fid, '--patch-file', str(patchfile)), verify_finding, lane_path=lane_path)
+
+        def recon_mark(self):
+            """POST /api/recon/mark: record one URL review through BBH url_ingest.py mark.
+
+            BBH resolves its database as $HOME/Shared/web_bounty/<program>/web/recon/
+            url_index/url_index.sqlite (no root option). The Board runs it only when
+            that file is the same file (device and inode) as the one this view read,
+            and only for a URL id that is in the index with exactly the URL the
+            client saw; it verifies the new test run afterwards. BBH has no delete."""
+            import re
+            import recon_intel as ri
+            if (not self.trusted_request(require_origin=True) or
+                self.headers.get('X-Requested-With') != 'Bounty-Board' or
+                self.headers.get('Content-Type', '').lower() != 'application/json' or
+                self.headers.get('Transfer-Encoding')):
+                return self.reply(403, {'error': 'untrusted_origin'})
+            if not self.server.writer_enabled or 'url_mark' not in self.server.writer_features:
+                return self.reply(503, {'error': 'writer_unavailable'})
+            required = {'family', 'program', 'lane', 'root_instance', 'url_id', 'url', 'test_lane', 'status'}
+            try:
+                lengths = self.headers.get_all('Content-Length', [])
+                if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= 16384:
+                    raise ValueError('invalid length')
+                payload = json.loads(self.rfile.read(int(lengths[0])))
+                if not isinstance(payload, dict) or not required <= set(payload) or set(payload) - required - {'param', 'param_location', 'notes'}:
+                    raise ValueError('invalid payload')
+                text_ok = lambda v, n: isinstance(v, str) and 0 < len(v) <= n and not ri.is_unsafe(v)
+                if (payload['family'] != 'web_bounty' or not isinstance(payload['lane'], str) or payload['lane'] not in FAMILIES['web_bounty'] or
+                        not isinstance(payload['program'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', payload['program']) or
+                        not isinstance(payload['root_instance'], str) or not re.fullmatch(r'[a-f0-9]{64}', payload['root_instance']) or
+                        type(payload['url_id']) is not int or payload['url_id'] < 1 or not text_ok(payload['url'], 2000) or
+                        payload['test_lane'] not in BBH_LANES or payload['status'] not in MARK_STATUSES or
+                        ('param' in payload and not text_ok(payload['param'], 120)) or
+                        ('param_location' in payload and ('param' not in payload or payload['param_location'] not in MARK_LOCATIONS)) or
+                        ('notes' in payload and not (text_ok(payload['notes'], 500) and re.fullmatch(LINE_CHAR + '+', payload['notes'])))):
+                    raise ValueError('invalid fields')
+            except (ValueError, UnicodeError, json.JSONDecodeError):
+                return self.reply(400, {'error': 'invalid_recon_mark'})
+            family, program, lane, url_id = (payload[k] for k in ('family', 'program', 'lane', 'url_id'))
+            snapshot = root_snapshot()
+            if not snapshot or payload['root_instance'] != snapshot[2]:
+                return self.reply(409, {'error': 'root_changed'})
+            if lane != 'web':
+                return self.reply(409, {'error': 'mark_target_mismatch',
+                                        'message': f'BBH url_ingest writes only the web lane; this view is the {lane} lane. Not marked.'})
+            try:
+                found = recon.url_index_path(family, program, lane)
+            except ri.SourceError as error:
+                return self.reply(409, {'error': 'url_index_unavailable', 'message': f'The URL index is not readable ({error.code}). Not marked.'})
+            if found is None:
+                return self.reply(404, {'error': 'recon_lane_not_found'})
+            db = found[1]
+            # Same file as BBH would open: HOME is passed to BBH unchanged.
+            home = os.environ.get('HOME') or str(Path.home())
+            target = Path(home) / 'Shared' / 'web_bounty' / program / 'web' / 'recon' / 'url_index' / 'url_index.sqlite'
+            try:
+                same = os.stat(target)[1:3] == os.stat(db)[1:3]
+            except OSError:
+                same = False
+            if not same:
+                return self.reply(409, {'error': 'mark_target_mismatch',
+                                        'message': f'BBH would write {target}, but this view reads {db}. Not marked: the write would go to a different database.'})
+            try:
+                before = ri.raw_url(db, url_id, recon.budget)
+            except (ri.SourceError, ri.QueryTimeout):
+                return self.reply(409, {'error': 'url_index_unavailable', 'message': 'The URL index could not be read. Not marked.'})
+            if before is None:
+                return self.reply(404, {'error': 'url_not_found'})
+            if before[0] != payload['url']:
+                return self.reply(409, {'error': 'url_changed', 'message': 'This URL changed in the index. Refresh and try again.'})
+            argv = ['agents/url_ingest.py', 'mark', program, f'--url={before[0]}', f"--lane={payload['test_lane']}",
+                    f"--status={payload['status']}", '--agent-id=bounty-board']
+            if 'param' in payload:
+                argv += [f"--param={payload['param']}", f"--param-location={payload.get('param_location', 'query')}"]
+            if 'notes' in payload:
+                argv += [f"--notes={payload['notes']}"]
+
+            def verify(_result):
+                # A run newer than the pre-call maximum, made by the Board, with the requested
+                # values. Agents may mark the same URL meanwhile; their runs do not count.
+                try:
+                    runs = ri.board_runs(db, url_id, before[2], 'bounty-board', recon.budget)
+                except (ri.SourceError, ri.QueryTimeout):
+                    return None
+                wanted = (payload['test_lane'], payload['status'], payload.get('param', ''))
+                if not any((run[1], run[2], run[3] or '') == wanted for run in runs):
+                    return None
+                recon.refresh_url_index(family, program, lane)
+                history = ri.url_history(db, url_id, recon.budget)
+                page = ri.list_urls(db, {}, url_id - 1, 1, recon.budget, 'asc')
+                item = page['items'][0] if page['items'] and page['items'][0]['id'] == url_id else None
+                if item is not None:
+                    recon.annotate_urls(program, [item])  # scope from the cache only; marking is not scope-gated
+                return 200, {'url': history, 'item': item}
+            return self.run_writer(argv, verify)
 
         def delete_finding(self):
             """Permanently delete one archived finding via BBH --delete-finding.
@@ -2516,8 +2644,9 @@ def parse_config(argv=None):
     parser.add_argument('--retention-min-free-bytes', type=int, default=DEFAULT_MIN_FREE_BYTES,
                         help='free-space floor in bytes (default 1073741824)')
     parser.add_argument('--artifact-uploads', action='store_true',
-                        help='opt in to uploading files from the artifacts panel into report folders under the data root '
-                        '(Syncthing distributes them); see docs/integrations/artifact-uploads.md')
+                        help='opt in to uploading files from the artifacts panel into report folders under the data root, '
+                        'and deleting non-Markdown files there (Syncthing distributes both); '
+                        'see docs/integrations/artifact-uploads.md')
     parser.add_argument('--artifact-root', type=Path,
                         help='bulk artifact tier holding JS libraries (default: /mnt/bounty when it is a mount point)')
     parser.add_argument('--recon-query-budget', type=float, default=None,
