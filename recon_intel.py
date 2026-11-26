@@ -994,6 +994,8 @@ class ReconIntel:
         self.stopped = False
         self.lanes_cache = (0.0, None)
         self.url_slots = threading.BoundedSemaphore(2)
+        self.mark_debounce = MARK_REFRESH_DEBOUNCE
+        self.refresh_last, self.refresh_timers = {}, {}
         self.thread = threading.Thread(target=self._worker, name='recon-intel', daemon=True)
         if start:
             self.thread.start()
@@ -1275,19 +1277,48 @@ class ReconIntel:
         return status, body
 
     def refresh_url_index(self, family, program, lane):
-        """Recompute one lane's URL index summary now (after a write), ahead of the refresh interval."""
+        """Recompute one lane's URL index summary after a write, ahead of the refresh interval.
+
+        Leading and trailing debounce per index: the first write recomputes at
+        once (a single mark shows up immediately); writes within MARK_REFRESH_DEBOUNCE
+        of the previous one (a bulk mark) coalesce into one recompute that runs
+        MARK_REFRESH_DEBOUNCE after the last write, so the summary is current
+        at the end without recomputing the full detail after every mark."""
         try:
             found = self.url_index_path(family, program, lane)
         except SourceError:
             return
         if found is None:
             return
+        path = found[1]
         with self.lock:
-            key = ('url_index', str(found[1]))
-            if key in self.cache:
-                self.cache[key]['sig'] = None
-                self.cache[key]['computed_at'] = 0
-            self._schedule('url_index', found[1], 1, front=True)
+            now = time.monotonic()
+            last = self.refresh_last.get(str(path))
+            self.refresh_last[str(path)] = now
+            timer = self.refresh_timers.pop(str(path), None)
+            if timer is not None:
+                timer.cancel()
+            if last is None or now - last >= self.mark_debounce:
+                self._refresh_now(path)
+                return
+            timer = threading.Timer(self.mark_debounce, self._refresh_trailing, (path,))
+            timer.daemon = True
+            self.refresh_timers[str(path)] = timer
+            timer.start()
+
+    def _refresh_trailing(self, path):
+        with self.lock:
+            self.refresh_timers.pop(str(path), None)
+            if not self.stopped:
+                self._refresh_now(path)
+
+    def _refresh_now(self, path):
+        """Caller holds the lock."""
+        key = ('url_index', str(path))
+        if key in self.cache:
+            self.cache[key]['sig'] = None
+            self.cache[key]['computed_at'] = 0
+        self._schedule('url_index', path, 1, front=True)
 
     def wait_idle(self, timeout=30.0):
         """Test helper: block until the queue drains."""
@@ -1301,6 +1332,9 @@ class ReconIntel:
 
     def close(self):
         with self.lock:
+            for timer in self.refresh_timers.values():
+                timer.cancel()
+            self.refresh_timers.clear()
             self.stopped = True
             self.queue.clear()
             self.wake.notify_all()
@@ -1321,6 +1355,7 @@ URL_SCAN_FIRST = 5000       # first id window; doubles while windows come back e
 URL_SCAN_MAX = 200_000
 URL_HISTORY_LIMIT = 200
 URL_ENRICH_LIMIT = 2000     # observation rows fetched for one page
+MARK_REFRESH_DEBOUNCE = 2.0 # seconds: marks closer than this share one summary recompute
 
 
 def url_filter_sql(filters):
@@ -1488,16 +1523,19 @@ def raw_url(path, url_id, budget=QUERY_BUDGET):
         db.close()
 
 
-def latest_run(path, url_id, budget=QUERY_BUDGET):
-    """Newest test run (lane, status, param_key, agent_id) of one URL plus its observation for that lane."""
+def board_runs(path, url_id, after_id, agent='bounty-board', budget=QUERY_BUDGET):
+    """Test runs of one URL with id > after_id recorded by agent: (id, lane, status, param_key).
+
+    Used to verify a Board mark without assuming nobody else wrote meanwhile."""
     db = ReadOnlyDB(path, budget)
     try:
-        cols = db.columns('test_runs')
-        agent = 'agent_id' if 'agent_id' in cols else 'NULL'
-        row = db.query(f'SELECT id, lane, status, param_key, {agent} FROM test_runs WHERE url_id = ? ORDER BY id DESC LIMIT 1', (url_id,))
-        return row[0] if row else None
+        if 'agent_id' not in db.columns('test_runs'):
+            return []
+        return db.query('SELECT id, lane, status, param_key FROM test_runs WHERE url_id = ? AND id > ? AND agent_id = ? '
+                        'ORDER BY id LIMIT 20', (url_id, after_id, agent))
     finally:
         db.close()
+
 
 def _val(source, *keys):
     value = source.get('result') if isinstance(source, dict) else None

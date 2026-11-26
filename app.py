@@ -2305,13 +2305,14 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 argv += [f"--notes={payload['notes']}"]
 
             def verify(_result):
+                # A run newer than the pre-call maximum, made by the Board, with the requested
+                # values. Agents may mark the same URL meanwhile; their runs do not count.
                 try:
-                    after = ri.raw_url(db, url_id, recon.budget)
-                    run = ri.latest_run(db, url_id, recon.budget)
+                    runs = ri.board_runs(db, url_id, before[2], 'bounty-board', recon.budget)
                 except (ri.SourceError, ri.QueryTimeout):
                     return None
-                if (not after or after[1] != before[1] + 1 or not run or run[0] <= before[2] or
-                        run[1] != payload['test_lane'] or run[2] != payload['status'] or (run[3] or '') != payload.get('param', '')):
+                wanted = (payload['test_lane'], payload['status'], payload.get('param', ''))
+                if not any((run[1], run[2], run[3] or '') == wanted for run in runs):
                     return None
                 recon.refresh_url_index(family, program, lane)
                 history = ri.url_history(db, url_id, recon.budget)

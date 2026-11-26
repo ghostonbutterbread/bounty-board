@@ -63,6 +63,10 @@ status = 'dismissed' if mode == 'wrong' else opt('--status')
 lane, param = opt('--lane'), opt('--param') or ''
 db.execute('INSERT INTO test_runs (url_id, lane, param_key, param_location, skill, test_family, status, agent_id, notes, started_at, completed_at) '
            "VALUES (?, ?, ?, ?, 'manual', 'general-review', ?, ?, ?, ?, ?)", (url_id, lane, param, opt('--param-location'), status, opt('--agent-id'), opt('--notes'), now, now))
+if mode == 'concurrent':
+    # An agent marks the same URL while the Board's BBH call runs.
+    db.execute('INSERT INTO test_runs (url_id, lane, param_key, skill, test_family, status, agent_id, started_at, completed_at) '
+               "VALUES (?, 'xss', 'q', 'manual', 'general-review', 'dismissed', 'agent-x', ?, ?)", (url_id, now, now))
 if db.execute('SELECT id FROM observations WHERE url_id = ? AND lane = ? AND param_key = ?', (url_id, lane, param)).fetchone():
     db.execute('UPDATE observations SET status = ?, notes = ?, created_at = ? WHERE url_id = ? AND lane = ? AND param_key = ?',
                (status, opt('--notes'), now, url_id, lane, param))
@@ -264,7 +268,9 @@ class MarkTests(Base):
     writer = True
 
     def mark(self, item=None, **fields):
-        item = item or self.urls(status='untested', host='api.example.test', limit=1)[1]['items'][0]
+        # The synthetic index repeats some canonical URLs (BBH's unique url_hash prevents that);
+        # static.example.test URLs are unique, so the fake resolves the same row BBH would.
+        item = item or self.urls(status='untested', host='static.example.test', limit=1)[1]['items'][0]
         body = {'family': 'web_bounty', 'program': 'acme-demo', 'lane': 'web', 'root_instance': self.root_instance(),
                 'url_id': item['id'], 'url': item['url'], 'test_lane': 'ssrf', 'status': 'surface_reviewed', **fields}
         body = {k: v for k, v in body.items() if v is not None}
@@ -301,6 +307,47 @@ class MarkTests(Base):
         self.assertEqual(after['result']['tested_urls']['value'], 5)
         self.assertGreater(after['computed_at'], before['computed_at'])
         self.assertEqual(self.urls(status='surface_reviewed', test_lane='ssrf')[1]['items'][0]['id'], item['id'])
+
+    def test_agent_mark_during_the_call_does_not_fail_the_board_mark(self):
+        (self.base / 'mode').write_text('concurrent')
+        item, (status, body) = self.mark(param='id', param_location='query')
+        self.assertEqual(status, 200, body)
+        self.assertTrue(self.server.writer_enabled)
+        db = sqlite3.connect(f'file:{self.db}?mode=ro', uri=True)
+        try:
+            agents = [r[0] for r in db.execute('SELECT agent_id FROM test_runs WHERE url_id = ? ORDER BY id', (item['id'],))]
+        finally:
+            db.close()
+        self.assertEqual(agents, ['bounty-board', 'agent-x'])  # the agent's run is newer than the Board's
+        self.assertEqual(self.mark()[1][0], 200)  # still enabled
+
+    def test_bulk_marks_share_one_or_two_summary_recomputes(self):
+        svc = self.server.recon
+        self.assertEqual(svc.mark_debounce, ri.MARK_REFRESH_DEBOUNCE)  # 2 s
+        svc.program('web_bounty', 'acme-demo', 'web')
+        self.assertTrue(svc.wait_idle(30))
+        computes = []
+        original = svc._compute
+        def counting(kind, path, level):
+            if kind == 'url_index':
+                computes.append(time.monotonic())
+            return original(kind, path, level)
+        svc._compute = counting
+        db = sqlite3.connect(self.db)
+        for n in range(20):
+            db.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, source, first_seen, last_seen) "
+                       "VALUES (?, ?, 'rb', 'pb', 'bulk.example.test', '/b', '[]', 's', 'a', 'b')", (f'https://bulk.example.test/b{n}', f'hb{n}'))
+        db.commit()
+        db.close()
+        items = self.urls(host='bulk.example.test', limit=20)[1]['items']
+        self.assertEqual(len(items), 20)
+        for item in items:
+            self.assertEqual(self.mark(item, test_lane='xss', status='discovered')[1][0], 200)
+        time.sleep(svc.mark_debounce + 0.5)
+        self.assertTrue(svc.wait_idle(30))
+        self.assertLessEqual(len(computes), 2, f'{len(computes)} recomputes for 20 marks')
+        self.assertGreaterEqual(len(computes), 1)
+        self.assertEqual(svc.program('web_bounty', 'acme-demo', 'web')['sources']['url_index']['result']['tested_urls']['value'], 4 + 20)
 
     def test_trust_checks_and_validation_never_run_bbh(self):
         item = self.urls(limit=1)[1]['items'][0]
