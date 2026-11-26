@@ -356,10 +356,13 @@ class DockerBackend:
     the host user's UID/GID, and exactly two mounts: the report folder
     (read-write, at /report) and the per-session proxy socket directory
     (read-only). No Docker socket, no host network, nothing else from the host.
+
+    With ``ports_hub`` (``--preview-ports``) the same directory also holds the
+    host-owned ``ports.sock`` that the in-container agent dials out to.
     """
 
     def __init__(self, *, image, state_dir, proxy, prefix='bbterm-', docker='docker', memory='1g', cpus='1.0',
-                 pids=256, uid=None, gid=None, instance=None):
+                 pids=256, uid=None, gid=None, instance=None, ports_hub=None):
         if not re.fullmatch(r'[a-z][a-z0-9-]{1,30}-', prefix):
             raise ValueError('container prefix must look like "bbterm-"')
         self.image, self.prefix, self.docker = image, prefix, docker
@@ -367,6 +370,8 @@ class DockerBackend:
         self.uid = os.getuid() if uid is None else uid
         self.gid = os.getgid() if gid is None else gid
         self.proxy = proxy
+        self.ports_hub = ports_hub
+        self.agent_hub = None  # terminal_report_agent.ReportAgentHub with --report-agent
         self.sock_root = Path(state_dir) / 'proxy'
         self.sock_root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.sock_root, 0o711)
@@ -405,6 +410,8 @@ class DockerBackend:
                 '--workdir', MOUNT_TARGET]
         for key, value in env.items():
             args += ['--env', f'{key}={value}']
+        if self.agent_hub is not None:
+            args += self.agent_hub.run_args_extra(session)  # report agent: read-only CLI binary and skills
         return args + [self.image]
 
     def create(self, session):
@@ -422,6 +429,11 @@ class DockerBackend:
             raise
         self.handles[session.id] = (handle, dir_fd)
         try:
+            if self.ports_hub is not None:
+                # Same directory, same safe creation: host-owned, 0600, never a path the container can write.
+                session.ports = self.ports_hub.open_session(f'/proc/self/fd/{dir_fd}/ports.sock', session)
+            if self.agent_hub is not None:
+                self.agent_hub.open_relay(dir_fd, session)  # model.sock, same directory and creation rules
             self.run(*self.run_args(session, sock_dir))
             # Docker resolved the source path while we were not looking; make
             # sure it is still the directory we validated (no symlink swap).
@@ -446,6 +458,9 @@ class DockerBackend:
         return None
 
     def destroy(self, session):
+        session.close_ports()  # first: a failing docker rm must not leave listeners behind
+        if self.agent_hub is not None:
+            self.agent_hub.session_destroyed(session)  # ends the report agent, closes model.sock
         self.run('rm', '-f', self.name(session), check=False, timeout=60)
         entry = self.handles.pop(session.id, None)
         if entry is not None:
@@ -496,12 +511,26 @@ class DockerBackend:
 class LocalBackend:
     """TEST ONLY: plain local bash started in the report folder. Not isolated in any way."""
 
-    def __init__(self, base):
+    def __init__(self, base, ports_hub=None):
         self.base = Path(base)
         self.base.mkdir(parents=True, exist_ok=True)
+        self.ports_hub = ports_hub
+        self.agent_hub = None
+        self.dir_fds = {}
+
+    def ports_dir(self, session):
+        return self.base / 'ports' / session.id
 
     def create(self, session):
-        pass
+        if self.ports_hub is not None or self.agent_hub is not None:
+            folder = self.ports_dir(session)
+            folder.mkdir(parents=True)
+            dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self.dir_fds[session.id] = dir_fd
+            if self.ports_hub is not None:
+                session.ports = self.ports_hub.open_session(f'/proc/self/fd/{dir_fd}/ports.sock', session)
+            if self.agent_hub is not None:
+                self.agent_hub.open_relay(dir_fd, session)
 
     def shell_argv(self, session):
         return ['bash', '--noprofile', '--norc', '-i']
@@ -514,7 +543,13 @@ class LocalBackend:
                 'PS1': 'sandbox$ ', 'LANG': 'C.UTF-8'}
 
     def destroy(self, session):
-        pass
+        session.close_ports()
+        if self.agent_hub is not None:
+            self.agent_hub.session_destroyed(session)
+        dir_fd = self.dir_fds.pop(session.id, None)
+        if dir_fd is not None:
+            os.close(dir_fd)
+            shutil.rmtree(self.ports_dir(session), ignore_errors=True)
 
     # Pause stands in for docker pause: stop/continue the shell's process group.
     def pause(self, session):
@@ -544,6 +579,11 @@ class Session:
         self.viewers = set()
         self.created = time.time()
         self.left_at = manager.clock()
+        self.active_at = None  # last preview-port traffic: delays the pause, never the removal
+        self.ports = None      # terminal_ports.SessionPorts with --preview-ports
+        self.agent = None      # terminal_report_agent.ReportAgent with --report-agent (second PTY)
+        self.relay = None      # its model.sock (terminal_relay.RelaySession)
+        self.agent_mounts = {}
         self.folder = None
         self.mount = None
         self.notes = []
@@ -566,7 +606,25 @@ class Session:
                 'mount_reason': self.mount.reason if self.mount else None,
                 'mount_rule': self.mount.rule if self.mount else None, 'fid': self.mount.fid if self.mount else None,
                 'viewers': len(self.viewers), 'notes': list(self.notes), 'running': self.proc is not None,
-                'paused': self.paused}
+                'paused': self.paused, 'ports': self.ports.items() if self.ports is not None else []}
+
+    def viewer_count(self):
+        """Shell viewers plus report-agent viewers: both keep the sandbox from pausing and removal."""
+        return len(self.viewers) + (self.agent.viewer_count() if self.agent is not None else 0)
+
+    # Preview ports (terminal_ports.SessionPorts owner interface).
+    def ports_changed(self):
+        with self.lock:
+            if not self.closed and self.ports is not None:
+                self._broadcast({'type': 'ports', 'ports': self.ports.items()})
+
+    def ports_activity(self):
+        self.manager.port_activity(self)
+
+    def close_ports(self):
+        ports, self.ports = self.ports, None
+        if ports is not None:
+            ports.close()
 
     # Container lifecycle -- caller holds self.lock.
     def _start(self):
@@ -720,6 +778,7 @@ class SessionManager:
         self.transcript_bytes = transcript_bytes
         self.clock = clock
         self.sessions = {}
+        self.agent_hub = None  # set by the service with --report-agent (pause hold)
         self.removed_idle = collections.OrderedDict()  # key -> True, for the "removed after idle" notice
         self.lock = threading.Lock()
         self.closed = False
@@ -747,7 +806,8 @@ class SessionManager:
 
     def _pick_victim_locked(self):
         """Paused sandbox idle longest first, then a running viewerless one; never one with a viewer."""
-        idle = [s for s in self.sessions.values() if not s.viewers]
+        idle = [s for s in self.sessions.values() if not s.viewer_count()
+                and not (self.agent_hub is not None and self.agent_hub.pause_held(s))]  # nor an agent at work
         if not idle:
             return None
         return min(idle, key=lambda s: (not s.paused, s.left_at))
@@ -792,6 +852,8 @@ class SessionManager:
                     event = 'started'
                 elif not self._alive_locked(session):
                     event = self._recreate_locked(session, 'recreated_vanished')
+                if viewer is None:
+                    return session  # report agent start: the sandbox without a shell viewer
                 return self._join_locked(session, viewer, event)
         raise SandboxError('sandbox_busy', 'The sandbox is changing state. Try again.')
 
@@ -844,11 +906,29 @@ class SessionManager:
         session._broadcast({'type': 'viewers', 'count': len(session.viewers)})
         return session
 
+    def port_activity(self, session):
+        """Preview-port traffic: resets the pause timer (not removal) and unpauses a paused sandbox."""
+        session.active_at = self.clock()
+        if not session.paused:
+            return
+        with session.lock:
+            if session.closed or not session.paused:
+                return
+            try:
+                self.backend.unpause(session)
+            except SandboxVanished:
+                return  # the next attach recreates it
+            except Exception as error:
+                self.log(f'unpause for a preview port failed: {error}')
+                return
+            session.paused = False
+            session.active_at = self.clock()
+
     def detach(self, session, viewer):
         with session.lock:
             if viewer in session.viewers:
                 session.viewers.discard(viewer)
-                if not session.viewers:
+                if not session.viewer_count():
                     session.left_at = self.clock()
                 session._broadcast({'type': 'viewers', 'count': len(session.viewers)})
 
@@ -889,14 +969,19 @@ class SessionManager:
     def reap_idle(self):
         """One reaper pass: pause and remove idle sandboxes. Returns (paused, removed)."""
         with self.lock:
-            candidates = [s for s in self.sessions.values() if not s.viewers]
+            candidates = [s for s in self.sessions.values() if not s.viewer_count()]
         paused, removed = [], []
         for session in candidates:
             with session.lock:
-                if session.closed or session.viewers:
+                if session.closed or session.viewer_count():
                     continue
-                idle = self.clock() - session.left_at
-                if idle >= self.remove_after:
+                now = self.clock()
+                idle = now - session.left_at
+                # Preview-port traffic keeps a sandbox running, but removal still
+                # counts from when the last terminal viewer left.
+                quiet = now - max(session.left_at, session.active_at if session.active_at is not None else session.left_at)
+                working = self.agent_hub is not None and self.agent_hub.pause_held(session, now)
+                if idle >= self.remove_after and not working:  # never remove a sandbox whose agent is at work
                     session.closed = True
                     with self.lock:
                         if self.sessions.get(session.key) is session:
@@ -906,7 +991,7 @@ class SessionManager:
                             self.removed_idle.popitem(last=False)
                     session._destroy()
                     removed.append(session)
-                elif idle >= self.pause_after and not session.paused and session.started:
+                elif quiet >= self.pause_after and not session.paused and session.started and not working:
                     try:
                         self.backend.pause(session)
                     except SandboxVanished:

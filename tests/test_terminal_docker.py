@@ -2,10 +2,13 @@
 
 Skipped unless BBTERM_DOCKER_TESTS=1. Uses only containers and images named
 ``bbterm-test-*`` and removes its containers when done. Build the image first
-(no network needed):
+(no network needed); ``BBTERM_TEST_IMAGE`` picks another tag:
 
   docker build -t bbterm-test-image:latest --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
       -f sandbox/Dockerfile.test sandbox/
+  BBTERM_TEST_IMAGE=bbterm-test-image-ports:latest BBTERM_DOCKER_TESTS=1 python3 -m unittest tests.test_terminal_docker
+
+Preview ports run with a loopback-only PortsHub (no Tailscale address).
 
 There is no internet in tests, so "allowed egress" is a local HTTP server on
 127.0.0.2 presented through the proxy's TEST-ONLY override
@@ -26,12 +29,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import terminal_ports  # noqa: E402
 import terminal_proxy  # noqa: E402
 import terminal_sandbox as sb  # noqa: E402
 from tests import terminal_fixture as fx  # noqa: E402
 from tests.test_terminal_sandbox import FakeViewer  # noqa: E402
 
-IMAGE = 'bbterm-test-image:latest'
+IMAGE = os.environ.get('BBTERM_TEST_IMAGE', 'bbterm-test-image:latest')
 PREFIX = 'bbterm-test-'
 ENABLED = os.environ.get('BBTERM_DOCKER_TESTS') == '1'
 
@@ -119,8 +123,12 @@ class DockerSandboxTests(unittest.TestCase):
         cls.proxy = terminal_proxy.FilteringProxy(allow_networks=[ipaddress.ip_network('127.0.0.2/32')],
                                                   static_hosts={'allowed.example.test': '127.0.0.2'}, connect_timeout=3)
         cls.now = [0.0]
+        from tests.test_terminal_ports import free_range
+        cls.ports_range = free_range()
+        cls.hub = terminal_ports.PortsHub(state_dir=cls.base / 'ports-state', ports_range=cls.ports_range, refresh_interval=0,
+                                          tailscale=terminal_ports.TailscaleAddress(addresses=lambda: set()))
         cls.backend = sb.DockerBackend(image=IMAGE, state_dir=cls.base / 'state', proxy=cls.proxy, prefix=PREFIX,
-                                       memory='256m', cpus='0.5', pids=128)
+                                       memory='256m', cpus='0.5', pids=128, ports_hub=cls.hub)
         cls.manager = sb.SessionManager(cls.root, cls.backend, max_sessions=3, pause_after=30, remove_after=60, min_free_memory=0,
                                         clock=lambda: cls.now[0], reap_interval=0)
         cls.viewer = FakeViewer()
@@ -131,6 +139,7 @@ class DockerSandboxTests(unittest.TestCase):
     def tearDownClass(cls):
         try:
             cls.manager.close()
+            cls.hub.close()
             cls.proxy.close()
             for server in (cls.allowed, cls.loopback):
                 server.shutdown()
@@ -141,8 +150,8 @@ class DockerSandboxTests(unittest.TestCase):
                 docker('rm', '-f', *leftovers, check=False)
             shutil.rmtree(cls.base, ignore_errors=True)
 
-    def exec(self, *cmd, env=()):
-        flags = [arg for item in env for arg in ('-e', item)]
+    def exec(self, *cmd, env=(), detach=False):
+        flags = [arg for item in env for arg in ('-e', item)] + (['-d'] if detach else [])
         return docker('exec', *flags, self.name, *cmd, check=False)
 
     def test_01_hardening_flags(self):
@@ -204,7 +213,7 @@ class DockerSandboxTests(unittest.TestCase):
         self.assertNotIn('docker.sock', mountinfo)
         root_mounts = [line for line in mountinfo.splitlines() if str(self.base) in line or '/report' in line]
         self.assertEqual(len([m for m in root_mounts if ' /report ' in m]), 1)
-        self.assertEqual(self.exec('ls', '/run/bbterm').stdout.split(), ['proxy.sock'])
+        self.assertEqual(self.exec('ls', '/run/bbterm').stdout.split(), ['ports.sock', 'proxy.sock'])
         grep = self.exec('sh', '-c', 'grep -rl "must never be visible" / --exclude-dir=proc --exclude-dir=sys 2>/dev/null; true')
         self.assertEqual(grep.stdout.strip(), '')
 
@@ -280,6 +289,75 @@ class DockerSandboxTests(unittest.TestCase):
         session.write(b'kill %1; cd /report\n')
         print(f'\nPAUSE EVIDENCE {c1 - c0} ticks across {elapsed:.1f} s including a 2 s pause; after resume {counts}')
 
+    def wait_ports(self, predicate, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            items = self.session.ports.items() if self.session.ports else []
+            if predicate(items):
+                return items
+            time.sleep(0.2)
+        raise AssertionError(f'ports not as expected: {items}')
+
+    def test_068_preview_port_end_to_end(self):
+        import urllib.request
+        if self.exec('test', '-x', '/usr/local/bin/bbterm-ports').returncode != 0:
+            self.fail(f'{IMAGE} has no ports agent; rebuild it from sandbox/Dockerfile.test')
+        # One process carries both the proxy forwarder and the ports agent (review round 1, memory).
+        top = docker('top', self.name, '-o', 'pid,args').stdout
+        self.assertEqual(len([l for l in top.splitlines() if 'bbterm-forward' in l and 'docker-init' not in l]), 1, top)
+        self.assertNotIn('bbterm-ports', top.replace('/run/bbterm/ports.sock', ''), top)
+        folder = self.lane / 'reports/D1-sqli-login'
+        (folder / 'poc-page.html').write_text('<p>synthetic-preview-ok</p>\n')
+        self.exec('sh', '-c', 'cd /report && echo $$ > /tmp/srv.pid && exec python3 -m http.server 8000 >/tmp/srv.log 2>&1',
+                  detach=True)
+        item = next(i for i in self.wait_ports(lambda items: any(i['port'] == 8000 for i in items)) if i['port'] == 8000)
+        lo, hi = self.ports_range
+        self.assertTrue(lo <= item['host_port'] <= hi)
+        self.assertNotIn(3128, [i['port'] for i in self.session.ports.items()], 'the proxy port is never exposed')
+        with urllib.request.urlopen(item['local_url'] + 'poc-page.html', timeout=20) as response:
+            self.assertEqual(response.read(), b'<p>synthetic-preview-ok</p>\n')
+        # Still no network and exactly the two mounts.
+        info = json.loads(docker('inspect', self.name).stdout)[0]
+        self.assertEqual(info['HostConfig']['NetworkMode'], 'none')
+        self.assertEqual(sorted(m['Destination'] for m in info['Mounts']), ['/report', '/run/bbterm'])
+        self.assertEqual(os.stat(self.base / 'state/proxy' / self.session.id / 'ports.sock').st_mode & 0o777, 0o600)
+        # The sandbox still cannot reach host loopback through the proxy, its own exposed port included.
+        probe = ('import json, os, sys, urllib.request\n'
+                 'opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": os.environ["HTTP_PROXY"]}))\n'
+                 'out = {}\n'
+                 'for url in sys.argv[1:]:\n'
+                 '    try:\n'
+                 '        out[url] = opener.open(url, timeout=10).status\n'
+                 '    except urllib.error.HTTPError as e:\n'
+                 '        out[url] = e.code\n'
+                 '    except Exception as e:\n'
+                 '        out[url] = type(e).__name__\n'
+                 'print(json.dumps(out))\n')
+        urls = [f'http://127.0.0.1:{item["host_port"]}/', f'http://127.0.0.1:{self.loopback.server_address[1]}/']
+        got = json.loads(self.exec('python3', '-c', probe, *urls, env=('NO_PROXY=', 'no_proxy=')).stdout)
+        self.assertEqual(set(got.values()), {403}, got)
+        # A paused sandbox wakes up on an inbound connection.
+        self.manager.detach(self.session, self.viewer)
+        self.now[0] += 31
+        self.assertEqual(self.manager.reap_idle(), ([self.session], []))
+        self.assertTrue(json.loads(docker('inspect', self.name).stdout)[0]['State']['Paused'])
+        with urllib.request.urlopen(item['local_url'] + 'poc-page.html', timeout=20) as response:
+            self.assertEqual(response.read(), b'<p>synthetic-preview-ok</p>\n')
+        self.assertFalse(json.loads(docker('inspect', self.name).stdout)[0]['State']['Paused'])
+        self.assertFalse(self.session.paused)
+        viewer = FakeViewer()
+        self.assertIs(self.manager.attach(fx.selector(), viewer), self.session)
+        type(self).viewer = viewer
+        # Stopping the server closes the listener; the number stays reserved for a restart.
+        self.exec('sh', '-c', 'kill $(cat /tmp/srv.pid)')
+        self.wait_ports(lambda items: not any(i['port'] == 8000 for i in items))
+        with self.assertRaises(OSError):
+            socket.create_connection(('127.0.0.1', item['host_port']), timeout=3).close()
+        self.exec('sh', '-c', 'cd /report && exec python3 -m http.server 8000 >/tmp/srv.log 2>&1', detach=True)
+        again = self.wait_ports(lambda items: any(i['port'] == 8000 for i in items))
+        self.assertEqual(next(i for i in again if i['port'] == 8000)['host_port'], item['host_port'], 'same URL')
+        print(f'\nPORTS EVIDENCE sandbox 8000 -> {item["local_url"]}; proxy probes {got}')
+
     def test_07_idle_reap_and_stale_reap(self):
         viewer = FakeViewer()
         other = self.manager.attach(fx.selector(fx.SECOND), viewer)
@@ -351,16 +429,25 @@ class DockerSandboxTests(unittest.TestCase):
 
     def test_99_cleanup_on_stop(self):
         manager = sb.SessionManager(self.root, sb.DockerBackend(image=IMAGE, state_dir=self.base / 'state3', proxy=self.proxy,
-                                                                prefix='bbterm-test-stop-'), reap_interval=0)
+                                                                prefix='bbterm-test-stop-', ports_hub=self.hub), reap_interval=0)
         viewer = FakeViewer()
         session = manager.attach(fx.selector(fx.THIRD), viewer)
         name = manager.backend.name(session)
         self.assertIn(name, our_containers())
         manager.backend.pause(session)  # a paused sandbox is removed too
         session.paused = True
+        ports = session.ports
+        self.assertIsNotNone(ports)
         manager.close()
         self.assertNotIn(name, our_containers())
         self.assertEqual(list((self.base / 'state3/proxy').iterdir()), [])
+        self.assertTrue(ports.closed)
+        self.assertNotIn(ports, self.hub.sessions)
+        # And the main sandbox's forwards go away with it.
+        self.manager.close()
+        self.assertFalse(self.session.ports)
+        self.assertEqual(self.hub.total_conns, 0)
+        self.assertEqual([sp for sp in self.hub.sessions if sp.forwards], [])
         self.assertTrue(viewer.closed)
 
 
