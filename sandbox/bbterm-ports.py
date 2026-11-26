@@ -114,7 +114,7 @@ def forward(control, lock, open_id, port):
         t.start()
         pump(local, upstream)
         t.join()
-    except OSError:
+    except (OSError, RuntimeError):   # RuntimeError: no thread at the pids limit
         pass
     finally:
         local.close()
@@ -137,7 +137,10 @@ def reader(control, lock, stop):
                     continue
                 if (isinstance(msg, dict) and msg.get('t') == 'open' and isinstance(msg.get('id'), str)
                         and type(msg.get('port')) is int and 1 <= msg['port'] <= 65535):
-                    threading.Thread(target=forward, args=(control, lock, msg['id'], msg['port']), daemon=True).start()
+                    try:
+                        threading.Thread(target=forward, args=(control, lock, msg['id'], msg['port']), daemon=True).start()
+                    except RuntimeError:   # pids limit: the host times the open out
+                        pass
             if len(buf) > 4096:
                 break
     except OSError:

@@ -79,6 +79,7 @@ Limits (the agent is untrusted: any process in the sandbox can kill it and speak
   - off: only the local URL and a muted "Only reachable on the server. Turn on Tailscale in Settings." with `Settings` a real `<a href="#/settings">`; on but no address: "Tailscale is on, but the server has no Tailscale address right now.";
   - each URL: the URL itself and Open are `<a target="_blank" rel="noopener noreferrer">`; Copy writes it to the clipboard (hidden-textarea fallback) and shows "Copied" for 1.6 s ("Copy blocked by the browser" when both fail);
   - a paused sandbox: muted "paused, opens on first visit".
+  - only URLs of the form `http://<127.x.y.z or 100.64.0.0/10 IPv4>:<host_port>/` become links or Copy values (rebuilt from the parsed host and the item's `host_port`); anything else the service sends is shown as text with "unexpected address, not linked" (review round 3, P1).
 - **Live updates**: `BoardTerminal.on('session')` fetches `GET <terminal_url>api/ports?<selector>` on attach and reset (and clears on null); `BoardTerminal.on('message')` applies `{"type":"ports"}` pushes and refetches the flags. No reload is needed when a server starts or stops, or when another tab switches Tailscale.
 - **Settings**: `window.BoardSettings.register({id: 'terminal-ports', group: 'terminal', title: 'Sandbox ports', order: 50})` inside the Terminal card. "Saved on the server."; switch "Open sandbox ports over Tailscale" (`POST api/settings {ports_tailscale}`, JSON, `X-Requested-With: Bounty-Board`, same-origin); the port range and the Tailscale address ("Tailscale address 100.x.y.z", "No Tailscale address found on the server right now", or "The Tailscale address is detected when you turn this on"); the note "While this is on, anyone on your tailnet allowed by your ACLs can open sandbox ports. They are plain http." Errors: 409 `tailscale_not_found` → "No Tailscale address found on the server."; 409 `preview_ports_disabled` → the "Not enabled" line; 500 `settings_failed` → "Could not save the setting."; 401 → "Sign in to the terminal" linking to `/terminal/login?next=<this page>`. The switch always shows the server's answer (on error the section reloads the settings). Flag off: "Not enabled on this server. Start the terminal service with --preview-ports."
 
@@ -191,6 +192,15 @@ The reviewer returned ACCEPT with three minors. Red/green proof: only `terminal_
 | N3 | 16 per client IP is tight for one browser with several tabs and websockets; refusals were silent. | Cap 48; every refusal (session, client, pending, total cap) logs `preview port connection from <ip> refused: <cap> cap of <n> reached`, first then at most one a minute per cap with a count. | `test_n3_per_ip_cap_is_48_and_refusals_are_logged_rate_limited` | FAIL (`16 != 48`) → OK |
 
 Reviewer repros now: `ports-r2/test_repro_r2_builder.py` 1 FAIL on `7493c3c` → 1 OK; `ports-r1/test_repro_builder.py` 3 OK and `R3_OneClientStarvesOtherSessions` FAIL by design (it needs the eviction N1 removed; see decision 12).
+
+### Review round 3 (6c6fa73, phase 2) and fixes
+
+The reviewer returned ACCEPT (fix P1): N1-N3 confirmed, R3 holds on the per-IP cap plus idle rule, no markup injection, the Settings switch and sign-in link correct, the test-only Tailscale override unreachable in production, drawer integration clean. Fixed by the orchestrator; red/green by swapping only the changed source file back to `6c6fa73`.
+
+| # | Finding | Fix | Regression test | 6c6fa73 → now |
+| --- | --- | --- | --- | --- |
+| P1 (should-fix) | Popover links and Copy used the service's URLs without checking scheme or host (`javascript:` or a foreign host would become a link). | `safeUrl()`: only `http:` to a 127.0.0.0/8 or 100.64.0.0/10 IPv4, path `/`, no credentials, query or fragment, and the port equal to the item's `host_port`; the link is rebuilt from those parts; anything else is shown as text, no Open or Copy. | `sandbox-ports.synthetic` "popover links only http URLs to loopback or a Tailscale address on the host port (review P1)" (`javascript:`, foreign host, wrong port, extra path all unlinked; valid Tailscale and local URLs linked and copyable) | FAIL (`only the valid URLs are links`) → pass |
+| P2 (nit) | At the pids limit `Thread.start` raised `RuntimeError` in the agent's reader and `forward()`, printing a traceback per open. | Both catch `RuntimeError` (the host times the open out). | `AgentThreadLimitTests` (reader and forward with `Thread.start` failing) | 2 ERROR (`RuntimeError: can't start new thread`) → OK |
 
 ### Phase 2 evidence
 

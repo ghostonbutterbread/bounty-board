@@ -210,6 +210,31 @@ test('phone sheet: the pill and popover fit',{timeout:120000},async()=>{
   });
 });
 
+test('popover links only http URLs to loopback or a Tailscale address on the host port (review P1)',{timeout:240000},async()=>{
+  await withFixture('tailnet,ports',async info=>{
+    const page=await info.newPage({permissions:CLIP});
+    const reply={preview_ports:true,ports_tailscale:true,ports:[
+      {port:8000,host_port:9100,state:'open',local_url:'javascript:document.title="pwned"//',tailscale_url:'http://evil.example/'},
+      {port:8001,host_port:9101,state:'open',local_url:'http://127.0.0.1:9999/',tailscale_url:'http://100.64.1.2:9101/x?y'},
+      {port:8002,host_port:9102,state:'open',local_url:'http://127.0.0.1:9102/',tailscale_url:'http://100.101.102.103:9102/'}]};
+    await page.route('**/api/ports?**',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(reply)}));
+    await openReport(page,info.base);
+    await openDrawer(page);
+    await pill(page).waitFor({timeout:15000});
+    await pill(page).click();
+    await popover(page).waitFor();
+    const hrefs=await popover(page).locator('a[href]').evaluateAll(as=>as.map(a=>a.getAttribute('href')).filter(h=>h!=='#/settings'));
+    const copies=await popover(page).locator('[data-ports-copy]').evaluateAll(bs=>bs.map(b=>b.dataset.portsCopy));
+    const valid=['http://100.101.102.103:9102/','http://127.0.0.1:9102/'];
+    assert.deepEqual([...new Set(hrefs)].sort(),valid.sort(),'only the valid URLs are links');
+    assert.deepEqual([...new Set(copies)].sort(),valid.sort(),'only the valid URLs can be copied');
+    assert.equal(await popover(page).locator('[data-ports-invalid]').count(),4,'the four bad URLs are shown as text');
+    assert.match(await popover(page).locator('[data-ports-invalid]').first().textContent(),/not linked/);
+    assert.notEqual(await page.title(),'pwned');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
 test('preview ports off on the server: no pill, Settings says it is not enabled',{timeout:120000},async()=>{
   await withFixture('tailnet',async({base,newPage})=>{
     const page=await newPage();

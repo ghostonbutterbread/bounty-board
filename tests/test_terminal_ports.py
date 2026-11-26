@@ -805,6 +805,41 @@ class ForwarderAgentTests(HubCase):
         self.assertEqual((agent.SOCKET, agent.EXCLUDE), ('/run/bbterm/ports.sock', {3128}))
 
 
+class AgentThreadLimitTests(unittest.TestCase):
+    """Phase 2 review P2: at the sandbox pids limit, Thread.start raises RuntimeError; the
+    agent's reader and forward() must absorb it instead of dying or printing tracebacks."""
+
+    def setUp(self):
+        self.agent = load_agent('/nonexistent/ports.sock')
+        self.no_threads = mock.patch.object(self.agent.threading.Thread, 'start',
+                                            side_effect=RuntimeError("can't start new thread"))
+
+    def test_reader_survives_thread_start_failure(self):
+        host, control = socket.socketpair()
+        stop = threading.Event()
+        try:
+            host.sendall(b'{"t": "open", "id": "x1", "port": 8000}\n')
+            host.shutdown(socket.SHUT_WR)
+            with self.no_threads:
+                self.agent.reader(control, threading.Lock(), stop)   # must return, not raise
+            self.assertTrue(stop.is_set())
+        finally:
+            host.close()
+            control.close()
+
+    def test_forward_survives_thread_start_failure(self):
+        server = socket.create_server(('127.0.0.1', 0))
+        up_host, up_agent = socket.socketpair()
+        ctl_host, ctl_agent = socket.socketpair()
+        try:
+            with self.no_threads, mock.patch.object(self.agent, 'dial_host', return_value=up_agent):
+                self.agent.forward(ctl_agent, threading.Lock(), 'x2', server.getsockname()[1])   # must return
+            self.assertEqual(up_agent.fileno(), -1, 'upstream closed')
+        finally:
+            for s in (server, up_host, up_agent, ctl_host, ctl_agent):
+                s.close()
+
+
 class ReviewRound2Tests(HubCase):
     """Regression tests for the re-review of 7493c3c (N1-N3)."""
 

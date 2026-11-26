@@ -93,7 +93,23 @@
     if (pop) fillPopover();
   }
 
-  function urlRow(url, secondary) {
+  // The service builds these URLs, but only http links to loopback or a
+  // Tailscale (100.64.0.0/10) IPv4 on the expected host port become links or
+  // Copy values; anything else is shown as text.
+  function safeUrl(url, hostPort) {
+    let u; try { u = new URL(String(url ?? '')); } catch { return null; }
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(u.hostname);
+    if (u.protocol !== 'http:' || !m || u.username || u.password || u.pathname !== '/' || u.search || u.hash) return null;
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (m.slice(1).some(o => Number(o) > 255) || !(a === 127 || (a === 100 && b >= 64 && b <= 127))) return null;
+    if (!Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535 || u.port !== String(hostPort)) return null;
+    return `http://${u.hostname}:${hostPort}/`;
+  }
+
+  function urlRow(raw, secondary, hostPort) {
+    const url = safeUrl(raw, hostPort);
+    if (!url) return `<div class="term-ports-url${secondary ? ' secondary' : ''}" data-ports-invalid>
+      <span class="term-ports-where">unexpected address, not linked</span><span class="term-ports-link">${esc(raw)}</span></div>`;
     return `<div class="term-ports-url${secondary ? ' secondary' : ''}">
       ${secondary ? '<span class="term-ports-where">on the server</span>' : ''}
       <a class="term-ports-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer" data-ports-url>${esc(url)}</a>
@@ -109,8 +125,8 @@
     const items = ports.map(p => {
       const main = p.tailscale_url || p.local_url;
       const note = p.state === 'paused' ? '<span class="term-ports-paused">paused, opens on first visit</span>' : '';
-      let rows = urlRow(main, false);
-      if (p.tailscale_url) rows += urlRow(p.local_url, true);
+      let rows = urlRow(main, false, p.host_port);
+      if (p.tailscale_url) rows += urlRow(p.local_url, true, p.host_port);
       return `<li class="term-ports-item" data-ports-item="${esc(p.port)}"><div class="term-ports-port"><code>:${esc(p.port)}</code>${note}</div>${rows}</li>`;
     }).join('');
     const anyTailnet = ports.some(p => p.tailscale_url);
