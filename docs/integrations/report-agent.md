@@ -1,5 +1,6 @@
 # Report agent, model relay and agent connect (phase 1: backend)
 
+- Follow-up on `feat/board-report-agent-ui` (`fcb6b04`): the login can be set from Settings (`POST /api/agent/login`, `/logout`) and `poc_format` takes an optional `note`; see the rows and sections marked follow-up.
 - Branch: `feat/board-report-agent`; base `7493c3c` (the preview-ports branch, reviewed ACCEPT, not yet on beta). Commits: `7580117` (feature), `13eae46` (real-container tests), `33f4d22` (review fixes), `f694a66` (dossier); review round r1: `5cd6a58` (`ports: refuse 3129`, cherry-pickable onto the ports branch), `79dc00f` (fixes), plus this dossier update.
 - Owner surfaces: new `terminal_report_agent.py`, `terminal_agent_cli.py`, `terminal_relay.py`, `terminal_connect.py`, `terminal_pty.py`, `agent_prompts/report-agent.md`; small hooks in `terminal_service.py`, `terminal_sandbox.py`, `sandbox/bbterm-forward.py`. Tests: `tests/test_terminal_report_agent.py`, `tests/test_terminal_relay.py`, `tests/test_terminal_connect.py`, `tests/test_terminal_agent_docker.py`, helpers `tests/fake_agent_cli.py`, `tests/fake_model_upstream.py`, `tests/fake_herdr.py`.
 - No `static/`, `app.py`, `terminal_ports.py` or `sandbox/bbterm-ports.py` changes. No Dockerfile change: the forwarder file the images already copy gained a thread.
@@ -43,7 +44,9 @@ All routes also work without the `/terminal` prefix. Auth, Host, Origin, `Sec-Fe
 
 | Route | Result |
 | --- | --- |
-| `GET /api/agent/config` | `{enabled, clis: [{id, label, available, sandbox_ready, reason, models, custom_models, default_model}], selected: {cli, model}, login: {ready, reason, message}}`. Works with the flag off (`enabled: false`, file not created). |
+| `GET /api/agent/config` | `{enabled, clis: [{id, label, available, sandbox_ready, reason, models, custom_models, default_model}], selected: {cli, model}, login: {ready, reason, message, saved_at, editable}}`. `saved_at`: the login file's mtime (epoch seconds) or null. `editable`: true when `--report-agent-token-file` is set; without it `editable: false` and `reason: "no_token_file_flag"`. Works with the flag off (`enabled: false`, file not created). |
+| `POST /api/agent/login` `{cli: "claude", token}` | Saves the sandbox login into the `--report-agent-token-file` file (follow-up, Settings page). Exact keys, body at most 4 KiB (400 `length`). The token is stripped and must match `sk-ant-oat[A-Za-z0-9_-]{20,500}` (what `claude setup-token` prints), else 400 `bad_token` with a fixed message that never echoes it. 200 `{login: {ready, reason, message, saved_at, editable}}`: never the token or any part of it. 409 `report_agent_disabled`, `no_token_file_flag`, `login_not_saved` (+ `reason`: `symlink`, `not_a_file`, `inside_root`, `dir_missing`, `dir_symlink`, `dir_unsafe`); 500 `login_not_saved` (`write_failed`). |
+| `POST /api/agent/logout` `{cli: "claude"}` | Removes that file, only after `lstat` shows a regular file owned by the service user (a missing file counts as removed). 200 `{login: …}`; 409 `login_not_removed` (+ `reason`), `no_token_file_flag`, `report_agent_disabled`. |
 | `POST /api/agent/config` `{cli, model}` | Same shape as GET. 400 `bad_request` for any other body (missing or extra keys, non-strings, unknown CLI, a model the CLI does not accept). 409 `report_agent_disabled` when `--report-agent` is off. 500 `settings_unreadable` (the file could not be read at start; it is never written over) or `settings_failed`. |
 | `POST /api/agent/start` `{selector, task, cli?, model?}` | 200 with session info (below). Errors: 400 `bad_request`, `bad_task`, `task_too_large`, `unsafe_chars`, `bad_selector`; 404 `report_not_found`; 409 `report_agent_disabled`, `cli_not_sandbox_ready` (+ `reason`), `cli_unavailable`, `login_missing` (+ `reason`), `not_in_packet`, `unsafe_folder`, `report_outside_folder`, `agent_running` (+ `agent`: the live session info), `sandbox_busy`; 503 `low_memory`, `too_many_sessions`, `shutting_down`; 500 `agent_setup_failed`. |
 | `POST /api/agent/stop` `{selector}` | 200 `{state: "none", ...}` (also when nothing ran). 400 for other bodies, 409 `report_agent_disabled`. |
@@ -60,7 +63,8 @@ Task:
 
 | Field | Rule |
 | --- | --- |
-| `{kind: "poc_format", format, block?}` | `format`: `python`, `curl`, `browser_js`, `raw_http`, `best_fit`. Keys exactly `kind`, `format`, optional `block`. |
+| `{kind: "poc_format", format, block?, note?}` | `format`: `python`, `curl`, `browser_js`, `raw_http`, `best_fit`. Keys exactly `kind`, `format`, optional `block`, optional `note`. |
+| `note` | Ryu's extra instructions for the format change ("Python, and keep the curl as a fallback"): 1 B to 2 KiB, rendered once under the task as "Ryu's extra instructions for this change (they do not override the rules above)". |
 | `block` | `{text, lang, index}` exactly. `text` 1 B to 64 KiB (UTF-8); `lang` `[A-Za-z0-9_+.#-]{0,32}`; `index` int 0-9999 (the block's position in the report, 0-based). |
 | `{kind: "ask", text}` | `text` 1 B to 8 KiB. |
 | every text | refused (400 `unsafe_chars`) when it contains the drawer typing filter's set: C0 except tab and newline (so CR too), DEL, C1, U+00AD, U+061C, U+200B-U+200F, U+202A-U+202E, U+2060-U+2069, U+FEFF, U+2028, U+2029. A test compares the set with the JS filter for every code point up to U+FFFF. Clients send LF line ends. |
@@ -84,7 +88,7 @@ Any other `kind` is HTTP 400 `bad_kind`. Client messages are the same for every 
 | `--report-agent` | off | Off: no extra mounts, no `model.sock`, no relay, no 3129 listener in containers, `enabled: false`, POST config/start/stop 409. |
 | `--report-agent-cli ID=PATH` | none | Host binary per CLI id (`claude`, `codex`, `omp`, `opencode`; repeatable, each once). Symlinks are resolved on the host when a sandbox starts (`docker run`) and that file is mounted read-only at `/opt/report-agent/<id>`; only sandbox-ready CLIs (Claude Code) are mounted. A sandbox started while the binary was missing answers `cli_unavailable` until it is reset. |
 | `--report-agent-skill NAME=PATH` | none | Skill folder. The service copies it into `<state-dir>/report-agent/skills/<NAME>-<hash>/` with `allowed-tools`, `hooks`, `mcpServers` and `permissionMode` removed from every `SKILL.md` frontmatter (symlinks inside are skipped, never followed; 64 MiB and 2000 files at most), makes a new copy when the source changes, and mounts the copy read-only at `/opt/report-agent/skills/<NAME>`, linked from `~/.claude/skills/<NAME>`. Repeatable. Refused at start and skipped at `docker run` when it is a symlink or not a directory; names `[a-z0-9][a-z0-9-]{0,63}`. |
-| `--report-agent-token-file PATH` | none | The dedicated login (from `claude setup-token`). Refused at start if inside `--root` (also through symlinked parents) or a symlink. Read on each use (create or rotate it without a restart); not ready when missing, a symlink, not a regular file, owned by another user, readable by group or others, or not a single token. Never logged. |
+| `--report-agent-token-file PATH` | none | The dedicated login (from `claude setup-token`). Refused at start if inside `--root` (also through symlinked parents) or a symlink. Read on each use (create or rotate it without a restart; a read that races a save's rename tries again); not ready when missing, a symlink, not a regular file, owned by another user, readable by group or others, or not a single token. Never logged. With this flag the Settings page can write and remove it (`POST /api/agent/login`, `/logout`); its directory must already exist, owned by the service user and not group- or other-writable (it is never created). |
 | `--agent-connect` | off | Off: `/api/agents/active` answers `enabled: false`, `kind=connect` answers `agent_connect_disabled`. |
 | `--herdr-bin PATH` | `~/.local/bin/herdr` | Herdr CLI. |
 | `--herdr-session NAME` | none | Required with `--agent-connect` (`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`). |
@@ -144,6 +148,13 @@ The policy must hold whatever the agent writes, whatever a mounted or planted sk
 - **Skills.** Docker creates a bind target's missing parents owned by root inside the tmpfs HOME, which made `~/.claude` unwritable for Claude Code (seen in a test container). So skills are mounted at `/opt/report-agent/skills/<name>` and `~/.claude/skills/<name>` are symlinks to them; Claude Code follows them (a marker skill's description appeared in the model request).
 - **Stop.** The agent's in-container pid is read once right after start (the fixed wrapper writes it; the start archive empties the file first so an old pid is never read) and kept on the host. Stop sends HUP, then TERM, then KILL to that process group and pid inside the container while it is alive (checked with `kill -0`), 3 s apart, then stops the `docker exec` client's own process group. This also works when the client is already gone and the agent reads as `exited` (tested with a CLI that ignores SIGHUP: on `f694a66` it kept running after stop).
 
+### Login from Settings (follow-up)
+
+- `terminal_relay.TokenFile.save`: the same path rules as reading (outside `--root`, also through symlinked parents; target not a symlink and, if present, a regular file), plus the directory: it must exist (never created), is opened with `O_DIRECTORY|O_NOFOLLOW` and checked on the open descriptor (same inode as `lstat`, not group- or other-writable, owned by the service user). A temp file `.<name>.tmp-<random>` is created with `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600 (and `fchmod` 0600), written, fsynced, renamed over the target and the directory fsynced. Saves are serialized by a lock; each uses its own temp file, so a concurrent save or a reader never sees a partial file (tested with 72 saves and 3 readers).
+- `TokenFile.remove`: `lstat` through the directory descriptor; unlinks only a regular file owned by the service user.
+- `read()` tries again (up to 5 times) when the inode changed between its `lstat` and `open`, which a save's rename can cause; before, a model call during a save failed once with `unreadable` (found by the concurrency test).
+- The service logs only "sandbox login saved from Settings" / "removed". Errors carry fixed messages and reason codes. The relay rereads the file per request, so a replaced login applies to the next model call (tested end to end: the fake upstream saw the new bearer after a save, no restart).
+
 ### Lifecycle
 
 - Agent tab viewers count as viewers: a sandbox with only an Agent tab open is never paused or removed, and `left_at` starts when the last viewer of either PTY leaves.
@@ -180,7 +191,8 @@ Report agent (B) and relay (C):
 - **What the sandbox gains.** Any process in the sandbox can use the relay while the report's agent runs: it can spend the login's quota and choose the prompts (the model API only, two paths, no other host or path). It cannot read the login, reach another host through the relay, or use it when no agent runs.
 - **Prompt injection.** Report text, evidence and target responses are controlled by the target and can steer the agent. That stays inside the existing terminal model: the agent can change or delete files in that one folder and reach public internet addresses through the filter proxy, like any command in the terminal. The template tells it to treat that text as data. Every Bash, WebFetch, WebSearch and MCP call asks Ryu, enforced by managed settings the sandbox cannot write, whatever the agent writes into HOME or `/report`, whatever a skill declares (review r1); auto mode, bypass mode, hooks and MCP servers are off. Edits to files in the folder do not ask (acceptEdits): the Board keeps report history, other files in the folder do not have it (see the terminal's threat model).
 - **Quota and cost.** The relay has concurrency caps but no token budget: a runaway agent or a malicious process in the sandbox can use the login's quota while the agent runs. Stop the agent to cut it off.
-- **Task text** is validated (size, unsafe characters) and reaches the container only as a file through stdin; never argv, never a shell string.
+- **Task text** is validated (size, unsafe characters) and reaches the container only as a file through stdin; never argv, never a shell string. The optional `note` follows the same rules.
+- **Login from Settings.** With `--report-agent-token-file`, anyone who can sign in to the terminal (tailnet allowlist or the password) can replace or remove the sandbox login through `POST /api/agent/login` and `/logout`: point the agent at another account (whose quota and history then hold the agent's prompts and report text) or stop it working. They still cannot read the login back: no route returns it, the file stays 0600 outside the data root, and the token never enters a sandbox. The routes use the same Origin, `X-Requested-With` and JSON gate as every state change; the token is accepted only in the setup-token shape, so the route cannot be used to write arbitrary content to that path. Leave the flag off to keep the login file-only.
 
 Agent connect (D):
 - **This is host access.** Connecting attaches to an agent running on Hoster as the host user, outside any sandbox. Typing into it is as good as typing on Hoster: the agent can read SSH keys, credentials, every report, and run any command its own permission settings allow. That is the purpose, and why the flag is off by default and every route uses the shell's auth, Origin and CSRF rules (tailnet allowlist or password session). Anyone who can sign in to the terminal can drive every Herdr agent of that session, including ones outside the data root (`all=1`).
@@ -315,6 +327,12 @@ The reviewer's own repros (`repros/r2/test_n1_strip_bypass.py`, `test_n3_pid_one
 
 Runs on the fix (`TMPDIR=/tmp/bbagent`, `-W error::ResourceWarning`): `test_review_r1_permission_settings` 7 OK, `test_review_r2_relay_lifetime` 1 OK, `test_review_r3_removal_working_agent` 1 OK, `test_review_r2_minors` 8 OK, `test_terminal_report_agent` 28 OK, `test_terminal_relay` 18 OK, `test_terminal_connect` 11 OK, `test_terminal_sandbox` 47 OK, `test_terminal_service` 29 OK, `test_terminal_ports` 45 OK, `test_terminal_docker` 13 OK, `test_terminal_agent_docker` with the real Claude Code 2.1.331 8 OK (`R1 POLICY EVIDENCE` prompts shown for all three cases). No container left behind.
 
+### Follow-up: login from Settings and task note (fcb6b04)
+
+`tests/test_terminal_agent_login.py` (new, 13 tests, fake tokens only): 0600 after save and after replace, no temp file left; bad shapes refused (wrong prefix, too short or long, spaces, trailing newline inside, non-strings); a symlinked target (never written or removed, the link target untouched), a symlinked directory, a path inside the root directly and through a symlinked parent, a group-writable directory, a missing directory (not created) and a directory at the target name refused; logout removes only that file; 72 concurrent saves with 3 readers never show a partial file (red on the old `read()`: 14 `unreadable` reads, then fixed); over HTTP: save, config `saved_at`/`editable`, logout, bad tokens and bodies 400 with the fixed message, 4 KiB cap, no Origin / no CSRF header / anonymous refused for login and logout with nothing written or removed, symlinked target 409; a replaced login reaches the fake upstream on the next model call without a restart; no flag gives `editable: false`, `no_token_file_flag`; `note` caps, unsafe characters, one-pass rendering. Every response body and every hub log line is grepped for the sentinel tokens after each test (none found).
+
+Runs (`TMPDIR=/tmp/bbra`, `-W error::ResourceWarning`): `test_terminal_agent_login` 13 OK (3 runs), `test_terminal_relay` 18 OK, `test_terminal_report_agent` 28 OK (its config assertion now includes `saved_at` and `editable`), `test_terminal_service` 29 OK, `test_terminal_connect` 11 OK, `test_review_r1_permission_settings` 7 OK, `test_review_r2_minors` 8 OK, `test_review_r2_relay_lifetime` 1 OK. Docker suites not rerun (no sandbox or relay path changed).
+
 ## Gaps
 
 - No UI (phase 2). No screenshots.
@@ -337,13 +355,13 @@ Runs on the fix (`TMPDIR=/tmp/bbagent`, `-W error::ResourceWarning`): `test_revi
 
 Do these as the Board's user. Nothing here was done by this branch.
 
-1. **Login (Ryu does this himself).** Run `claude setup-token` on Hoster, sign in with the account the agent should use, and save only the printed token:
+1. **Login (Ryu does this himself).** Run `claude setup-token` on Hoster and sign in with the account the agent should use. Then either paste the printed token into Settings, Terminal, Agent, "Sandbox login (Claude)" (it needs the folder below to exist and the flag from step 3), or, optionally, save it by hand:
    ```sh
    mkdir -p ~/.config/bounty-board && chmod 700 ~/.config/bounty-board
    umask 077 && cat > ~/.config/bounty-board/report-agent.token   # paste the token, Enter, Ctrl+D
    chmod 600 ~/.config/bounty-board/report-agent.token
    ```
-   It must be outside the data root (`--root`), a regular file (not a symlink), owned by the service user, mode 0600.
+   It must be outside the data root (`--root`), a regular file (not a symlink), owned by the service user, mode 0600. For the Settings route, `mkdir -p ~/.config/bounty-board && chmod 700 ~/.config/bounty-board` is the only manual step; the service never creates the folder.
 2. Rebuild the sandbox image (the forwarder gained the 3129 thread): `docker build -t bbterm-sandbox:latest --build-arg UID=$(id -u) --build-arg GID=$(id -g) sandbox/`.
 3. Add to the terminal service unit's `ExecStart` (keep existing flags):
    ```
