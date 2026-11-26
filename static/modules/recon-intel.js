@@ -376,7 +376,7 @@
   function scopeNote(d) {
     const sc = d.scope_summary;
     if (!sc || !['failed', 'unconfigured'].includes(sc.state)) return '';
-    return `<p class="hint ri-scope-note" data-ri-scope-note>${esc(String(sc.reason || '').replace(/^scope check failed: /, 'Scope check failed: '))}. Rows are shown but copy is disabled until the check succeeds${sc.state === 'unconfigured' ? ' (start the Board with --bbh)' : '; retried within a minute or on Refresh'}.</p>`;
+    return `<p class="hint ri-scope-note" data-ri-scope-note>${esc(String(sc.reason || '').replace(/^scope check failed: /, 'Scope check failed: '))}. Rows are shown but copy is disabled until the check succeeds${sc.state === 'unconfigured' ? ' (start the Board with --bbh)' : sc.source === 'scope_dir' ? '; a fixed scope folder is picked up on the next refresh' : '; retried within a minute or on Refresh'}.</p>`;
   }
   const bar = (label, n, max, extra = '') => `<li><span class="ri-bar-label">${esc(label)}</span><span class="ri-bar"><span style="width:${Math.max(2, Math.round(100 * n / (max || 1)))}%"></span></span><span class="num">${esc(fmtNum(n))}</span>${extra}</li>`;
 

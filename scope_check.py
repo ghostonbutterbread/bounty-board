@@ -142,7 +142,8 @@ class ScopeChecker:
                 return ({t: verdict for t in targets}, {'state': 'no_scope', 'checked_at': None, 'reason': NO_SCOPE}, [])
             # A scope that exists but cannot be read (broken or escaping alias) is not open scope.
             verdict = {'state': 'unchecked', 'rule': None, 'reason': failed(sig[1])}
-            return ({t: verdict for t in targets}, {'state': 'failed', 'checked_at': None, 'reason': verdict['reason']}, [])
+            return ({t: verdict for t in targets}, {'state': 'failed', 'checked_at': None, 'reason': verdict['reason'],
+                                                    'source': 'scope_dir'}, [])
         if self.bbh is None:
             verdict = {'state': 'unchecked', 'rule': None, 'reason': failed('no --bbh configured on this Board')}
             return ({t: verdict for t in targets}, {'state': 'unconfigured', 'checked_at': None, 'reason': verdict['reason']}, [])

@@ -120,6 +120,7 @@ class ScopeCheckerTests(Base):
         (self.root / 'scopes' / 'broken').symlink_to('nowhere')
         self.assertEqual(c.lookup('broken', HOSTS)[1]['state'], 'failed')
         self.assertIn('broken', c.lookup('broken', HOSTS)[1]['reason'])
+        self.assertEqual(c.lookup('broken', HOSTS)[1].get('source'), 'scope_dir')
 
     def test_same_size_same_mtime_replacement_reclassifies(self):
         # Sync tools and atomic renames can keep size and the source mtime; the verdicts must not go stale.
@@ -395,10 +396,6 @@ class ReconScopeTests(Base):
         self.assertLess(timings['with'] - timings['without'], 1.0, timings)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class OverviewShareApproximation(unittest.TestCase):
     def test_host_share_keeps_the_source_approximation(self):
         summary = {'state': 'checked', 'checked_at': 1, 'reason': ''}
@@ -411,3 +408,7 @@ class OverviewShareApproximation(unittest.TestCase):
         exact = sc.overview_fields(summary, {'a.example.test': {'state': 'in'}},
                                    {'host_list': ['a.example.test'], 'urls': {'value': 1000, 'approximate': False}}, None)
         self.assertFalse(exact['in_scope_urls']['approximate'])
+
+
+if __name__ == '__main__':
+    unittest.main()
