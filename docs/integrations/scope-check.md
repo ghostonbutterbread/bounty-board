@@ -40,7 +40,7 @@ Board API additions: see `BACKEND_API.md` ("Scope" paragraph under `GET /api/rec
 - `python3 -m unittest tests.test_recon_intel`: 36 tests OK (unchanged behavior without scope).
 - `static/tests/recon-intel.test.cjs`: 7 tests pass (new: `oos` parsing, hiding, copy gating, in-scope ranking). `static/tests/recon-intel.synthetic.test.cjs`: 1 browser test passes, extended with: in-scope column, open-scope badge with copyable rows, OOS host and params hidden with count lines, Show link `href`, OOS pill and tooltip, disabled copy with "out of scope", partial pill and tooltip, `oos=1` across reload, unknown `oos` value hides, phone layout with OOS rows has no overflow, dashboard ranking by host share and then by exact in-scope counts, no page errors, no non-loopback requests.
 - Cost: fake BBH (Python start included) classifies 2,000 hosts in 0.07 s in one call; a cached lookup of 2,000 hosts takes 0.4 ms.
-- Full suites: see the final report of this branch (`python3 tests/safe_suite.py`, `npm test -- --test-concurrency=1`).
+- Full suites (after 2e01510): `python3 tests/safe_suite.py` 579 tests OK (13 skipped) in 20 min; `npm test -- --test-concurrency=1` 208 tests, 207 pass, 1 fail (`ui-redesign` "multi-select filters, chips, persisted sort and row actions": menu item timeout, the same known flake under load); rerunning that file alone gave 7/7 pass.
 
 Screenshots (synthetic): `scope-program-light.png`, `scope-program-dark.png`, `scope-program-phone.png`, `scope-dashboard-card.png` plus the regenerated `recon-*.png` under `$TMPDIR/screens` (`SHOT_DIR=… node --test static/tests/recon-intel.synthetic.test.cjs`).
 
