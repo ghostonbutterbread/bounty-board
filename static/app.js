@@ -6,7 +6,7 @@
     // Presentation state (UI redesign): persisted sort, dashboard work filter,
     // expanded breakdown row, program search, how the program was chosen.
     sort:{key:'',dir:'asc'}, dashWork:'all', dashExpanded:'', scopedExpanded:{}, programQuery:'', programOrigin:'default', highlight:''};
-  const sections = [['findings','Findings'],['coverage','Coverage'],['reports','Reports'],['map','MapStore'],['gadgets','Gadgets']];
+  const sections = [['findings','Findings'],['coverage','Coverage'],['reports','Reports'],['map','MapStore'],['gadgets','Gadgets'],['scope','Scope']];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const metadataFailure = error => error.code==='finding_changed' ? 'Conflict: finding changed.' : error.code==='root_changed' ? 'Conflict: source root changed.' : error.code==='finding_not_found' ? 'Finding is no longer available.' : 'Update failed or was not verified.';
   const display = value => value == null || value === '' ? 'Unknown' : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -40,7 +40,7 @@
     const section=target.section!=null ? String(target.section) : target.finding!=null ? 'findings' : target.report!=null ? 'reports' : undefined;
     if(section!=null && !sections.some(([key])=>key===section))return false;
     if(target.finding!=null)state.filters=emptyFilters();
-    navigate({view:'program',program:wanted,lane:target.lane!=null ? String(target.lane) : undefined,section,report:target.report!=null ? String(target.report) : undefined,highlight:target.finding!=null ? String(target.finding) : (target.highlight ?? '')});
+    navigate({view:'program',program:wanted,lane:target.lane!=null ? String(target.lane) : undefined,section,report:target.report!=null ? String(target.report) : undefined,highlight:target.finding!=null ? String(target.finding) : (target.highlight ?? ''),...(section==='scope' ? {scopeQuery:String(target.query ?? '')} : {})});
     return true;
   }
   // Feature modules (static/modules/*.js) push {name, afterRender(ctx)} onto
@@ -60,7 +60,7 @@
     if(!program)return '#/programs';
     const lane=target.lane!=null ? String(target.lane) : program===state.program ? state.lane : String((list(programs().find(p=>String(p.id)===program)?.lanes)||[])[0]?.name ?? '');
     const section=target.section!=null ? String(target.section) : target.report!=null ? 'reports' : 'findings';
-    const tail=section==='reports' && target.report!=null ? '/'+encodeURIComponent(String(target.report)) : section==='findings' && target.finding!=null ? '/'+encodeURIComponent(String(target.finding)) : '';
+    const tail=section==='reports' && target.report!=null ? '/'+encodeURIComponent(String(target.report)) : section==='findings' && target.finding!=null ? '/'+encodeURIComponent(String(target.finding)) : section==='scope' && target.query ? '?'+String(target.query) : '';
     return `#/programs/${encodeURIComponent(program)}/${encodeURIComponent(lane)}/${section}${tail}`;
   }
   // Plain left clicks on in-app links stay in the page (no reload) and go
@@ -68,7 +68,7 @@
   // target and clicks a module already handled are left to the browser.
   function openRoute(route) {
     if(route.view!=='program'){navigate(route);return true;}
-    const ok=moduleNavigate({program:route.program || undefined,lane:route.lane || undefined,section:route.section,report:route.report || undefined,finding:route.highlight || undefined});
+    const ok=moduleNavigate({program:route.program || undefined,lane:route.lane || undefined,section:route.section,report:route.report || undefined,finding:route.highlight || undefined,query:route.scopeQuery});
     if(!ok)toast('That item is not in the loaded data. Refresh the board and try again.','warning');
     return ok;
   }
@@ -876,13 +876,13 @@
     const empty=app.querySelector('#program-search-empty');if(empty)empty.hidden=shown>0;
     const count=app.querySelector('#program-search-count');if(count)count.textContent=q?`${shown} of ${rowsEl.length}`:'';
   }
-  const SECTION_ICONS={findings:'bug',coverage:'sitemap',reports:'file-text-o',map:'map-o',gadgets:'puzzle-piece'};
+  const SECTION_ICONS={findings:'bug',coverage:'sitemap',reports:'file-text-o',map:'map-o',gadgets:'puzzle-piece',scope:'bullseye'};
   function workspace() {
     const p=currentProgram(), lane=currentLane();
     const picker=`<button type="button" class="button" data-program-picker ${programs().length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>`;
     if (!p || !lane) return `${title(p?.name || 'Programs',p?'No lanes are available for this program.':'No programs are available.',`<div class="switcher">${selectors()}${picker}</div>`)}<div class="stack">${rootWarning()}${availability([])}<div class="panel state">${p?'This program has no lane data.':'Configure the program root in the backend and refresh.'}</div></div>`;
     // Gadgets and MapStore tabs are drop targets for modules that move findings.
-    const nav=sections.map(([key,label])=>`<a href="${esc(hrefFor({section:key,report:key==='reports' && state.report ? state.report : undefined}))}" data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}${key==='map'||key==='gadgets'?' drop-target':''}" ${key==='map'||key==='gadgets'?`data-drop-target="${key}"`:''} ${state.section===key?'aria-current="page"':''}>${icon(SECTION_ICONS[key])}<span>${esc(label)}</span><span class="count">${key==='reports' && reportsIncomplete(lane) ? '–' : rows(key)?.length ?? '–'}</span></a>`).join('');
+    const nav=sections.map(([key,label])=>`<a href="${esc(hrefFor({section:key,report:key==='reports' && state.report ? state.report : undefined,query:key==='scope' ? state.scopeQuery : undefined}))}" data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}${key==='map'||key==='gadgets'?' drop-target':''}" ${key==='map'||key==='gadgets'?`data-drop-target="${key}"`:''} ${state.section===key?'aria-current="page"':''}>${icon(SECTION_ICONS[key])}<span>${esc(label)}</span>${key==='scope' ? '' : `<span class="count">${key==='reports' && reportsIncomplete(lane) ? '–' : rows(key)?.length ?? '–'}</span>`}</a>`).join('');
     const origin=state.programOrigin==='default' && programs().length>1 ? `<p class="context-note">${icon('info-circle')}<span>Showing the first program because none was chosen yet. Use Switch program or the Program menu to choose another.</span></p>` : '';
     const header=`<div class="titlebar"><div><p class="eyebrow">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(p.family||'Program workspace')} / ${esc(lane.name)}</span></p><h1>${esc(p.name||p.id)}</h1>${origin}</div><div class="switcher">${selectors()}${picker}</div></div>`;
     return `${header}<div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div><div><strong>${rows('findings') ? rows('findings').filter(isNotSubmitted).length : 'Unknown'}</strong><span>Not submitted</span></div></div></section>${availability([{...p,lanes:[lane]}])}<div class="layout"><div class="stack"><nav class="tabs workspace-nav" aria-label="Workspace sections">${nav}</nav>${sectionContent()}</div></div></div>`;
@@ -1611,7 +1611,10 @@
     if(draft.hasDraft) return 'Draft saved in browser, not to the source report.';
     return 'Saving to report unavailable. Edits are saved as browser drafts.';
   }
-  function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');default:return '';}}
+  function sectionContent(){switch(state.section){case 'findings':return findings();case 'coverage':return coverage();case 'reports':return reports();case 'map':return observations('map','MapStore');case 'gadgets':return observations('gadgets','Gadgets');case 'scope':return scopeHost();default:return '';}}
+  // Scope section: the frame only; static/modules/scope-panel.js fills it from /api/scope
+  // and owns the keys of the #/programs/<program>/<lane>/scope?<query> route.
+  function scopeHost(){const p=currentProgram();return p?`<div id="scope-panel-host" data-family="${esc(p.family||'')}" data-program="${esc(p.name||'')}" data-program-id="${esc(p.id)}"><div class="panel state">Loading scope…</div></div>`:'';}
   // Browser tab title, most specific first: "<report> · Reports · <program>[ / <lane>] · Bounty Board".
   // Read after the view renders, because reports() may settle state.report on the first report.
   function pageTitle() {
@@ -1728,7 +1731,7 @@
   function reconRoute(query) { return `#/recon${query ? '?'+String(query) : ''}`; }
   function programRoute() {
     if(!state.program)return '#/programs';
-    return `#/programs/${encodeURIComponent(state.program)}/${encodeURIComponent(state.lane)}/${state.section}${state.section==='reports' && state.report ? '/'+encodeURIComponent(state.report) : ''}`;
+    return `#/programs/${encodeURIComponent(state.program)}/${encodeURIComponent(state.lane)}/${state.section}${state.section==='reports' && state.report ? '/'+encodeURIComponent(state.report) : state.section==='scope' && state.scopeQuery ? '?'+String(state.scopeQuery) : ''}`;
   }
   function routeFor() {
     if(state.view==='recent')return recentRoute(state.recentQuery);
@@ -1740,11 +1743,13 @@
     const raw=String(hash||'').replace(/^#\/?/,''), mark=raw.indexOf('?');
     if((mark<0 ? raw : raw.slice(0,mark))==='recent')return {view:'recent',recentQuery:mark<0 ? '' : raw.slice(mark+1)};
     if((mark<0 ? raw : raw.slice(0,mark))==='recon')return {view:'recon',reconQuery:mark<0 ? '' : raw.slice(mark+1)};
-    const parts=raw.split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
+    // Program routes encode every path part, so a raw "?" starts the Scope section's query.
+    const path=raw.startsWith('programs/') && mark>=0 ? raw.slice(0,mark) : raw, query=path===raw ? '' : raw.slice(mark+1);
+    const parts=path.split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
     if(parts[0]==='dashboard')return {view:'dashboard'};
     if(parts[0]==='programs'){
       const section=sections.some(([k])=>k===parts[3])?parts[3]:'findings', rest=parts.slice(4).join('/');
-      return {view:'program',program:parts[1]||'',lane:parts[2]||'',section,report:section==='reports'?rest:'',...(section==='findings' && rest ? {highlight:rest} : {})};
+      return {view:'program',program:parts[1]||'',lane:parts[2]||'',section,report:section==='reports'?rest:'',...(section==='findings' && rest ? {highlight:rest} : {}),...(section==='scope' ? {scopeQuery:query} : {})};
     }
     return null;
   }
@@ -1759,6 +1764,7 @@
     if(next.view)state.view=next.view;
     if(next.view==='recent' && typeof next.recentQuery==='string')state.recentQuery=next.recentQuery;
     if(next.view==='recon' && typeof next.reconQuery==='string')state.reconQuery=next.reconQuery;
+    if(typeof next.scopeQuery==='string')state.scopeQuery=next.scopeQuery;
     if(next.program!==undefined && next.program!==state.program){
       ++laneGeneration;state.program=next.program;state.lane=next.lane||'';state.report='';state.filters=emptyFilters();normalizeSelection();
     } else if(next.lane && next.lane!==state.lane && (list(currentProgram()?.lanes)||[]).some(l=>String(l.name)===next.lane)){
@@ -1941,7 +1947,7 @@
     state.view=initialRoute.view;
     if(initialRoute.view==='recent')state.recentQuery=initialRoute.recentQuery;
     if(initialRoute.view==='recon')state.reconQuery=initialRoute.reconQuery;
-    if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
+    if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scopeQuery=initialRoute.scopeQuery||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
   }
   // Public UI helpers for feature modules (see style.css header for tokens).
   window.BoardUI = Object.freeze({toast, openMenu, openPopover, closePopover, openProgramPicker, openPills, severityOptions,
