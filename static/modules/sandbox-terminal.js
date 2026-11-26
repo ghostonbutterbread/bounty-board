@@ -30,6 +30,10 @@
   // Result of /api/mount for this report: null while unknown (then the button stays usable),
   // {ok: false, message} for navigation pages and files outside a finding folder.
   let mount = null;
+  // True once /api/mount answered (or failed) for the current report. The shell never attaches
+  // before that, so a report outside a finding folder never gets an attach attempt and a late
+  // answer for an earlier report is ignored (loadMount checks the report key).
+  let mountKnown = false;
   const blocked = () => mount?.ok === false;
   // Drawer tabs (registerTab): id -> {id, label, title, closable, connect, onClose, handle, el, status, meta}.
   // The built-in shell tab is 'terminal' and is not in the map.
@@ -255,12 +259,15 @@
     t.loadAddon(f);
     t.open(screenEl);
     const say = text => { try { noteFn?.(text); } catch {} };
+    // Every listener below goes away with this terminal (review U3): one AbortController per
+    // terminal, aborted in dispose, so a tab re-created on reopen never stacks a second guard set.
+    const ac = new AbortController(), signal = ac.signal, capture = {capture: true, signal};
     t.attachCustomKeyEventHandler(termKeyHandler(t));
     if (onData) t.onData(onData);
     if (onResize) t.onResize(({cols, rows}) => onResize(cols, rows));
     // Copy on select: when a mouse selection (drag, double or triple click) ends.
     let selecting = false;
-    screenEl.addEventListener('mousedown', event => { if (event.button === 0) selecting = true; });
+    screenEl.addEventListener('mousedown', event => { if (event.button === 0) selecting = true; }, {signal});
     const onUp = event => {
       if (!selecting || event.button !== 0) return;
       selecting = false;
@@ -268,7 +275,7 @@
       // user activation still allows the clipboard write a moment later.
       setTimeout(() => { if (prefs.copyOnSelect && t.hasSelection()) copySelection(t, false); }, 0);
     };
-    document.addEventListener('mouseup', onUp);
+    document.addEventListener('mouseup', onUp, {signal});
     // Paste guard: every paste (keys, context menu, middle click) reaches
     // xterm's own listeners below this element, so a capture listener here sees
     // it first and stops unsafe text before xterm can send it.
@@ -277,7 +284,7 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       say(PASTE_REFUSED);
-    }, true);
+    }, capture);
     // Text can also arrive as input events (phone keyboards' clipboard chips,
     // IME commits, drops), which xterm sends as they are, without bracketed
     // paste. Multi-character insertions that fail the filter or contain a
@@ -292,8 +299,8 @@
       if (event.type === 'input' && event.target?.value != null) event.target.value = '';
       say(unsafePaste(text) ? PASTE_REFUSED : MULTILINE_REFUSED);
     };
-    screenEl.addEventListener('beforeinput', guardInput, true);
-    screenEl.addEventListener('input', guardInput, true);
+    screenEl.addEventListener('beforeinput', guardInput, capture);
+    screenEl.addEventListener('input', guardInput, capture);
     // xterm also reads its textarea directly: on compositionend (IME and phone
     // keyboards commit text this way) and a moment after keyCode 229 keydowns.
     // Empty the textarea before that read whenever it would deliver unsafe or
@@ -305,8 +312,8 @@
       if (area) area.value = '';
       say(unsafePaste(bad) ? PASTE_REFUSED : MULTILINE_REFUSED);
     };
-    screenEl.addEventListener('compositionend', scrubArea, true);
-    screenEl.addEventListener('input', scrubArea, true);
+    screenEl.addEventListener('compositionend', scrubArea, capture);
+    screenEl.addEventListener('input', scrubArea, capture);
     // Fit only while visible: a hidden tab keeps its size until it shows again.
     const refitThis = () => { if (screenEl.isConnected && screenEl.offsetParent !== null && drawer && !drawer.hidden) { try { f.fit(); } catch {} } };
     const resizeObserver = new ResizeObserver(() => refitThis());
@@ -314,8 +321,8 @@
     const themeObserver = new MutationObserver(() => { t.options.theme = themeColors(); });
     themeObserver.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
     const dispose = () => {
+      ac.abort();
       resizeObserver.disconnect(); themeObserver.disconnect();
-      document.removeEventListener('mouseup', onUp);
       try { t.dispose(); } catch {}
     };
     return {term: t, fit: f, refit: refitThis, dispose};
@@ -393,6 +400,7 @@
   async function connect() {
     clearTimeout(connectTimer); connectTimer = null;
     if (!sel || !prefs.open || !drawer || drawer.hidden || blocked()) return;
+    if (!mountKnown) { if (activeTab === 'terminal') setStatus('connecting'); return; }   // loadMount calls connect() again
     // The shell attaches once its tab is shown (a drawer opened on an Agent or
     // connect tab does not start a shell viewer until Terminal is picked).
     if (activeTab === 'terminal') shellWanted = true;
@@ -960,6 +968,7 @@
   }
   function selectTab(id) {
     if (id !== 'terminal' && !tabs.has(id)) return false;
+    if (id === 'terminal' && blocked()) return false;   // no shell outside a finding folder (review U2)
     activeTab = id;
     for (const tab of tabs.values()) if (tab.el) tab.el.hidden = tab.id !== id;
     if (id === 'terminal') connect(); else attachActiveTab();
@@ -1029,7 +1038,8 @@
   }
   function onTabKey(event) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !event.target.matches('[data-term-tab-select]')) return;
-    const ids = ['terminal', ...tabs.keys()], i = ids.indexOf(activeTab);
+    const ids = [...(blocked() ? [] : ['terminal']), ...tabs.keys()], i = Math.max(0, ids.indexOf(activeTab));
+    if (!ids.length) return;
     const next = event.key === 'Home' ? 0 : event.key === 'End' ? ids.length - 1 : (i + (event.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length;
     event.preventDefault();
     selectTab(ids[next]);
@@ -1236,7 +1246,9 @@
     try { result = await api(`api/mount?${query(sel)}`); } catch { result = null; }
     if (key !== selKey) return;
     mount = result;
+    mountKnown = true;
     applyMount();
+    if (!blocked() && drawer && !drawer.hidden) connect();
     schedule();
     emit('mount', mount ? {...mount} : null);
   }
@@ -1257,7 +1269,7 @@
       if (!observer) { observer = new MutationObserver(schedule); observer.observe(context.app, {childList: true, subtree: true, attributes: true, attributeFilter: ['class']}); }
       const key = keyOf(next);
       if (key !== selKey) {
-        sel = next; selKey = key; checks = {}; checksOk = false; info = null; pending = []; mount = null;
+        sel = next; selKey = key; checks = {}; checksOk = false; info = null; pending = []; mount = null; mountKnown = false; status = 'idle';
         disconnect(); clearTabs(); shellWanted = false; emitClosed(); retry = 0;
         if (term) term.reset();
         loadChecks();

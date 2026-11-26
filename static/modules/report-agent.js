@@ -30,7 +30,8 @@
   const STATUS_TONE = {working: 'accent', blocked: 'warning', idle: '', done: 'success'};
   const NEEDS_LOGIN = 'Needs a sandbox login on Hoster';
   // Deploy step 1 of docs/integrations/report-agent.md, as one plain line.
-  const LOGIN_HINT = 'On Hoster, run claude setup-token, then save only the printed token in ~/.config/bounty-board/report-agent.token (mode 0600, outside the data root).';
+  const LOGIN_HINT = 'Run claude setup-token on Hoster and save the token in ~/.config/bounty-board/report-agent.token (0600).';
+  const LOGIN_HELP = "Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board's user.";
   const UNSAFE_TEXT = 'The text contains control or invisible characters. Remove them and try again.';
   const CONNECT_COPY = 'These are the agents\' real sessions on Hoster, outside any sandbox. What you type goes straight to the agent.';
 
@@ -709,7 +710,7 @@
         const save = h('button', {type: 'button', className: 'button sm primary', dataset: {agentSave: ''}, disabled: state.saving || !dirty || model === null, onclick: saveSettings}, state.saving ? 'Saving' : 'Save');
         parts.push(h('div', {className: 'set-row ra-set-row'},
           h('div', {className: 'set-text'}, h('span', {className: 'set-label', text: 'CLI and model'}),
-            h('p', {className: 'hint', text: 'Used for every report agent. Saved on the terminal service, so it applies on every device.'})),
+            h('p', {className: 'hint', text: 'Saved on Hoster, for every device.'})),
           h('div', {className: 'set-controls ra-set-controls'}, modelFields(state, quiet => { state.message = ''; if (quiet) paintSave(); else paint(); }, 'set-agent'), save)));
         parts.push(h('p', {className: `hint ra-set-msg${state.tone ? ` ${state.tone}` : ''}`, dataset: {agentSettingsMsg: ''}, role: 'status', 'aria-live': 'polite',
           text: state.message || (model === null ? 'Custom model ids use lowercase letters, digits, dots and dashes.' : '')}));
@@ -718,7 +719,7 @@
       const connectOn = status ? !!status.agent_connect : null;
       parts.push(h('div', {className: 'set-row'},
         h('div', {className: 'set-text'}, h('span', {className: 'set-label', text: connectOn === null ? 'Connect to running agents: unknown' : `Connect to running agents: ${connectOn ? 'on' : 'off'}`, dataset: {agentConnectFlag: connectOn === null ? 'unknown' : connectOn ? 'on' : 'off'}}),
-          h('p', {className: 'hint', text: 'A terminal service setting (--agent-connect), not changed here. When on, the Agent button lists agents running on Hoster.'}))));
+          h('p', {className: 'hint', text: 'Set by the --agent-connect service flag.'}))));
       host.replaceChildren(...parts);
     };
     // "Sandbox login (Claude)": saved on Hoster through POST /api/agent/login. The token
@@ -727,37 +728,52 @@
       const login = config.login || {};
       const pill = h('span', {className: `badge ${login.ready ? 'success' : 'warning'}`, dataset: {agentLogin: login.ready ? 'ready' : 'missing'},
         text: login.ready ? 'Sandbox login ready' : 'No sandbox login on Hoster yet'});
+      // Layout: label (and a short status line) left, pill and buttons right, like the other rows;
+      // the explanation is one full-width line under the row.
+      const row = (left, controls, note) => [
+        h('div', {className: 'set-row ra-login-row', dataset: {agentLoginRow: ''}},
+          h('div', {className: 'set-text'}, left), h('div', {className: 'set-controls ra-login-controls'}, controls)),
+        note];
       if (!login.editable) {
-        return [h('div', {className: 'set-row'},
-          h('div', {className: 'set-text'}, h('span', {className: 'set-label', text: 'Sandbox login'}),
-            login.ready ? h('p', {className: 'hint', text: 'The agent signs in through the host relay. The token never enters the sandbox.'}) : h('p', {className: 'hint', dataset: {agentLoginHint: ''}, text: LOGIN_HINT})),
-          pill)];
+        return [h('div', {className: 'ra-login', dataset: {agentLoginBlock: ''}}, ...row([h('span', {className: 'set-label', text: 'Sandbox login'})], [pill],
+          h('p', {className: 'hint ra-login-note', dataset: login.ready ? {} : {agentLoginHint: ''},
+            text: login.ready ? 'The token stays on Hoster and never enters the sandbox.' : LOGIN_HINT})))];
       }
-      const text = [h('span', {className: 'set-label', text: 'Sandbox login (Claude)'})];
-      let controls;
+      const left = [h('span', {className: 'set-label', text: 'Sandbox login (Claude)'})];
+      let controls, note;
       if (login.ready && !state.replacing) {
-        if (login.saved_at) text.push(h('p', {className: 'hint', dataset: {agentLoginSaved: ''}, text: `Saved ${ago(login.saved_at)}`}));
-        text.push(h('p', {className: 'hint', text: 'The agent signs in through the host relay. The token never enters the sandbox.'}));
+        if (login.saved_at) left.push(h('p', {className: 'hint', dataset: {agentLoginSaved: ''}, text: `Saved ${ago(login.saved_at)}`}));
+        note = h('p', {className: 'hint ra-login-note', text: 'The token stays on Hoster and never enters the sandbox.'});
         controls = [pill,
           h('button', {type: 'button', className: 'button sm subtle', dataset: {agentLoginAction: 'remove'}, disabled: state.loginBusy, onclick: removeLogin}, 'Remove'),
           h('button', {type: 'button', className: 'button sm', dataset: {agentLoginAction: 'replace'}, disabled: state.loginBusy,
             onclick: () => { state.replacing = true; state.loginMsg = ''; paint(); host.querySelector('input[name="set-agent-token"]')?.focus(); }}, 'Replace')];
       } else {
-        if (!state.replacing) text.push(h('div', {className: 'ra-login-status'}, pill));
-        text.push(h('p', {className: 'hint', dataset: {agentLoginHelp: ''}, text: 'Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board\'s user.'}));
-        const input = h('input', {type: 'password', name: 'set-agent-token', className: 'ra-token', autocomplete: 'off', spellcheck: 'false',
-          autocapitalize: 'off', placeholder: 'sk-ant-oat...', 'aria-label': 'Claude setup token', disabled: state.loginBusy,
-          onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); saveLogin(); } }});
-        input.spellcheck = false;
+        note = h('p', {className: 'hint ra-login-note', dataset: {agentLoginHelp: ''}, text: LOGIN_HELP});
         controls = [
-          state.replacing ? h('button', {type: 'button', className: 'button sm ghost', dataset: {agentLoginAction: 'cancel'}, onclick: () => { state.replacing = false; state.loginMsg = ''; paint(); }}, 'Cancel') : null,
-          input,
+          state.replacing ? h('button', {type: 'button', className: 'button sm ghost', dataset: {agentLoginAction: 'cancel'}, onclick: () => { state.replacing = false; state.loginMsg = ''; paint(); }}, 'Cancel') : pill,
+          tokenInput(),
           h('button', {type: 'button', className: 'button sm primary', dataset: {agentLoginAction: 'save'}, disabled: state.loginBusy, onclick: saveLogin}, state.loginBusy ? 'Saving' : 'Save')];
       }
       const problem = !login.ready && login.reason && login.reason !== 'missing' ? login.message : '';
-      return [h('div', {className: 'set-row ra-login-row', dataset: {agentLoginRow: ''}},
-        h('div', {className: 'set-text'}, text), h('div', {className: 'set-controls ra-login-controls'}, controls)),
-      h('p', {className: `hint ra-set-msg${state.loginTone ? ` ${state.loginTone}` : ''}`, dataset: {agentLoginMsg: ''}, role: 'status', 'aria-live': 'polite', text: state.loginMsg || problem || ''})];
+      return [h('div', {className: 'ra-login', dataset: {agentLoginBlock: ''}}, ...row(left, controls, note),
+        h('p', {className: `hint ra-set-msg${state.loginTone ? ` ${state.loginTone}` : ''}`, dataset: {agentLoginMsg: ''}, role: 'status', 'aria-live': 'polite', text: state.loginMsg || problem || ''}))];
+    }
+    // The token field (review U1). A formless <input type=password> that disappears after a fetch is
+    // what Chrome's password manager offers to save (it ignores autocomplete=off there), so the field
+    // is a text input masked by CSS, with every password manager's ignore attribute. Chromium, Safari
+    // and Firefox (checked: Firefox 158) support -webkit-text-security; where a browser does not, the
+    // value must still be hidden, so it falls back to type=password with autocomplete=one-time-code.
+    function tokenInput() {
+      const masked = !!window.CSS?.supports?.('-webkit-text-security', 'disc');
+      const input = h('input', {type: masked ? 'text' : 'password', name: 'set-agent-token', className: 'ra-token',
+        autocomplete: masked ? 'off' : 'one-time-code', spellcheck: 'false', autocapitalize: 'off', autocorrect: 'off',
+        'data-1p-ignore': '', 'data-lpignore': 'true', 'data-bwignore': '', 'data-form-type': 'other',
+        placeholder: 'sk-ant-oat...', 'aria-label': 'Claude setup token', disabled: state.loginBusy,
+        onkeydown: event => { if (event.key === 'Enter') { event.preventDefault(); saveLogin(); } }});
+      input.spellcheck = false;
+      if (masked) input.style.setProperty('-webkit-text-security', 'disc');   // masked even before the stylesheet applies
+      return input;
     }
     async function saveLogin() {
       const input = host.querySelector('input[name="set-agent-token"]');

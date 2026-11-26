@@ -74,6 +74,13 @@
 }
 /* Sandbox login row: password field, then Save (rightmost). */
 .ra-login-controls{flex-wrap:wrap;justify-content:flex-end;max-width:520px}
-.ra-token{width:260px;max-width:100%;font-family:var(--font-mono);font-size:var(--text-sm)}
+.ra-token{width:230px;max-width:100%;font-family:var(--font-mono);font-size:var(--text-sm)}
+/* Masked by CSS, not type=password (review U1); the JS falls back to type=password where unsupported. */
+.ra-token[type="text"]{-webkit-text-security:disc}
+.ra-login-note{margin:-6px 0 var(--space-2)}
+.ra-login-controls{flex-wrap:nowrap}
 .ra-start-off{margin:var(--space-2) 0 0}
-.ra-login-status{margin:4px 0 2px}
+.ra-set-row .set-text{flex:0 0 220px}
+.ra-set-row .ra-set-controls{flex:1 1 0;min-width:0;max-width:none}
+.ra-set-row .ra-set-controls .ra-field{flex:1 1 150px;max-width:200px}
+.ra-login>.set-row{border-top:1px solid var(--border)}

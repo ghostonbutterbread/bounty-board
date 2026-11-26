@@ -61,6 +61,46 @@ const agentButton=page=>page.locator('[data-agent-toggle]');
 const barToTop=page=>page.evaluate(()=>{const b=document.querySelector('[data-agent-toggle]');window.scrollBy(0,b.getBoundingClientRect().top-80);});
 const popover=page=>page.locator('[data-agent-popover]');
 async function shot(page,name,locator){if(!shots)return;fs.mkdirSync(shots,{recursive:true});const file=path.join(shots,`report-agent-ui-${name}.png`);if(locator)await locator.screenshot({path:file});else await page.screenshot({path:file});}
+// Toasts ("Reports loaded") sit over the Settings card; dismiss them before a screenshot (review U5).
+async function dismissToasts(page){
+  await page.waitForLoadState('networkidle').catch(()=>{});
+  let quiet=0;
+  for(let i=0;i<60&&quiet<5;i++){
+    const b=page.locator('#toasts .toast button');
+    if(await b.count()){quiet=0;await b.first().click().catch(()=>{});}else quiet++;
+    await page.waitForTimeout(150);
+  }
+}
+// Every hint in the Agent section fits on one line at the screenshot width (review U5).
+async function oneLineHints(page){
+  const wrapped=await page.evaluate(()=>[...document.querySelectorAll('[data-settings-section="agent"] .hint')].filter(e=>e.offsetParent&&e.textContent.trim()).map(e=>({t:e.textContent,h:e.getBoundingClientRect().height,lh:parseFloat(getComputedStyle(e).lineHeight)||18})).filter(x=>x.h>x.lh*1.5));
+  assert.deepEqual(wrapped,[],'hints wrap');
+}
+// One capture of everything the page saw, and one scan for a token in all of it (review U4):
+// request URLs, headers and bodies; response headers and bodies; console messages; page errors;
+// the DOM and every field value; local and session storage; the URL. `allowed` lists the request
+// bodies that may carry a token (the login POSTs), each exactly once.
+function tokenCapture(page){
+  const cap={requests:[],responses:[],console:[],errors:[],pending:[]};
+  page.on('request',r=>cap.requests.push({url:r.url(),body:r.postData()||'',headers:JSON.stringify(r.headers())}));
+  page.on('response',r=>cap.pending.push((async()=>{let body='';try{body=await r.text();}catch{}cap.responses.push({url:r.url(),body,headers:JSON.stringify(await r.allHeaders().catch(()=>({})))});})()));
+  page.on('console',m=>cap.console.push(m.text()));
+  page.on('pageerror',e=>cap.errors.push(String(e)));
+  cap.scan=async(label,mark,allowed=[])=>{
+    await Promise.all(cap.pending);
+    const page_=await page.evaluate(()=>({dom:document.documentElement.outerHTML,values:[...document.querySelectorAll('input,textarea')].map(i=>i.value).join('|'),
+      local:JSON.stringify({...localStorage}),session:JSON.stringify({...sessionStorage}),url:location.href}));
+    for(const [where,text] of Object.entries(page_))assert.doesNotMatch(text,mark,`${label}: token in ${where}`);
+    for(const r of cap.responses)assert.doesNotMatch(r.url+r.body+r.headers,mark,`${label}: token in the response of ${r.url}`);
+    assert.doesNotMatch(cap.console.join('\n'),mark,`${label}: token in the console`);
+    assert.doesNotMatch(cap.errors.join('\n'),mark,`${label}: token in a page error`);
+    const carrying=cap.requests.filter(r=>mark.test(r.url+r.body+r.headers));
+    assert.deepEqual(carrying.map(r=>r.body).sort(),allowed.map(a=>JSON.stringify(a)).sort(),`${label}: only the login POST bodies carry a token`);
+    for(const r of carrying){assert.match(r.url,/\/terminal\/api\/agent\/login$/);assert.doesNotMatch(r.url+r.headers,mark);}
+    return {requests:cap.requests.length,responses:cap.responses.length,console:cap.console.length};
+  };
+  return cap;
+}
 async function theme(page,value){await page.evaluate(v=>{localStorage.setItem('bounty-board-theme',v);document.documentElement.dataset.theme=v;},value);}
 async function noWrap(page,selector,label){
   const bad=await page.evaluate(sel=>[...document.querySelectorAll(sel)].filter(el=>el.offsetParent!==null).map(el=>{const r=el.getBoundingClientRect();const lh=parseFloat(getComputedStyle(el).lineHeight)||18;return {text:el.textContent,h:r.height,lh,cut:el.scrollWidth>el.clientWidth+1&&getComputedStyle(el).textOverflow!=='ellipsis'};}).filter(x=>x.h>x.lh*1.6+6||x.cut),selector);
@@ -111,6 +151,10 @@ test('settings: Agent section loads and saves the CLI and model; login and conne
     assert.equal(await section.locator('select[name="set-agent-model"]').inputValue(),'__custom');
     assert.equal(await section.locator('input[name="set-agent-custom"]').inputValue(),'claude-synthetic-9');
     assert.doesNotMatch(await section.textContent(),/sk-ant/,'never a token');
+    assert.equal(await section.locator('.ra-login-controls [data-agent-login]').count(),1,'login pill right-aligned with the controls');
+    await oneLineHints(page);
+    await dismissToasts(page);
+    assert.equal(await page.locator('#toasts .toast').count(),0,'no toast over the card');
     for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`settings-${t}`,page.locator('[data-settings-group="terminal"]'));}
     await noWrap(page,'[data-settings-section="agent"] .badge','settings badges');
     assert.deepEqual(page.errors,[]);
@@ -140,20 +184,33 @@ test('settings: Agent section loads and saves the CLI and model; login and conne
 
 test('settings: sandbox login saved from Settings; Replace, Remove; the token never stays in the page',{timeout:240000},async()=>{
   const SENTINEL='sk-ant-oat01-SENTINELbrowserZ8q-FAKEFAKEFAKE_0123456789';
-  const MARK=/SENTINEL|FAKEFAKEFAKE|Z8q/;
+  const SENTINEL2='sk-ant-oat01-SENTINELreplaceW3k-FAKEFAKEFAKE_9876543210';
+  const MARK=/SENTINEL|FAKEFAKEFAKE|Z8q|W3k/;
   await withFixture('nologin',async({base,newPage,token})=>{
     const page=await newPage();
-    const requests=[];
-    page.on('request',r=>requests.push({url:r.url(),body:r.postData()||'',headers:JSON.stringify(r.headers())}));
+    const cap=tokenCapture(page);
+    const requests=cap.requests;
     await page.goto(`${base}/#/settings`);
     const row=page.locator('[data-agent-login-row]');
     await row.waitFor({timeout:15000});
     assert.equal(await row.locator('.set-label').textContent(),'Sandbox login (Claude)');
-    assert.equal(await row.locator('[data-agent-login-help]').textContent(),"Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board's user.");
+    assert.equal(await page.locator('[data-agent-login-help]').textContent(),"Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board's user.");
     const input=row.locator('input[name="set-agent-token"]');
-    assert.deepEqual(await input.evaluate(i=>({type:i.type,autocomplete:i.getAttribute('autocomplete'),spellcheck:i.spellcheck,inForm:!!i.closest('form')})),{type:'password',autocomplete:'off',spellcheck:false,inForm:false});
+    // Not a password field (Chrome offers to save formless password fields, review U1): a text field
+    // masked by CSS, with every password manager's ignore attribute.
+    // The section repaints once its config loads; read the connected field until its style settles (review U1).
+    const fieldState=()=>page.evaluate(()=>{const i=document.querySelector('input[name="set-agent-token"]');return i&&{type:i.type,autocomplete:i.getAttribute('autocomplete'),spellcheck:i.spellcheck,inForm:!!i.closest('form'),
+      mask:getComputedStyle(i).getPropertyValue('-webkit-text-security'),ignore:['data-1p-ignore','data-lpignore','data-bwignore','data-form-type'].map(a=>i.getAttribute(a))};}).catch(()=>null);
+    let field=null;
+    for(let i=0;i<50;i++){field=await fieldState();if(field?.mask==='disc')break;await page.waitForTimeout(200);}
+    assert.deepEqual(field,
+    {type:'text',autocomplete:'off',spellcheck:false,inForm:false,mask:'disc',ignore:['','true','','other']});
+    assert.equal(await page.locator('input[type="password"]').count(),0,'no password input on the page');
     assert.equal(await row.locator('[data-agent-login]').textContent(),'No sandbox login on Hoster yet');
-    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`login-field-${t}`,row);}
+    assert.equal(await row.locator('.ra-login-controls [data-agent-login]').count(),1,'the pill sits with the controls, right-aligned');
+    await dismissToasts(page);
+    await oneLineHints(page);
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`login-field-${t}`,page.locator('[data-agent-login-block]'));}
     await theme(page,'light');
     // A value that is not a setup token is refused in the page: nothing sent, field cleared.
     await input.fill('hunter2-not-a-token');
@@ -170,23 +227,24 @@ test('settings: sandbox login saved from Settings; Replace, Remove; the token ne
     assert.equal(await row.locator('[data-agent-login]').textContent(),'Sandbox login ready');
     assert.match(await row.locator('[data-agent-login-saved]').textContent(),/^Saved (under a minute|\d+ min) ago$/);
     assert.equal(await row.locator('input[name="set-agent-token"]').count(),0,'the field is gone once saved');
-    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`login-saved-${t}`,row);}
+    assert.equal(await row.locator('.ra-login-controls [data-agent-login]').count(),1);
+    await oneLineHints(page);
+    await dismissToasts(page);
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(150);await shot(page,`login-saved-${t}`,page.locator('[data-agent-login-block]'));}
     await theme(page,'light');
-    const leaks=await page.evaluate(()=>{
-      const values=[...document.querySelectorAll('input,textarea')].map(i=>i.value).join('|');
-      return {dom:document.documentElement.outerHTML,values,local:JSON.stringify({...localStorage}),session:JSON.stringify({...sessionStorage}),url:location.href};
-    });
-    for(const [where,text] of Object.entries(leaks))assert.doesNotMatch(text,MARK,`token in ${where}`);
-    const carrying=requests.filter(r=>MARK.test(r.url+r.body+r.headers));
-    assert.equal(carrying.length,1,'only the one POST carries the token');
-    assert.match(carrying[0].url,/\/terminal\/api\/agent\/login$/);
-    assert.deepEqual(JSON.parse(carrying[0].body),{cli:'claude',token:SENTINEL});
-    // The Agent button now works (the login came from Settings).
-    // Replace opens the field again; Cancel keeps the saved login.
+    const first=await cap.scan('after Save',MARK,[{cli:'claude',token:SENTINEL}]);
+    assert.ok(first.responses>0&&first.requests>0,'the capture saw traffic');
+    // Replace opens the field again; Cancel keeps the saved login; a second Save replaces it.
     await row.locator('[data-agent-login-action="replace"]').click();
     await row.locator('input[name="set-agent-token"]').waitFor();
     await row.locator('[data-agent-login-action="cancel"]').click();
     assert.equal(await row.locator('[data-agent-login]').textContent(),'Sandbox login ready');
+    await row.locator('[data-agent-login-action="replace"]').click();
+    await row.locator('input[name="set-agent-token"]').fill(SENTINEL2);
+    await row.locator('[data-agent-login-action="save"]').click();
+    await page.locator('[data-agent-login-msg]').filter({hasText:'Saved on Hoster.'}).waitFor({timeout:15000});
+    assert.equal(fs.readFileSync(token,'utf8'),SENTINEL2+'\n');
+    await cap.scan('after Replace',MARK,[{cli:'claude',token:SENTINEL},{cli:'claude',token:SENTINEL2}]);
     // Remove asks first.
     await row.locator('[data-agent-login-action="remove"]').click();
     const dialog=page.locator('dialog.ledger-dialog');
@@ -199,6 +257,7 @@ test('settings: sandbox login saved from Settings; Replace, Remove; the token ne
     await page.locator('[data-agent-login-msg]').filter({hasText:'Login removed.'}).waitFor({timeout:15000});
     assert.equal(fs.existsSync(token),false);
     assert.equal(await row.locator('[data-agent-login]').textContent(),'No sandbox login on Hoster yet');
+    await cap.scan('after Remove',MARK,[{cli:'claude',token:SENTINEL},{cli:'claude',token:SENTINEL2}]);
     await row.locator('input[name="set-agent-token"]').waitFor();
     assert.deepEqual(page.errors,[]);
   });
