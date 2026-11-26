@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 
 from report_evidence import is_evidence, recorded_paths, reports_relative
+from report_packets import LEGACY_NAME as _LEGACY_NAME, PACKET_DIR as _PACKET_DIR, counts_for_time, \
+    is_meta, packet_folder, plan as packet_plan
 
 SEVERITY_RANK = {'EXCEPTIONAL': 6, 'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'INFO': 1}
 KINDS = ('program', 'finding', 'report')
@@ -26,9 +28,8 @@ _CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f  ]')
 _SPACE = re.compile(r'\s+')
 _HEADING = re.compile(r'^#{1,6}\s+(.+?)\s*#*\s*$')
 # Report -> finding mapping by location: a packet folder directly under
-# reports/ ("F012-xss/...", "F012/...") or a legacy "<FID> - Title.md" file.
-_PACKET_DIR = re.compile(r'^([A-Za-z][0-9]{2,})(?:-.*)?$')
-_LEGACY_NAME = re.compile(r'^([A-Za-z][0-9]{2,}) - .+\.md$', re.IGNORECASE)
+# reports/ ("F012-xss/...", "F012/...") or a legacy "<FID> - Title.md" file
+# (patterns shared with report_packets).
 
 
 def packet_meta(rel):
@@ -36,8 +37,7 @@ def packet_meta(rel):
 
     Such files are packet bookkeeping: Recent and search hide them like
     generated navigation (Recent shows them with its navigation toggle)."""
-    parts = rel.split('/')
-    return len(parts) >= 3 and _PACKET_DIR.match(parts[0]) is not None and '_meta' in parts[1:-1]
+    return is_meta(rel)
 
 
 def fold(text):
@@ -236,34 +236,57 @@ class SearchIndex:
         # finding, not reports: kept by path only (no read, no budget) so a
         # finding hit can still link its evidence.
         evidence = {}
+        # Packet files (report_packets): every Markdown file of a finding
+        # packet other than its main report. Kept by path only (no read, no
+        # budget), so links to them resolve to the main report.
+        packet_files = {}
         report_paths, evidence_paths = recorded_paths(raw_findings, lane)
         base = lane / 'reports'
+        found, other = [], []
         if base.is_dir() and not base.is_symlink():
-            for rel, filename, stat in self._walk(base, warnings):
-                if is_evidence(rel, report_paths, evidence_paths):
+            for rel, filename, stat, markdown in self._walk(base, warnings):
+                if not markdown:
+                    other.append((rel, stat.st_mtime))
+                elif is_evidence(rel, report_paths, evidence_paths):
                     evidence[rel] = {'mtime': stat.st_mtime}
-                    continue
-                if budget['reports'] >= self.max_reports:
-                    warnings.add('report_limit')
-                    break
-                budget['reports'] += 1
-                sig = _signature(stat)
-                previous = old_reports.get(rel)
-                room = budget['chars'] < self.max_total_chars
-                # Reuse indexed text only while the budget has room for it, so
-                # max_total_chars bounds memory across refreshes too.
-                if previous is not None and previous['sig'] == sig and (
-                        (previous['has_text'] and (room or not previous['text'])) or (not previous['has_text'] and not room)):
-                    entry = previous
                 else:
-                    entry = self._read_report(lane, rel, filename, sig, stat.st_mtime, room, warnings)
-                budget['chars'] += len(entry['text'])
-                if not entry['has_text']:
-                    warnings.add('content_limit' if entry['unread'] != 'error' else 'content_unavailable')
-                elif entry['truncated']:
-                    warnings.add('content_truncated')
-                entry['meta'] = packet_meta(rel)
-                reports[rel] = entry
+                    found.append((rel, filename, stat))
+        def navigation_page(rel):
+            try:
+                return bool(self._generated_navigation(rel, self._read_file(lane, 'reports/' + rel).decode('utf-8')))
+            except (OSError, ValueError, UnicodeError):
+                return False
+        packets = packet_plan([(rel, stat.st_mtime) for rel, _, stat in found], raw_findings, lane, other,
+                              [(rel, e['mtime']) for rel, e in evidence.items()], is_navigation=navigation_page)
+        for rel, filename, stat in found:
+            if rel in packets.files:
+                packet_files[rel] = {**packets.files[rel], 'mtime': stat.st_mtime}
+                continue
+            if budget['reports'] >= self.max_reports:
+                warnings.add('report_limit')
+                break
+            budget['reports'] += 1
+            sig = _signature(stat)
+            previous = old_reports.get(rel)
+            room = budget['chars'] < self.max_total_chars
+            # Reuse indexed text only while the budget has room for it, so
+            # max_total_chars bounds memory across refreshes too.
+            if previous is not None and previous['sig'] == sig and (
+                    (previous['has_text'] and (room or not previous['text'])) or (not previous['has_text'] and not room)):
+                entry = previous
+            else:
+                entry = self._read_report(lane, rel, filename, sig, stat.st_mtime, room, warnings)
+            budget['chars'] += len(entry['text'])
+            if not entry['has_text']:
+                warnings.add('content_limit' if entry['unread'] != 'error' else 'content_unavailable')
+            elif entry['truncated']:
+                warnings.add('content_truncated')
+            entry['meta'] = packet_meta(rel)
+            main = packets.mains.get(rel)
+            # A packet's main report carries the packet's time (newest file).
+            entry['packet'] = main
+            entry['mtime'] = main['modified'] if main is not None and main['modified'] is not None else stat.st_mtime
+            reports[rel] = entry
         owners = self._ownership(lane, raw_findings)
         findings = []
         for f in raw_findings:
@@ -271,7 +294,9 @@ class SearchIndex:
             if fid is None:
                 continue
             link = None
-            target = self._relative_report(lane, base, f.get('report_path'))
+            target = reports_relative(f.get('report_path'), lane)
+            if target in packet_files:
+                target = packet_files[target]['main']
             if target in reports and not reports[target]['nav']:
                 link = {'path': target, 'kind': 'report'}
             else:
@@ -287,17 +312,28 @@ class SearchIndex:
             # A file an evidence_path names is evidence (never in `reports`),
             # so ownership here comes from report_path only.
             registered = owners['report_path'].get(rel, [])
+            main = entry.get('packet')
+            if main is not None and not entry['nav']:
+                registered = list(dict.fromkeys([*map(str, registered), *main['owner_fids']]))
             entry['owner_fids'] = [str(x) for x in registered]
             entry['report_kind'] = ('registered_report' if registered
                                     else 'generated_report' if entry['generated'] else 'unregistered')
-            entry['finding_fid'], entry['finding_match'] = (None, None) if entry['nav'] else \
-                self._map_finding(rel, registered, [], unique)
+            if entry['nav']:
+                entry['finding_fid'], entry['finding_match'] = None, None
+            elif main is not None:
+                entry['finding_fid'], entry['finding_match'] = main['finding']
+            else:
+                entry['finding_fid'], entry['finding_match'] = self._map_finding(rel, registered, [], unique)
         return {'family': family, 'program': program, 'lane': name, 'ledger_sig': ledger_sig,
-                'raw_findings': raw_findings, 'findings': findings, 'reports': reports, 'evidence': evidence}
+                'raw_findings': raw_findings, 'findings': findings, 'reports': reports, 'evidence': evidence,
+                'packet_files': packet_files}
 
     @staticmethod
     def _walk(base, warnings):
-        """Yield (relative path, name, lstat) of regular .md files; never follows symlinks."""
+        """Yield (relative path, name, lstat, is_markdown) of regular files; never follows symlinks.
+
+        Every .md file, plus the other files inside a finding packet that move
+        its time (report_packets.counts_for_time), which are never read."""
         stack = [(str(base), '')]
         while stack:
             directory, prefix = stack.pop()
@@ -313,10 +349,13 @@ class SearchIndex:
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         stack.append((entry.path, prefix + entry.name + '/'))
-                    elif entry.name[-3:].lower() == '.md':
-                        stat = entry.stat(follow_symlinks=False)
-                        if stat_module.S_ISREG(stat.st_mode):
-                            yield prefix + entry.name, entry.name, stat
+                        continue
+                    markdown = entry.name[-3:].lower() == '.md'
+                    if not markdown and not (prefix and packet_folder(prefix + entry.name) and counts_for_time(prefix + entry.name)):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                    if stat_module.S_ISREG(stat.st_mode):
+                        yield prefix + entry.name, entry.name, stat, markdown
                 except OSError:
                     continue
 
@@ -351,18 +390,6 @@ class SearchIndex:
         entry['has_text'] = True
         entry['unread'] = ''
         return entry
-
-    @staticmethod
-    def _relative_report(lane, base, recorded):
-        if not isinstance(recorded, str) or not recorded:
-            return None
-        candidate = Path(recorded)
-        if not candidate.is_absolute():
-            candidate = lane / candidate
-        try:
-            return Path(os.path.normpath(candidate)).relative_to(Path(os.path.normpath(base))).as_posix()
-        except ValueError:
-            return None
 
     @staticmethod
     def _submission(value):
@@ -406,14 +433,13 @@ class SearchIndex:
         return None, None
 
     def _ownership(self, lane, raw_findings):
-        base = lane / 'reports'
         owners = {'report_path': {}, 'evidence_path': {}}
         for f in raw_findings:
             fid = f.get('fid')
             if not fid:
                 continue
             for field in ('report_path', 'evidence_path'):
-                rel = self._relative_report(lane, base, f.get(field))
+                rel = reports_relative(f.get(field), lane)
                 if rel:
                     owners[field].setdefault(rel, []).append(fid)
         return owners
@@ -553,6 +579,10 @@ class SearchIndex:
                order='newest', include_navigation=False, fresh_wait=2.0, na_keys=None, hide_na=False):
         """Reports across every program and lane ordered by file modification time.
 
+        One row per finding packet (report_packets): the main report, at the
+        newest time of any file in the packet, with `updated_file` naming that
+        file (packet-relative) when it is not the main report.
+
         Filters: `within` (seconds before now), `programs` (ids "family/name"),
         `lane`, `query` (every term must occur in the title or path) and
         generated navigation and packet `_meta/` files (excluded unless `include_navigation`). Facet
@@ -639,6 +669,8 @@ class SearchIndex:
                           'program_name': names[pid][0], 'family': names[pid][1], 'lane': lane_name,
                           'modified': mtime, 'report_kind': 'generated_navigation' if r['nav'] else r['report_kind'],
                           'owner_fids': r['owner_fids'][:5], 'finding': finding, 'na': na, 'packet_meta': bool(r.get('meta')),
+                          'packet': r['packet']['packet'] if r.get('packet') else None,
+                          'updated_file': r['packet']['updated_file'] if r.get('packet') else None,
                           'target': {'program': pid, 'lane': lane_name, 'section': 'reports', 'report': rel}})
         return {'index_state': self.state(), 'root_instance': self._instance, 'now': now,
                 'total': len(matches), 'total_reports': total_reports, 'offset': offset, 'limit': limit, 'order': order,
