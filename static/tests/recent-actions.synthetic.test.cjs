@@ -43,11 +43,14 @@ const panelRow=(page,file)=>panel(page).locator(`li[data-recent-row][data-path$=
 const pillNames=menu=>menu.getByRole('menuitemradio').evaluateAll(items=>items.map(i=>[i.textContent.trim(),i.getAttribute('aria-checked'),i.disabled]));
 const menuNames=menu=>menu.locator('[role^="menuitem"]').evaluateAll(items=>items.map(i=>i.textContent.trim()));
 const REPORT='F001-stored-xss/orchard.example-xss-F001.md', EVIDENCE='F001-stored-xss/EVIDENCE.md';
+// Evidence files are artifacts, not reports (feat/board-evidence-artifacts): never Recent rows.
+const REPORT2='F002-invoice-idor/billing.orchard.example-idor-F002.md', REPORT3='F003-open-redirect/orchard.example-open-redirect-F003.md';
 
 test('Recent pills save severity and submission through BBH, update every row of the finding, and undo',{timeout:120000},()=>withBoard('writer',async({page,finding})=>{
   await panelRow(page,REPORT).waitFor();
-  // Both packet files map to F001 and show pickers; an unmapped file shows none.
-  for(const file of [REPORT,EVIDENCE])assert.equal(await panelRow(page,file).locator('[data-recent-pick]').count(),2);
+  // The submission report maps to F001 and shows pickers; its EVIDENCE.md is an artifact, not a second row.
+  assert.equal(await panelRow(page,REPORT).locator('[data-recent-pick]').count(),2);
+  assert.equal(await panelRow(page,EVIDENCE).count(),0);
   await page.goto(page.url().replace(/#.*$/,'')+'#/recent?within=all&order=newest');
   await page.locator('.recent-table tr[data-path="scratch/unmapped-notes.md"]').first().waitFor();
   assert.equal(await page.locator('.recent-table tr[data-path="scratch/unmapped-notes.md"] [data-recent-pick]').count(),0,'no pickers without a finding');
@@ -68,15 +71,14 @@ test('Recent pills save severity and submission through BBH, update every row of
   assert.deepEqual((await pillNames(pills)).find(p=>p[0]==='High'),['High','true',false]);
   await pills.getByRole('menuitemradio',{name:'Critical'}).click();
   await until(()=>finding('orchard','F001').severity==='CRITICAL','F001 saved as CRITICAL');
-  // Every row of F001 follows: both panel rows and the drill-down row.
-  await until(async()=>(await panelRow(page,EVIDENCE).locator('[data-recent-pick="sev"]').innerText())==='CRITICAL','evidence row follows');
-  assert.equal(await panelRow(page,REPORT).locator('[data-recent-pick="sev"]').innerText(),'CRITICAL');
-  assert.equal(await page.locator('li[data-finding-id="F001"] [data-sev-pick]').innerText(),'CRITICAL');
+  // Every row of F001 follows: the panel row and the drill-down row.
+  await until(async()=>(await panelRow(page,REPORT).locator('[data-recent-pick="sev"]').innerText())==='CRITICAL','report row follows');
+  await until(async()=>(await page.locator('li[data-finding-id="F001"] [data-sev-pick]').innerText())==='CRITICAL','drill row follows');
   // Undo restores the previous value.
   await page.locator('.toast').filter({hasText:'Severity set to Critical'}).getByRole('button',{name:'Undo'}).click();
   await until(()=>finding('orchard','F001').severity==='HIGH','undo restored HIGH');
   // Submission pill: Submitted, then a platform result.
-  await panelRow(page,EVIDENCE).locator('[data-recent-pick="sub"]').click();
+  await panelRow(page,REPORT).locator('[data-recent-pick="sub"]').click();
   const sub=page.getByRole('menu',{name:'Submission'});
   await sub.getByRole('menuitemradio',{name:'Submitted',exact:true}).click();
   await until(()=>finding('orchard','F001').submission?.state==='submitted','F001 submitted');
@@ -87,9 +89,9 @@ test('Recent pills save severity and submission through BBH, update every row of
 }));
 
 test('a stale Recent pick is refused, not overwritten; context menu offers the finding actions',{timeout:120000},()=>withBoard('writer',async({page,finding,touch,context})=>{
-  await panelRow(page,'F003-open-redirect/EVIDENCE.md').waitFor();
+  await panelRow(page,REPORT3).waitFor();
   touch('orchard','F003',{title:'Open redirect on logout (edited elsewhere)'});
-  await panelRow(page,'F003-open-redirect/EVIDENCE.md').locator('[data-recent-pick="sev"]').click();
+  await panelRow(page,REPORT3).locator('[data-recent-pick="sev"]').click();
   await page.getByRole('menu',{name:'Change severity'}).getByRole('menuitemradio',{name:'High'}).click();
   await page.locator('.toast.warning').filter({hasText:/not saved/}).first().waitFor();
   assert.equal(finding('orchard','F003').severity,'LOW','stale finding not overwritten');
@@ -105,7 +107,7 @@ test('a stale Recent pick is refused, not overwritten; context menu offers the f
   await page.getByText('Finding ID copied.').waitFor();
   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'F001');
   // Keyboard opener on a focused row.
-  await panelRow(page,EVIDENCE).locator('a.recent-link').focus();
+  await panelRow(page,REPORT2).locator('a.recent-link').focus();
   await page.keyboard.press('Shift+F10');
   await page.locator('.context-menu').getByRole('menuitem',{name:'Mark N/A'}).waitFor();
   await page.keyboard.press('Escape');
@@ -141,60 +143,60 @@ test('writer off: Recent pills are disabled with the hint, N/A still works (Boar
 
 test('N/A toggle: strikethrough and opacity, Hide N/A filter in the URL, hidden counts, persistence',{timeout:150000},()=>withBoard('writer',async({page,url,base})=>{
   // Dashboard: marking hides the row and shows "N hidden · show".
-  const toggle=panelRow(page,EVIDENCE).getByRole('button',{name:/^Mark N\/A/});
+  const toggle=panelRow(page,REPORT2).getByRole('button',{name:/^Mark N\/A/});
   assert.equal(await toggle.getAttribute('aria-pressed'),'false');
   await toggle.click();
   await panel(page).getByText('1 N/A hidden').waitFor();
-  await until(async()=>await panelRow(page,EVIDENCE).count()===0,'row hidden');
+  await until(async()=>await panelRow(page,REPORT2).count()===0,'row hidden');
   await page.locator('.toast').filter({hasText:'Marked N/A'}).waitFor();
   const stored=JSON.parse(fs.readFileSync(path.join(base,'state/report-na.json'),'utf8'));
-  assert.deepEqual(Object.keys(stored),[`web_bounty/orchard/web/${EVIDENCE}`]);
+  assert.deepEqual(Object.keys(stored),[`web_bounty/orchard/web/${REPORT2}`]);
   assert.equal(fs.statSync(path.join(base,'state/report-na.json')).mode&0o777,0o600);
   // The file is unchanged and still listed by the server.
-  assert.match(fs.readFileSync(path.join(base,'data/web_bounty/orchard/web/reports',EVIDENCE),'utf8'),/Synthetic evidence/);
+  assert.match(fs.readFileSync(path.join(base,'data/web_bounty/orchard/web/reports',REPORT2),'utf8'),/Synthetic submission report/);
   await panel(page).getByRole('button',{name:'show'}).click();
-  const row=panelRow(page,EVIDENCE);await row.waitFor();
+  const row=panelRow(page,REPORT2);await row.waitFor();
   assert.equal(await row.evaluate(n=>n.classList.contains('is-na')),true);
   assert.equal(await row.evaluate(n=>getComputedStyle(n).opacity),'0.45');
   assert.match(await row.locator('.na-title').evaluate(n=>getComputedStyle(n).textDecorationLine),/line-through/);
   assert.equal(await row.getByRole('button',{name:/^Unmark N\/A/}).getAttribute('aria-pressed'),'true');
   // The panel remembers "show" per browser.
   await page.reload();
-  await panelRow(page,EVIDENCE).waitFor();
+  await panelRow(page,REPORT2).waitFor();
   await panel(page).getByRole('button',{name:'Hide N/A'}).waitFor();
   assert.equal(await page.evaluate(()=>localStorage.getItem('bounty-board-recent-panel-show-na')),'1');
   // Recent view: hidden by default, count and Show; the filter is in the hash.
   await page.goto(`${url}#/recent?within=all&order=newest`);
   await page.locator('.recent-table tr[data-recent-row]').first().waitFor();
-  assert.equal(await page.locator(`.recent-table tr[data-path="${EVIDENCE}"]`).count(),0);
+  assert.equal(await page.locator(`.recent-table tr[data-path="${REPORT2}"]`).count(),0);
   await page.locator('[data-recent-status]').getByText('1 N/A hidden').waitFor();
   assert.equal(await page.locator('#recent-hide-na').isChecked(),true);
   await page.locator('[data-recent-show-na]').click();
   await until(()=>page.evaluate(()=>location.hash.includes('na=show')),'na=show in the hash');
-  const viewRow=page.locator(`.recent-table tr[data-path="${EVIDENCE}"]`);await viewRow.waitFor();
+  const viewRow=page.locator(`.recent-table tr[data-path="${REPORT2}"]`);await viewRow.waitFor();
   assert.equal(await viewRow.evaluate(n=>getComputedStyle(n).opacity),'0.45');
   assert.equal(await page.locator('#recent-hide-na').isChecked(),false);
   // A link with na=show opens with N/A shown; a plain filter link hides them.
   await page.goto(`${url}#/recent?within=all&order=newest&na=show`);await page.reload();
-  await page.locator(`.recent-table tr[data-path="${EVIDENCE}"]`).waitFor();
+  await page.locator(`.recent-table tr[data-path="${REPORT2}"]`).waitFor();
   await page.locator('#recent-hide-na').check();
-  await until(async()=>await page.locator(`.recent-table tr[data-path="${EVIDENCE}"]`).count()===0,'hidden again');
+  await until(async()=>await page.locator(`.recent-table tr[data-path="${REPORT2}"]`).count()===0,'hidden again');
   assert.ok(!(await page.evaluate(()=>location.hash)).includes('na='));
   // Unmark by keyboard from the view (Show first), Undo re-marks.
   await page.locator('[data-recent-show-na]').click();
-  const unmark=page.locator(`.recent-table tr[data-path="${EVIDENCE}"]`).getByRole('button',{name:/^Unmark N\/A/});
+  const unmark=page.locator(`.recent-table tr[data-path="${REPORT2}"]`).getByRole('button',{name:/^Unmark N\/A/});
   await unmark.focus();await page.keyboard.press('Enter');
-  await until(async()=>(await page.locator(`.recent-table tr[data-path="${EVIDENCE}"] [data-na-toggle]`).getAttribute('aria-pressed'))==='false','unmarked');
+  await until(async()=>(await page.locator(`.recent-table tr[data-path="${REPORT2}"] [data-na-toggle]`).getAttribute('aria-pressed'))==='false','unmarked');
   assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('aria-label')?.startsWith('Mark N/A')),true,'focus stays on the toggle');
   await page.locator('.toast').filter({hasText:'Unmarked N/A'}).getByRole('button',{name:'Undo'}).click();
-  await until(async()=>(await page.locator(`.recent-table tr[data-path="${EVIDENCE}"] [data-na-toggle]`).getAttribute('aria-pressed'))==='true','undo re-marked');
+  await until(async()=>(await page.locator(`.recent-table tr[data-path="${REPORT2}"] [data-na-toggle]`).getAttribute('aria-pressed'))==='true','undo re-marked');
   // Program Reports list: same toggle and filter, persists across reload.
   await page.goto(`${url}#/programs/web_bounty%2Forchard/web/reports`);await page.reload();
   const list=page.locator('[data-report-browser]');await list.locator('[data-report-row]').first().waitFor();
   await list.getByText('1 N/A hidden').waitFor();
   await list.locator('[data-report-show-na]').click();
   const listRow=list.locator('[data-report-row].is-na');await listRow.waitFor();
-  assert.match(await listRow.innerText(),/EVIDENCE/);
+  assert.match(await listRow.innerText(),/F002/);
   assert.equal(await page.locator('#report-hide-na').isChecked(),false);
 }));
 
