@@ -897,6 +897,44 @@ test('typing filter: multi-character input-event insertions are refused unless s
   });
 });
 
+test('typing filter: composition commits and keyCode 229 textarea reads cannot deliver unsafe or multi-line text (review G1)',{timeout:180000},async()=>{
+  await withFixture('tailnet',async({base,newPage,lane})=>{
+    const page=await newPage();
+    await openReport(page,base);
+    await openDrawer(page);
+    await page.evaluate(()=>{window.__sent=[];window.BoardTerminal.term.onData(d=>window.__sent.push(d));});
+    const marker=path.join(lane,'reports/D1-sqli-login/comp-marker');
+    const CONTROL='Paste refused: the clipboard text contains control characters.',MULTI='Multi-line text must be pasted with Ctrl+V.';
+    const routes={
+      // IME / phone keyboard commit: xterm reads the textarea on compositionend.
+      composition:p=>{const a=window.BoardTerminal.term.textarea;a.focus();
+        a.dispatchEvent(new CompositionEvent('compositionstart',{data:'',bubbles:true}));
+        a.value=p;a.dispatchEvent(new InputEvent('input',{data:p,inputType:'insertCompositionText',bubbles:true,isComposing:true}));
+        a.dispatchEvent(new CompositionEvent('compositionend',{data:p,bubbles:true}));},
+      // Android-style keydown 229: xterm diffs the textarea a moment later.
+      key229:p=>{const a=window.BoardTerminal.term.textarea;a.focus();a.value='';
+        const k=new KeyboardEvent('keydown',{key:'Unidentified',bubbles:true,cancelable:true});Object.defineProperty(k,'keyCode',{get:()=>229});a.dispatchEvent(k);
+        a.value=p;a.dispatchEvent(new InputEvent('input',{data:null,inputType:'insertCompositionText',bubbles:true}));},
+    };
+    for(const [route,payload,message] of [['composition','echo hi\x1b[201~\ntouch comp-marker\n',CONTROL],['composition','echo a\ntouch comp-marker\n',MULTI],
+      ['key229','echo hi\u2067; touch comp-marker; \u2069',CONTROL],['key229','echo a\ntouch comp-marker\n',MULTI]]){
+      await page.evaluate(new Function('args',`const [p]=args;(${routes[route].toString()})(p);`),[payload]);
+      await page.waitForTimeout(400);
+      const sent=await page.evaluate(()=>window.__sent.splice(0));
+      assert.deepEqual(sent.filter(d=>/[\x1b\r\n\u2067\u2069]/.test(d)||d.includes('touch')),[],`${route} ${JSON.stringify(payload)} delivered text: ${JSON.stringify(sent)}`);
+      await page.waitForFunction(m=>{const n=document.querySelector('[data-term-note]');return !n.hidden&&n.textContent===m;},message,{timeout:5000});
+      await page.evaluate(()=>{document.querySelector('[data-term-note]').hidden=true;});
+    }
+    await page.waitForTimeout(800);
+    assert.equal(fs.existsSync(marker),false,'no marker file');
+    // A safe composition commit still reaches the shell.
+    await page.evaluate(new Function('args',`const [p]=args;(${routes.composition.toString()})(p);`),['echo ime-ok']);
+    await waitScreen(page,l=>l.some(x=>/sandbox\$ echo ime-ok$/.test(x)),'safe composition typed');
+    assert.equal(await page.locator('[data-term-note]').isHidden(),true,'no refusal for a safe composition');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
 test('BoardTerminal session events across report switches: D1, D10, then a report without a packet',{timeout:240000},async()=>{
   await withFixture('tailnet',async({base,newPage})=>{
     const page=await newPage();
@@ -1025,6 +1063,16 @@ test('drag to dock: the header docks the drawer on each edge with a preview; cli
     assert.equal(await preview.isHidden(),true);
     await page.mouse.up();
     assert.equal(await dockOf(),'left','Esc cancelled');
+    // A window blur mid-drag (Alt+Tab without pointercancel) ends the drag (review G2).
+    await headerDrag(page,targets.right,{release:false});
+    assert.equal(await preview.isVisible(),true);
+    await page.evaluate(()=>window.dispatchEvent(new Event('blur')));
+    assert.equal(await preview.isHidden(),true,'blur hides the preview');
+    assert.equal(await page.evaluate(()=>document.documentElement.classList.contains('term-dragging')),false,'blur ends the drag');
+    await page.mouse.move(targets.right.x-20,targets.right.y,{steps:3});
+    assert.equal(await preview.isHidden(),true,'no drag after blur');
+    await page.mouse.up();
+    assert.equal(await dockOf(),'left','blur cancelled');
     // The middle dead zone keeps the dock (the preview shows the current place, no edge).
     await headerDrag(page,{x:(left+vw)/2+100,y:450},{release:false});
     assert.equal(await preview.getAttribute('data-dock'),'left');

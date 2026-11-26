@@ -273,6 +273,19 @@
     };
     screenEl.addEventListener('beforeinput', guardInput, true);
     screenEl.addEventListener('input', guardInput, true);
+    // xterm also reads its textarea directly: on compositionend (IME and phone
+    // keyboards commit text this way) and a moment after keyCode 229 keydowns.
+    // Empty the textarea before that read whenever it would deliver unsafe or
+    // multi-line text; xterm still gets the event, so its composition state resets.
+    const scrubArea = event => {
+      const area = term.textarea;
+      const bad = [event.data ?? '', area?.value ?? ''].find(t => unsafePaste(t) || /[\r\n]/.test(t));
+      if (bad === undefined) return;
+      if (area) area.value = '';
+      note(unsafePaste(bad) ? PASTE_REFUSED : MULTILINE_REFUSED);
+    };
+    screenEl.addEventListener('compositionend', scrubArea, true);
+    screenEl.addEventListener('input', scrubArea, true);
     new ResizeObserver(() => refit()).observe(screenEl);
     new MutationObserver(() => { if (term) term.options.theme = themeColors(); }).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
     refit();
@@ -669,6 +682,8 @@
     head.addEventListener('pointercancel', endDrag);
     head.addEventListener('lostpointercapture', endDrag);
   }
+  // Switching away (Alt+Tab) may not deliver pointercancel; end any drag.
+  window.addEventListener('blur', endDrag);
 
   function showDrawer(visible) {
     if (!drawer) buildDrawer();
