@@ -2,7 +2,10 @@
  * Mounts into #report-artifacts-host (live and non-live report views). The
  * backend decides which files belong to the report and why; this module only
  * lists them, previews safe types and links downloads. All file-derived text
- * is inserted with textContent; nothing from an artifact is parsed as HTML. */
+ * is inserted with textContent; nothing from an artifact is parsed as HTML.
+ * Uploads (feat/board-artifact-uploads, opt-in --artifact-uploads): an Upload
+ * files button, drag and drop and image paste send files one at a time into
+ * the report's own folder; see docs/integrations/artifact-uploads.md. */
 (() => {
   const TEXT_PREVIEW_BYTES = 64 * 1024;
   const KEEP_PANELS = 12;
@@ -25,6 +28,12 @@
   const REASONS = {report_folder: 'Report folder', finding_field: 'Finding field', report_link: 'Linked from report'};
   const panels = new Map();
   let previewCounter = 0;
+  // Uploads: one global queue, one file at a time. Each item keeps its own
+  // panel and selector, so switching reports never cancels or misroutes it.
+  const UPLOAD_DONE_MS = 4000;
+  const uploadQueue = [];
+  let uploadActive = null;
+  let uploadCounter = 0;
 
   const el = (tag, props = {}, ...children) => {
     const node = document.createElement(tag);
@@ -61,6 +70,7 @@
     let panel = panels.get(key);
     if (!panel) {
       panel = {key, selector, node: el('section', {class: 'artifacts', 'aria-label': 'Report artifacts', 'data-artifacts-key': key}), open: new Set(), fresh: new Map()};
+      setupUploads(panel);
       panels.set(key, panel);
       while (panels.size > KEEP_PANELS) panels.delete(panels.keys().next().value);
       load(panel);
@@ -129,6 +139,7 @@
       el('h3', {id: 'artifacts-title'}, icon('fa-paperclip'), ` Artifacts${panel.status === 'ready' ? ` (${items.length})` : ''}`),
       el('div', {class: 'artifacts-actions'},
         el('button', {type: 'button', class: 'button subtle', 'data-artifacts-refresh': true, 'aria-label': 'Reload artifact list', onclick: () => load(panel)}, icon('fa-refresh'), ' Reload list'),
+        uploadButton(panel),
         zippable.length && !tooBig
           ? el('a', {class: 'button', href: `/api/report-artifacts.zip?${query(selector)}`, download: '', 'data-artifacts-zip': true}, icon('fa-download'), ' Download all')
           : null));
@@ -140,8 +151,12 @@
         ? `Files in the report folder ${data.folder}, plus files linked from the report or its finding.`
         : 'Files linked from the report or its finding.'}));
       for (const note of data.notes || []) if (NOTES[note]) body.push(el('p', {class: 'hint', text: NOTES[note]}));
+      const upload = uploadState(panel);
+      if (upload === 'enabled') body.push(el('p', {class: 'hint artifacts-upload-hint', text: 'Drop files on this panel or use Upload files to add them to the report folder.'}));
+      else if (upload === 'no_folder') body.push(el('p', {class: 'hint artifacts-upload-hint', id: `${panel.uploadId}-why`, text: NO_FOLDER_TEXT}));
       if (zippable.length < items.length) body.push(el('p', {class: 'hint', text: 'Download all leaves out files marked sensitive. Download them one at a time.'}));
       if (tooBig) body.push(el('p', {class: 'hint', text: `Too large to download as one zip (over ${size(data.max_zip_bytes)}). Download files one at a time.`}));
+      body.push(panel.dropHint, panel.uploadList);
       if (!items.length) body.push(el('div', {class: 'state', text: 'No artifacts found for this report.'}));
       for (const [category, label, glyph] of GROUPS) {
         const group = items.filter(a => (GROUPS.some(g => g[0] === a.category) ? a.category : 'other') === category);
@@ -152,7 +167,181 @@
       }
     }
     node.setAttribute('aria-busy', panel.status === 'loading' ? 'true' : 'false');
-    node.replaceChildren(head, ...body);
+    // The input and the upload rows are persistent nodes: re-rendering moves
+    // them instead of recreating them, so progress survives Board renders.
+    if (!body.includes(panel.uploadList)) body.push(panel.dropHint, panel.uploadList);
+    node.replaceChildren(head, panel.uploadInput, ...body);
+  }
+
+  // ------------------------------------------------------------- uploads
+  const NO_FOLDER_TEXT = 'Uploads need a report folder. This report is not in its own folder, so files cannot be added here.';
+  const uploadState = panel => {
+    const upload = panel.status === 'ready' ? panel.data?.upload : null;
+    if (!upload) return 'off';
+    if (upload.enabled) return 'enabled';
+    return upload.reason === 'no_report_folder' ? 'no_folder' : 'off';
+  };
+
+  function setupUploads(panel) {
+    panel.uploadId = `artifacts-upload-${++uploadCounter}`;
+    panel.uploads = [];
+    panel.uploadInput = el('input', {type: 'file', multiple: true, hidden: true, tabindex: '-1', 'aria-hidden': 'true', 'data-artifacts-upload-input': true,
+      onchange: () => { enqueue(panel, panel.uploadInput.files); panel.uploadInput.value = ''; }});
+    panel.dropHint = el('div', {class: 'artifacts-drop-hint', hidden: true, 'aria-hidden': 'true'}, icon('fa-upload'), ' Drop to upload to the report folder');
+    panel.uploadList = el('ul', {class: 'artifact-uploads', 'aria-label': 'Uploads', 'aria-live': 'polite'});
+    const node = panel.node;
+    // Focus inside the panel (for image paste): clicking blank panel space focuses it.
+    node.tabIndex = -1;
+    const hasFiles = event => [...(event.dataTransfer?.types || [])].includes('Files');
+    let depth = 0;
+    const setDropping = on => { node.classList.toggle('artifacts-dropping', on); panel.dropHint.hidden = !on; };
+    node.addEventListener('dragenter', event => {
+      if (!hasFiles(event) || uploadState(panel) !== 'enabled') return;
+      event.preventDefault(); depth++; setDropping(true);
+    });
+    node.addEventListener('dragover', event => {
+      if (!hasFiles(event) || uploadState(panel) !== 'enabled') return;
+      event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDropping(true);
+    });
+    node.addEventListener('dragleave', event => {
+      if (!hasFiles(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (!depth || !node.contains(event.relatedTarget)) { depth = 0; setDropping(false); }
+    });
+    node.addEventListener('drop', event => {
+      depth = 0; setDropping(false);
+      if (!hasFiles(event) || uploadState(panel) !== 'enabled') return;
+      event.preventDefault();
+      enqueue(panel, event.dataTransfer.files);
+    });
+    node.addEventListener('paste', event => {
+      if (uploadState(panel) !== 'enabled' || event.target.closest?.('input,textarea,[contenteditable]')) return;
+      const images = [...(event.clipboardData?.files || [])].filter(file => file.type.startsWith('image/'));
+      if (!images.length) return;
+      event.preventDefault();
+      const stamp = new Date().toISOString().replace(/\.\d+Z$/, '').replace(/[-:]/g, '').replace('T', '-');
+      enqueue(panel, images.map((file, index) => ({file, name: `pasted-${stamp}${index ? `-${index + 1}` : ''}.png`})));
+    });
+  }
+
+  function uploadButton(panel) {
+    const state = uploadState(panel);
+    if (state === 'off') return null;
+    const disabled = state === 'no_folder';
+    const button = el('button', {type: 'button', class: 'button subtle', 'data-artifacts-upload': true, disabled,
+      'aria-describedby': disabled ? `${panel.uploadId}-why` : null, title: disabled ? NO_FOLDER_TEXT : 'Upload files to the report folder',
+      onclick: () => panel.uploadInput.click()}, icon('fa-upload'), ' Upload files');
+    // A disabled button gets no pointer events in some browsers; the wrapper keeps the tooltip.
+    return disabled ? el('span', {class: 'artifacts-upload-disabled', title: NO_FOLDER_TEXT}, button) : button;
+  }
+
+  function enqueue(panel, files) {
+    const max = panel.data?.upload?.max_bytes;
+    for (const entry of [...(files || [])]) {
+      const file = entry instanceof Blob ? entry : entry.file;
+      const item = {id: ++uploadCounter, panel, selector: {...panel.selector}, file, name: entry.name || file.name || 'upload',
+        loaded: 0, state: 'queued', message: '', node: null};
+      panel.uploads.push(item);
+      if (Number.isFinite(max) && file.size > max) finish(item, 'error', `Too large. The limit is ${size(max)}.`);
+      else { renderUpload(item); uploadQueue.push(item); }
+    }
+    pump();
+  }
+
+  function pump() {
+    if (uploadActive) return;
+    const item = uploadQueue.shift();
+    if (!item) return;
+    uploadActive = item;
+    item.state = 'uploading';
+    renderUpload(item);
+    const xhr = new XMLHttpRequest();
+    item.xhr = xhr;
+    xhr.open('POST', `/api/report-artifact-upload?${query(item.selector, {name: item.name})}`);
+    xhr.setRequestHeader('X-Requested-With', 'Bounty-Board');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = event => { item.loaded = event.loaded; renderProgress(item); };
+    const done = (state, message) => { item.xhr = null; uploadActive = null; finish(item, state, message); pump(); };
+    xhr.onload = () => {
+      const body = xhr.response && typeof xhr.response === 'object' ? xhr.response : {};
+      if (xhr.status === 201 && body.artifact) {
+        item.panel.fresh.set(body.artifact.relative, Date.now());
+        done('done', body.renamed ? `Saved as ${body.artifact.name}` : 'Saved');
+        load(item.panel, {quiet: true});
+      } else done('error', uploadError(xhr.status, body, item.panel));
+    };
+    xhr.onerror = () => done('error', 'Upload failed. Check the connection and retry.');
+    xhr.ontimeout = xhr.onerror;
+    xhr.onabort = () => done('cancelled', 'Cancelled');
+    xhr.send(item.file);
+  }
+
+  function uploadError(status, body, panel) {
+    const code = body?.error;
+    if (status === 413 || code === 'too_large') return `Too large. The limit is ${size(body?.max_bytes ?? panel.data?.upload?.max_bytes)}.`;
+    if (status === 507) return 'Not enough space on the server.';
+    if (status === 503) return 'The server is busy with other uploads. Retry in a moment.';
+    if (code === 'no_report_folder') return 'This report has no folder of its own, so files cannot be added here.';
+    if (code === 'uploads_disabled') return 'Uploads are turned off on the server.';
+    if (code === 'invalid_name') return 'The file name cannot be used. Rename the file and retry.';
+    return 'Upload failed. Retry.';
+  }
+
+  function finish(item, state, message) {
+    item.state = state;
+    item.message = message;
+    renderUpload(item);
+    if (state === 'done' || state === 'cancelled') setTimeout(() => removeUpload(item), UPLOAD_DONE_MS);
+  }
+
+  function removeUpload(item) {
+    const list = item.panel.uploads;
+    const index = list.indexOf(item);
+    if (index >= 0) list.splice(index, 1);
+    item.node?.remove();
+  }
+
+  function cancelUpload(item) {
+    if (item.xhr) item.xhr.abort();
+    else {
+      const index = uploadQueue.indexOf(item);
+      if (index >= 0) uploadQueue.splice(index, 1);
+      finish(item, 'cancelled', 'Cancelled');
+    }
+  }
+
+  function renderProgress(item) {
+    const bar = item.node?.querySelector('.artifact-upload-bar');
+    if (!bar) return;
+    const percent = item.file.size ? Math.min(100, Math.round(item.loaded / item.file.size * 100)) : 100;
+    bar.setAttribute('aria-valuenow', String(percent));
+    bar.firstChild.style.width = `${percent}%`;
+    item.node.querySelector('.artifact-upload-status').textContent = `Uploading ${percent}%`;
+  }
+
+  function renderUpload(item) {
+    const {state} = item;
+    const active = state === 'queued' || state === 'uploading';
+    const label = name => `${name} upload of ${item.name}`;
+    const status = state === 'queued' ? 'Waiting' : state === 'uploading' ? 'Uploading 0%' : item.message;
+    const node = el('li', {class: `artifact-upload is-${state}`, 'data-upload-state': state, 'data-upload-name': item.name},
+      el('span', {class: 'artifact-icon'}, icon(state === 'done' ? 'fa-check' : state === 'error' ? 'fa-exclamation-triangle' : 'fa-upload')),
+      el('div', {class: 'artifact-text'},
+        el('div', {class: 'artifact-upload-name'}, el('span', {text: item.name}), el('span', {class: 'hint', text: size(item.file.size)})),
+        active ? el('div', {class: 'artifact-upload-bar', role: 'progressbar', 'aria-label': `Upload progress for ${item.name}`,
+          'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0'}, el('span')) : null,
+        el('div', {class: `artifact-upload-status${state === 'error' ? ' is-error' : ''}`, role: state === 'error' ? 'alert' : null, text: status})),
+      el('div', {class: 'artifact-buttons'},
+        active ? el('button', {type: 'button', class: 'button subtle', 'aria-label': label('Cancel'), 'data-upload-cancel': true, onclick: () => cancelUpload(item)}, 'Cancel') : null,
+        state === 'error' && item.message.includes('etry') ? el('button', {type: 'button', class: 'button subtle', 'aria-label': label('Retry'), 'data-upload-retry': true,
+          onclick: () => { removeUpload(item); enqueue(item.panel, [{file: item.file, name: item.name}]); }}, 'Retry') : null,
+        state === 'error' ? el('button', {type: 'button', class: 'button subtle', 'aria-label': `Dismiss upload message for ${item.name}`, 'data-upload-dismiss': true,
+          onclick: () => removeUpload(item)}, 'Dismiss') : null));
+    if (item.node?.isConnected || item.node?.parentNode) item.node.replaceWith(node);
+    else item.panel.uploadList.append(node);
+    item.node = node;
+    if (state === 'uploading') renderProgress(item);
   }
 
   function row(panel, item, glyph) {
@@ -217,6 +406,19 @@
       }
     }
   }
+
+  // A file dropped outside the panel would make the browser open it and leave
+  // the Board. While uploads are available, stop only file drops nobody else
+  // handled: the editor and finding drag and drop handle their events first.
+  const dropGuard = event => {
+    if (event.defaultPrevented || ![...(event.dataTransfer?.types || [])].includes('Files')) return;
+    if (![...panels.values()].some(panel => uploadState(panel) !== 'off')) return;
+    if (event.target.closest?.('input[type=file]')) return;
+    event.preventDefault();
+    if (event.type === 'dragover') event.dataTransfer.dropEffect = 'none';
+  };
+  window.addEventListener('dragover', dropGuard);
+  window.addEventListener('drop', dropGuard);
 
   const register = () => window.registerBoardModule({
     name: 'report-artifacts',

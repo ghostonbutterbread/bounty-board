@@ -29,3 +29,24 @@
 /* Auto-refresh: a file that just appeared is marked for a few seconds. */
 .artifact-row.artifact-new{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent);transition:background var(--dur) var(--ease)}
 .artifact-badge.artifact-new-badge{color:var(--accent-text);background:var(--accent-soft)}
+/* Uploads (feat/board-artifact-uploads): drop highlight, per-file rows with
+   progress, and the disabled reason. Same tokens as the list above. */
+.artifacts:focus{outline:none}
+.artifacts:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.artifacts.artifacts-dropping{outline:2px dashed var(--accent);outline-offset:4px;background:var(--accent-soft);border-radius:var(--radius-lg)}
+.artifacts-drop-hint{margin-top:var(--space-2);padding:10px;border:1px dashed var(--accent);border-radius:var(--radius);color:var(--accent-text);background:var(--surface);font-size:var(--text-sm);font-weight:600;text-align:center}
+.artifacts-upload-disabled{display:inline-flex;cursor:not-allowed}
+.artifacts-upload-disabled .button{pointer-events:none}
+.artifact-uploads{list-style:none;margin:var(--space-3) 0 0;padding:0;display:grid;gap:6px}
+.artifact-uploads:empty{display:none}
+.artifact-upload{display:flex;gap:10px;align-items:center;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:8px 10px;transition:opacity var(--dur) var(--ease)}
+.artifact-upload.is-done{background:var(--success-soft);box-shadow:inset 3px 0 0 var(--success)}
+.artifact-upload.is-done .artifact-icon{color:var(--success)}
+.artifact-upload.is-error{background:var(--warning-soft);box-shadow:inset 3px 0 0 var(--warning)}
+.artifact-upload.is-error .artifact-icon{color:var(--warning)}
+.artifact-upload-name{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-weight:600;font-size:var(--text-md);overflow-wrap:anywhere}
+.artifact-upload-name .hint{font-weight:400;font-size:var(--text-xs);color:var(--text-3)}
+.artifact-upload-bar{margin-top:4px;height:6px;border-radius:var(--radius-pill);background:var(--surface-3);overflow:hidden}
+.artifact-upload-bar>span{display:block;height:100%;width:0;background:var(--accent);transition:width 120ms linear}
+.artifact-upload-status{margin-top:2px;font-size:var(--text-xs);color:var(--text-2)}
+.artifact-upload-status.is-error{color:var(--text)}
