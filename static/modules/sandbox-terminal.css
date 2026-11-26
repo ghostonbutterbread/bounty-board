@@ -10,9 +10,6 @@
 .term-dock-top .topbar{top:var(--term-space-top)}
 .term-dock-left .app>.body{margin-left:var(--term-space-left)}
 .term-dock-right .app>.body{margin-right:var(--term-space-right)}
-/* A side dock narrows the content column like a small window: let the search shrink first (style.css 760px rule). */
-.term-dock-left .top-actions,.term-dock-right .top-actions{flex:1 1 auto;min-width:0;justify-content:flex-end}
-.term-dock-left #global-search-host,.term-dock-right #global-search-host{flex:1 1 auto;min-width:0}
 /* Toasts stay clear of a drawer docked on their corner. */
 .term-dock-right .toasts{right:calc(var(--term-space-right) + var(--space-5))}
 .term-dock-bottom .toasts{bottom:calc(var(--term-space-bottom) + var(--space-5))}
@@ -98,3 +95,10 @@
 .term-toggle:disabled{cursor:not-allowed}
 .term-unsafe{color:var(--warning);font-size:var(--text-xs);font-weight:600;margin-right:auto}
 .term-unsafe::before{content:"\f071";font-family:FontAwesome;margin-right:4px}
+/* Program tabs scroll when a dock narrows the column: fade the right edge while more tabs are hidden
+   (scroll-driven; browsers without it just scroll as before). */
+@property --term-tabs-fade{syntax:"<length>";inherits:false;initial-value:0px}
+@keyframes term-tabs-fade{from{--term-tabs-fade:40px}to{--term-tabs-fade:0px}}
+@supports (animation-timeline:scroll()){
+  .workspace-nav{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - var(--term-tabs-fade)),transparent);mask-image:linear-gradient(to right,#000 calc(100% - var(--term-tabs-fade)),transparent);animation:term-tabs-fade linear both;animation-timeline:scroll(self inline)}
+}

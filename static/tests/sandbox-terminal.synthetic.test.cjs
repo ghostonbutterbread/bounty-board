@@ -655,9 +655,11 @@ test('docks: each side reserves its space, sizes persist per orientation, maximi
     assert.equal(await handle.getAttribute('aria-orientation'),'vertical');
     let hb=await handle.boundingBox();
     const w0=(await drawerBox()).width;
-    await page.mouse.move(hb.x+hb.width/2,hb.y+hb.height/2);await page.mouse.down();await page.mouse.move(hb.x+hb.width/2-100,hb.y+hb.height/2,{steps:5});await page.mouse.up();
+    // Default side width: min(520, 40% of the 1048 px content column) = 419.
+    assert.ok(Math.abs(w0-419)<=1,`default side width ${w0}`);
+    await page.mouse.move(hb.x+hb.width/2,hb.y+hb.height/2);await page.mouse.down();await page.mouse.move(hb.x+hb.width/2+60,hb.y+hb.height/2,{steps:5});await page.mouse.up();
     const width=(await stored(page)).width;
-    assert.ok(Math.abs(width-(w0+100))<=3,`width ${width} after drag from ${w0}`);
+    assert.ok(Math.abs(width-(w0-60))<=3,`width ${width} after drag from ${w0}`);
     await handle.focus();await page.keyboard.press('ArrowLeft');
     assert.equal((await stored(page)).width,width+32);
     // The new size reaches the shell (refit sends it to the server).
@@ -797,6 +799,119 @@ test('settings page: sidebar link, tab title, persistence, live apply across tab
     await page.locator('[data-settings-group="terminal"] .settings-off').filter({hasText:'The sandbox terminal is not enabled on this Board.'}).waitFor({timeout:15000});
     assert.equal(await page.locator('[data-shortcut-recorder]').count(),0);
     assert.equal(await page.title(),'Settings · Bounty Board');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+// ---- Review round 1 (f2b969e): F1 topbar in side docks, F2 input-event insertions, session events ----
+const topbarState=page=>page.evaluate(()=>{
+  const box=el=>{if(!el)return null;const r=el.getBoundingClientRect();return r.width&&r.height?{left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height}:null;};
+  const kbd=document.querySelector('#global-search-host .search-kbd');
+  const crumb=document.querySelector('.topbar .breadcrumb'),cb=crumb.getBoundingClientRect();
+  const last=[...document.querySelectorAll('#breadcrumb, #breadcrumb-trail .crumb-current')].at(-1),lb=last.getBoundingClientRect();
+  const trail=document.querySelector('#breadcrumb-trail').getBoundingClientRect();
+  const visibleRight=Math.min(lb.right,cb.right,trail.width?trail.right:Infinity);
+  return {kbd:box(kbd),kbdLimit:kbd?parseFloat(getComputedStyle(kbd).fontSize)*2:0,lastText:last.textContent,lastWidth:lb.width,lastVisible:Math.max(0,visibleRight-lb.left),
+    controls:[['breadcrumb',crumb],['search',document.querySelector('#global-search-field')],['theme',document.querySelector('#theme-button')],['refresh',document.querySelector('#refresh')]].map(([n,el])=>[n,box(el)]).filter(([,b])=>b),
+    body:Math.round(document.querySelector('.app > .body').getBoundingClientRect().width),dock:document.querySelector('#term-drawer')?.dataset.dock,
+    rightTitle:document.querySelector('#term-drawer [data-dock="right"]')?.title};
+});
+test('side docks keep the topbar intact at 1024, 1280 and 1440 wide (review F1)',{timeout:600000},async()=>{
+  await withFixture('tailnet',async({base,newPage})=>{
+    const problems=[];
+    for(const width of [1024,1280,1440]){
+      const page=await newPage({viewport:{width,height:900}});
+      await page.goto(base);
+      for(const dock of ['left','right'])for(const size of ['default','max']){
+        await page.evaluate(([k,d,w])=>localStorage.setItem(k,JSON.stringify({open:true,dock:d,...(w?{width:w}:{})})),[STORE,dock,size==='max'?5000:0]);
+        await openReport(page,base);
+        await page.locator('#term-drawer').waitFor();
+        await page.evaluate(()=>window.scrollTo(0,0));await page.waitForTimeout(400);
+        const t=await topbarState(page),where=`${width} ${dock} ${size}`;
+        if(width===1024){
+          // Too narrow for 560 px of content beside a 320 px drawer: the bottom dock is used and the picker says so.
+          if(t.dock!=='bottom')problems.push(`${where}: expected the bottom fallback, got ${t.dock}`);
+          if(!/needs a wider window; using the bottom dock/.test(t.rightTitle||''))problems.push(`${where}: tooltip ${t.rightTitle}`);
+        } else {
+          if(t.dock!==dock)problems.push(`${where}: dock ${t.dock}`);
+          if(t.body<559)problems.push(`${where}: content column ${t.body}px`);
+        }
+        if(t.kbd&&t.kbd.height>t.kbdLimit)problems.push(`${where}: chip wraps (${t.kbd.height}px)`);
+        const refresh=t.controls.find(([n])=>n==='refresh')[1];
+        if(t.kbd&&overlaps(t.kbd,refresh))problems.push(`${where}: chip overlaps Refresh`);
+        if(t.lastVisible<Math.min(t.lastWidth,40))problems.push(`${where}: breadcrumb "${t.lastText}" clipped to ${Math.round(t.lastVisible)}px`);
+        for(let i=0;i<t.controls.length;i++)for(let j=i+1;j<t.controls.length;j++)if(overlaps(t.controls[i][1],t.controls[j][1]))problems.push(`${where}: ${t.controls[i][0]} overlaps ${t.controls[j][0]}`);
+        if(width===1280)for(const th of ['light','dark']){await theme(page,th);await page.waitForTimeout(250);await shot(page,`topbar-1280-${dock}-${size}-${th}.png`);
+          if(shots)await page.locator('.topbar').screenshot({path:path.join(shots,`topbar-strip-1280-${dock}-${size}-${th}.png`)});}
+        await theme(page,'light');
+      }
+      assert.deepEqual(page.errors,[]);
+      await page.context().close();
+    }
+    assert.deepEqual(problems,[]);
+  });
+});
+
+test('typing filter: multi-character input-event insertions are refused unless safe and single-line (review F2)',{timeout:180000},async()=>{
+  await withFixture('tailnet',async({base,newPage,lane})=>{
+    const page=await newPage();
+    await openReport(page,base);
+    await openDrawer(page);
+    await page.evaluate(()=>{window.__sent=[];window.BoardTerminal.term.onData(d=>window.__sent.push(d));});
+    const marker=path.join(lane,'reports/D1-sqli-login/input-marker');
+    const ESC='echo hi\x1b[201~\ntouch input-marker\n';
+    for(const [inputType,data,viaTransfer] of [['insertText',ESC],['insertFromPaste','echo hi⁧; touch input-marker; ⁩'],['insertReplacementText','echo a\ntouch input-marker\n'],
+      ['insertText','echo a\rtouch input-marker'],['insertFromDrop',ESC,true]]){
+      const result=await page.evaluate(([inputType,data,viaTransfer])=>{
+        const area=window.BoardTerminal.term.textarea;area.focus();
+        const init=viaTransfer?(()=>{const dt=new DataTransfer();dt.setData('text/plain',data);return {inputType,dataTransfer:dt};})():{inputType,data};
+        const before=new InputEvent('beforeinput',{...init,bubbles:true,cancelable:true});area.dispatchEvent(before);
+        area.dispatchEvent(new InputEvent('input',{...init,bubbles:true}));
+        return {cancelled:before.defaultPrevented,sent:window.__sent.splice(0)};
+      },[inputType,data,!!viaTransfer]);
+      assert.equal(result.cancelled,true,`${inputType} ${JSON.stringify(data)}: beforeinput cancelled`);
+      assert.deepEqual(result.sent,[],`${inputType} ${JSON.stringify(data)}: nothing reached xterm`);
+      await page.locator('[data-term-note]').filter({hasText:'Paste refused: the clipboard text contains control characters.'}).waitFor({timeout:5000});
+      await page.evaluate(()=>{document.querySelector('[data-term-note]').hidden=true;});
+    }
+    await page.waitForTimeout(800);
+    assert.equal(fs.existsSync(marker),false,'no marker file');
+    // Single characters still type.
+    const single=await page.evaluate(()=>{const area=window.BoardTerminal.term.textarea;area.dispatchEvent(new InputEvent('input',{inputType:'insertText',data:'z',bubbles:true}));return window.__sent.splice(0);});
+    assert.deepEqual(single,['z']);
+    await page.keyboard.press('Backspace');
+    // A composed multi-character safe string without newline (an IME commit) reaches the shell.
+    await page.locator('[data-term-screen] textarea').focus();
+    await page.keyboard.insertText('echo composed-$((3+4))');
+    await waitScreen(page,l=>l.some(x=>/sandbox\$ echo composed-\$\(\(3\+4\)\)$/.test(x)),'composed text typed');
+    await page.keyboard.press('Enter');
+    await waitScreen(page,l=>l.some(x=>x.trim()==='composed-7'),'composed command ran');
+    assert.equal(await page.locator('[data-term-note]').isHidden(),true,'no refusal for safe composed text');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+test('BoardTerminal session events across report switches: D1, D10, then a report without a packet',{timeout:240000},async()=>{
+  await withFixture('tailnet',async({base,newPage})=>{
+    const page=await newPage();
+    await openReport(page,base);
+    await page.evaluate(()=>{window.__ev=[];
+      window.BoardTerminal.on('session',e=>window.__ev.push(e.selector?`session:${e.selector.path}:${e.session.folder}`:null));
+      window.BoardTerminal.on('message',m=>{if(m.type==='hello')window.__ev.push('hello:'+window.BoardTerminal.selector().path);});});
+    await openDrawer(page);
+    assert.equal((await page.evaluate(()=>window.BoardTerminal.session()))?.folder,'reports/D1-sqli-login');
+    await page.locator('#report-select').selectOption('findings/confirmed/D10 - HIGH - stored xss.md');
+    await page.locator('#term-drawer [data-term-status]').filter({hasText:'Connected'}).waitFor({timeout:30000});
+    await page.waitForFunction(()=>window.BoardTerminal.session()?.folder==='reports/D10-xss',null,{timeout:20000});
+    assert.equal(await page.evaluate(()=>window.BoardTerminal.selector().path),'findings/confirmed/D10 - HIGH - stored xss.md');
+    await page.locator('#report-select').selectOption('active.md');
+    await page.waitForFunction(()=>document.querySelector('[data-term-toggle]')?.disabled===true,null,{timeout:15000});
+    await page.waitForTimeout(2000);
+    assert.equal(await page.evaluate(()=>window.BoardTerminal.session()),null);
+    assert.equal(await page.evaluate(()=>window.BoardTerminal.selector()?.path),'active.md','the selector follows the report even without a terminal');
+    assert.deepEqual(await page.evaluate(()=>window.__ev),[
+      `session:${REPORT}:reports/D1-sqli-login`,`hello:${REPORT}`,null,
+      'session:findings/confirmed/D10 - HIGH - stored xss.md:reports/D10-xss','hello:findings/confirmed/D10 - HIGH - stored xss.md',null]);
     assert.deepEqual(page.errors,[]);
   });
 });

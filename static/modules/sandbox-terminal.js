@@ -86,7 +86,7 @@
     const size = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) && v >= 1 ? Math.round(v) : fallback);
     const flag = (v, fallback) => (typeof v === 'boolean' ? v : fallback);
     const s = raw.shortcut;
-    return {open: raw.open === true, height: size(raw.height, defaultHeight), width: size(raw.width, 520), dock: DOCKS.includes(raw.dock) ? raw.dock : 'bottom',
+    return {open: raw.open === true, height: size(raw.height, defaultHeight), width: size(raw.width, null), dock: DOCKS.includes(raw.dock) ? raw.dock : 'bottom',
       maximized: raw.maximized === true, copyOnSelect: flag(raw.copyOnSelect, true), ctrlCCopy: flag(raw.ctrlCCopy, true), ctrlVPaste: flag(raw.ctrlVPaste, true),
       shortcut: shortcutProblem(s) ? {...DEFAULT_SHORTCUT} : {ctrl: !!s.ctrl, alt: !!s.alt, shift: !!s.shift, code: s.code}};
   }
@@ -185,6 +185,7 @@
   // newline here. A lone CR is still refused, and nothing is ever stripped.
   const unsafePaste = text => unsafeText(String(text).replace(/\r\n/g, '\n'));
   const PASTE_REFUSED = 'Paste refused: the clipboard text contains control characters.';
+  const INSERT_TYPES = new Set(['insertText', 'insertFromPaste', 'insertReplacementText', 'insertFromDrop']);
 
   // -- transport -------------------------------------------------------------
   async function api(path, body) {
@@ -244,6 +245,22 @@
       event.stopImmediatePropagation();
       note(PASTE_REFUSED);
     }, true);
+    // Text can also arrive as input events (phone keyboards' clipboard chips,
+    // IME commits, drops), which xterm sends as they are, without bracketed
+    // paste. Multi-character insertions that fail the filter or contain a
+    // newline are cancelled before xterm's textarea listener sees them; single
+    // characters and composition text (insertCompositionText) pass as typing.
+    const guardInput = event => {
+      if (!INSERT_TYPES.has(event.inputType)) return;
+      const text = event.data ?? event.dataTransfer?.getData('text/plain') ?? '';
+      if (text.length <= 1 || (!unsafePaste(text) && !/[\r\n]/.test(text))) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.type === 'input' && event.target?.value != null) event.target.value = '';
+      note(PASTE_REFUSED);
+    };
+    screenEl.addEventListener('beforeinput', guardInput, true);
+    screenEl.addEventListener('input', guardInput, true);
     new ResizeObserver(() => refit()).observe(screenEl);
     new MutationObserver(() => { if (term) term.options.theme = themeColors(); }).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
     refit();
@@ -452,7 +469,16 @@
   }
 
   // -- docking -------------------------------------------------------------------
-  const currentDock = () => (narrow() ? 'bottom' : prefs.dock);
+  // Side docks keep at least SIDE_CONTENT px of report content. When the window
+  // cannot also fit a SIDE_MIN px drawer beside that, the bottom dock is used
+  // (the picker tooltip says so); the stored choice is kept for wider windows.
+  const SIDE_CONTENT = 560, SIDE_MIN = 320;
+  function columnWidth() {
+    const sidebar = narrow() ? null : document.querySelector('.app > .sidebar');
+    return window.innerWidth - (sidebar ? Math.max(0, Math.round(sidebar.getBoundingClientRect().right)) : 0);
+  }
+  const sideFits = () => columnWidth() - SIDE_CONTENT >= SIDE_MIN;
+  const currentDock = () => (narrow() || (!vertical(prefs.dock) && !sideFits()) ? 'bottom' : prefs.dock);
   const isMaximized = () => !narrow() && prefs.maximized;
   const vertical = dock => dock === 'top' || dock === 'bottom';
   // The sidebar stays visible: docks and maximize cover only the content column.
@@ -464,10 +490,12 @@
   }
   // Minimum 160 px; at least about 320 px of content stays visible (phones keep a tall sheet).
   function clampSize(dock, px) {
-    const room = vertical(dock) ? window.innerHeight - (narrow() ? 96 : 320) : window.innerWidth - contentLeft() - 320;
+    const room = vertical(dock) ? window.innerHeight - (narrow() ? 96 : 320) : columnWidth() - SIDE_CONTENT;
     return Math.round(Math.min(Math.max(160, room), Math.max(160, px)));
   }
-  const currentSize = () => clampSize(currentDock(), vertical(currentDock()) ? prefs.height : prefs.width);
+  // Side width defaults to min(520 px, 40% of the content column) until the user resizes.
+  const sideWidth = () => prefs.width ?? Math.min(520, Math.round(columnWidth() * 0.4));
+  const currentSize = () => clampSize(currentDock(), vertical(currentDock()) ? prefs.height : sideWidth());
   function setSize(px) {
     const dock = currentDock();
     if (vertical(dock)) prefs.height = clampSize(dock, px); else prefs.width = clampSize(dock, px);
@@ -502,7 +530,12 @@
   function paintDock() {
     if (!drawer) return;
     const max = !!prefs.maximized;
-    drawer.querySelectorAll('[data-dock]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.dock === prefs.dock)));
+    const fits = sideFits();
+    drawer.querySelectorAll('[data-dock]').forEach(b => {
+      b.setAttribute('aria-pressed', String(b.dataset.dock === prefs.dock));
+      const label = DOCK_BUTTONS.find(([dock]) => dock === b.dataset.dock)[1];
+      b.title = !fits && !vertical(b.dataset.dock) ? `${label} (needs a wider window; using the bottom dock)` : label;
+    });
     const maxButton = drawer.querySelector('[data-dock-max]');
     maxButton.setAttribute('aria-pressed', String(max));
     maxButton.title = max ? 'Restore' : 'Maximize';
