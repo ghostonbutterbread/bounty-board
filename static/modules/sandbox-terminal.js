@@ -11,6 +11,11 @@
  * nothing is written into the report Markdown, and copying from the preview
  * strips them. Check marks are stored by the terminal service, keyed by a
  * fingerprint of each block (see terminal_checks.py; blockKeys mirrors it).
+ *
+ * Terminal UX (docs/integrations/terminal-ux.md): copy on select, Ctrl+C copies
+ * a selection, Ctrl+V pastes through the typing filter, a configurable toggle
+ * shortcut (default Ctrl+E, plus the fixed Ctrl+`), docking (bottom, top, left,
+ * right, maximize), a Settings section, and window.BoardTerminal slot/events.
  */
 (() => {
   'use strict';
@@ -26,10 +31,98 @@
   // {ok: false, message} for navigation pages and files outside a finding folder.
   let mount = null;
   const blocked = () => mount?.ok === false;
+  // -- preferences (localStorage, per browser) ---------------------------------
+  // {open, height, width, dock, maximized, copyOnSelect, ctrlCCopy, ctrlVPaste, shortcut}.
+  // open and height keep their original meaning; every field is validated on
+  // read, so old or corrupt values fall back to the defaults.
+  const DOCKS = ['bottom', 'top', 'left', 'right'];
+  const narrow = () => window.innerWidth <= 700;   // phones: always the bottom sheet
   // Phones get a taller sheet by default; a saved height always wins.
-  const defaultHeight = window.innerWidth <= 700 ? Math.round(window.innerHeight * 0.6) : 320;
-  const prefs = (() => { try { return {open: false, height: defaultHeight, ...JSON.parse(localStorage.getItem(STORE) || '{}')}; } catch { return {open: false, height: defaultHeight}; } })();
-  const savePrefs = () => { try { localStorage.setItem(STORE, JSON.stringify({open: !!prefs.open, height: prefs.height | 0})); } catch {} };
+  const defaultHeight = narrow() ? Math.round(window.innerHeight * 0.6) : 320;
+  const DEFAULT_SHORTCUT = Object.freeze({ctrl: true, alt: false, shift: false, code: 'KeyE'});
+
+  // Toggle shortcut: Ctrl or Alt (optionally Shift) plus one key. Letters match
+  // by the typed letter (keyboard layouts), other keys by their position.
+  const KEY_LABELS = {Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/'};
+  for (let i = 0; i < 26; i++) KEY_LABELS[`Key${String.fromCharCode(65 + i)}`] = String.fromCharCode(65 + i);
+  for (let i = 0; i < 10; i++) KEY_LABELS[`Digit${i}`] = String(i);
+  const KEY_REFUSED = {Backquote: 'Ctrl+` is already the fixed terminal shortcut.', BracketLeft: 'The terminal reads it as Esc.', Backslash: 'It quits the running program in the terminal.',
+    Minus: 'Browsers use it to zoom.', Equal: 'Browsers use it to zoom.', Tab: 'Browsers use it to switch tabs.'};
+  const TAB = 'Browsers use it to switch tabs.', DEVTOOLS = 'Browsers open their developer tools with it.';
+  const RESERVED = {
+    'Ctrl+T': 'Browsers open a new tab with it.', 'Ctrl+W': 'Browsers close the tab with it.', 'Ctrl+N': 'Browsers open a new window with it.',
+    'Ctrl+Q': 'Some browsers quit with it.', 'Ctrl+L': 'Browsers focus the address bar with it.', 'Ctrl+R': 'Browsers reload the page with it.',
+    'Ctrl+C': 'The terminal needs it to interrupt programs and copy.', 'Ctrl+V': 'The terminal needs it to paste.',
+    'Ctrl+D': 'The terminal needs it to end input.', 'Ctrl+Z': 'The terminal needs it to suspend programs.',
+    'Ctrl+H': 'The terminal reads it as Backspace.', 'Ctrl+I': 'The terminal reads it as Tab.', 'Ctrl+J': 'The terminal reads it as Enter.', 'Ctrl+M': 'The terminal reads it as Enter.',
+    'Ctrl+0': 'Browsers reset the zoom with it.',
+    'Ctrl+K': 'The Board opens search with it.',
+    'Ctrl+Shift+C': 'The terminal copies with it.', 'Ctrl+Shift+V': 'The terminal pastes with it.',
+    'Ctrl+Shift+T': 'Browsers reopen a closed tab with it.', 'Ctrl+Shift+N': 'Browsers open a private window with it.', 'Ctrl+Shift+P': 'Firefox opens a private window with it.',
+    'Ctrl+Shift+W': 'Browsers close the window with it.', 'Ctrl+Shift+Q': 'Some browsers quit with it.',
+    'Ctrl+Shift+I': DEVTOOLS, 'Ctrl+Shift+J': DEVTOOLS, 'Ctrl+Shift+K': DEVTOOLS, 'Ctrl+Shift+E': DEVTOOLS, 'Ctrl+Shift+M': DEVTOOLS,
+  };
+  for (let i = 1; i < 10; i++) { RESERVED[`Ctrl+${i}`] = TAB; RESERVED[`Alt+${i}`] = TAB; }
+  const shortcutLabel = s => [s.ctrl && 'Ctrl', s.alt && 'Alt', s.shift && 'Shift', KEY_LABELS[s.code] || s.code].filter(Boolean).join('+');
+  // '' when the shortcut can be used, else a short reason.
+  function shortcutProblem(s) {
+    if (!s || typeof s !== 'object' || typeof s.code !== 'string') return 'Press Ctrl or Alt with one key.';
+    if (KEY_REFUSED[s.code]) return KEY_REFUSED[s.code];
+    if (!KEY_LABELS[s.code]) return 'Use a letter, a digit or one of ; \' , . /';
+    if (s.ctrl && s.alt) return 'Use Ctrl or Alt, not both (Ctrl+Alt is AltGr on many keyboards).';
+    if (!s.ctrl && !s.alt) return 'Hold Ctrl or Alt with the key.';
+    return RESERVED[shortcutLabel(s)] || '';
+  }
+  const eventCode = e => (typeof e.key === 'string' && /^[a-z]$/i.test(e.key) ? `Key${e.key.toUpperCase()}` : e.code);
+  const shortcutFromEvent = e => ({ctrl: !!e.ctrlKey, alt: !!e.altKey, shift: !!e.shiftKey, code: e.metaKey ? 'Meta' : eventCode(e)});
+  const matches = (e, s) => !e.metaKey && e.ctrlKey === !!s.ctrl && e.altKey === !!s.alt && e.shiftKey === !!s.shift && eventCode(e) === s.code;
+  const isFixedToggle = e => e.ctrlKey && !e.altKey && !e.metaKey && (e.code === 'Backquote' || e.key === '`');
+  const isToggleKey = e => isFixedToggle(e) || matches(e, prefs.shortcut);
+
+  function readStored() {
+    try { const value = JSON.parse(localStorage.getItem(STORE) || '{}'); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; }
+  }
+  function cleanPrefs(raw) {
+    const size = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) && v >= 1 ? Math.round(v) : fallback);
+    const flag = (v, fallback) => (typeof v === 'boolean' ? v : fallback);
+    const s = raw.shortcut;
+    return {open: raw.open === true, height: size(raw.height, defaultHeight), width: size(raw.width, 520), dock: DOCKS.includes(raw.dock) ? raw.dock : 'bottom',
+      maximized: raw.maximized === true, copyOnSelect: flag(raw.copyOnSelect, true), ctrlCCopy: flag(raw.ctrlCCopy, true), ctrlVPaste: flag(raw.ctrlVPaste, true),
+      shortcut: shortcutProblem(s) ? {...DEFAULT_SHORTCUT} : {ctrl: !!s.ctrl, alt: !!s.alt, shift: !!s.shift, code: s.code}};
+  }
+  const prefs = cleanPrefs(readStored());
+  // Unknown fields written by a newer Board are kept.
+  const savePrefs = () => { try { localStorage.setItem(STORE, JSON.stringify({...readStored(), ...prefs})); } catch {} };
+  const prefListeners = new Set();
+
+  // -- extension points for other modules (window.BoardTerminal) ----------------
+  // slot(name): a stable, initially empty element in the drawer header (hidden
+  // while empty). Events: 'session' {selector, session} on attach/reset and with
+  // nulls when the drawer closes or the report changes; 'message' with every
+  // parsed server text message.
+  const slots = new Map();
+  function slot(name) {
+    name = String(name);
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new Error(`Invalid terminal slot name: ${name}`);
+    let el = slots.get(name);
+    if (!el) {
+      el = document.createElement('span');
+      el.className = 'term-slot';
+      el.dataset.termSlot = name;
+      slots.set(name, el);
+      drawer?.querySelector('[data-term-slots]')?.appendChild(el);
+    }
+    return el;
+  }
+  const listeners = {session: new Set(), message: new Set()};
+  function on(type, callback) { if (listeners[type] && typeof callback === 'function') listeners[type].add(callback); return () => off(type, callback); }
+  function off(type, callback) { listeners[type]?.delete(callback); }
+  function emit(type, payload) {
+    for (const callback of [...listeners[type]]) { try { callback(payload); } catch (error) { console.error(`Terminal ${type} listener failed:`, error); } }
+  }
+  let sessionLive = false;
+  function emitSession() { sessionLive = true; emit('session', {selector: sel ? {...sel} : null, session: info}); }
+  function emitClosed() { if (sessionLive) { sessionLive = false; emit('session', {selector: null, session: null}); } }
   const esc = value => (ctx?.esc ? ctx.esc(value) : String(value ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`));
   const keyOf = s => JSON.stringify([s.family, s.program, s.lane, s.path]);
   const query = s => new URLSearchParams({family: s.family, program: s.program, lane: s.lane, path: s.path}).toString();
@@ -87,6 +180,11 @@
   const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\u2028\u2029]/;
   const unsafeText = text => UNSAFE.test(String(text));
   const UNSAFE_MESSAGE = 'This block contains control characters and cannot be typed; copy it manually after review.';
+  // Pastes go through the same filter. Windows clipboards end lines with CRLF;
+  // xterm turns CRLF and LF into the same Enter, so only CRLF is read as a
+  // newline here. A lone CR is still refused, and nothing is ever stripped.
+  const unsafePaste = text => unsafeText(String(text).replace(/\r\n/g, '\n'));
+  const PASTE_REFUSED = 'Paste refused: the clipboard text contains control characters.';
 
   // -- transport -------------------------------------------------------------
   async function api(path, body) {
@@ -122,13 +220,91 @@
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace'});
     fit = new window.FitAddon.FitAddon();
     term.loadAddon(fit);
-    term.open(drawer.querySelector('[data-term-screen]'));
-    term.attachCustomKeyEventHandler(event => !(event.ctrlKey && (event.code === 'Backquote' || event.key === '`')));
+    const screenEl = drawer.querySelector('[data-term-screen]');
+    term.open(screenEl);
+    term.attachCustomKeyEventHandler(onTermKey);
     term.onData(data => send({t: 'in', d: data}));
     term.onResize(({cols, rows}) => send({t: 'resize', cols, rows}));
-    new ResizeObserver(() => refit()).observe(drawer.querySelector('[data-term-screen]'));
+    // Copy on select: when a mouse selection (drag, double or triple click) ends.
+    let selecting = false;
+    screenEl.addEventListener('mousedown', event => { if (event.button === 0) selecting = true; });
+    document.addEventListener('mouseup', event => {
+      if (!selecting || event.button !== 0) return;
+      selecting = false;
+      // xterm settles the selection in its own mouseup handler; the click's
+      // user activation still allows the clipboard write a moment later.
+      setTimeout(() => { if (prefs.copyOnSelect && term.hasSelection()) copySelection(false); }, 0);
+    });
+    // Paste guard: every paste (keys, context menu, middle click) reaches
+    // xterm's own listeners below this element, so a capture listener here sees
+    // it first and stops unsafe text before xterm can send it.
+    screenEl.addEventListener('paste', event => {
+      if (!unsafePaste(event.clipboardData?.getData('text/plain') ?? '')) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      note(PASTE_REFUSED);
+    }, true);
+    new ResizeObserver(() => refit()).observe(screenEl);
     new MutationObserver(() => { if (term) term.options.theme = themeColors(); }).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
     refit();
+  }
+
+  // xterm key handler: false means xterm ignores the key (nothing is sent).
+  function onTermKey(event) {
+    if (isToggleKey(event)) return false;
+    if (event.type !== 'keydown') return true;
+    const ctrl = event.ctrlKey && !event.altKey && !event.metaKey;
+    const code = eventCode(event);
+    if (ctrl && code === 'KeyC' && (event.shiftKey || prefs.ctrlCCopy) && term.hasSelection()) {
+      event.preventDefault();
+      copySelection(true);
+      return false;
+    }
+    if (ctrl && event.shiftKey && code === 'KeyC') return false;   // Ctrl+Shift+C never sends ^C
+    if (ctrl && !event.shiftKey && event.key === 'Insert') {
+      if (term.hasSelection()) { event.preventDefault(); copySelection(false); }
+      return false;
+    }
+    // Paste keys: let the browser fire its native paste event, which the paste
+    // guard and then xterm handle (bracketed paste when the shell has it on).
+    if (ctrl && code === 'KeyV' && (event.shiftKey || prefs.ctrlVPaste)) return false;
+    if (event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && event.key === 'Insert') return false;
+    return true;
+  }
+
+  // -- clipboard ---------------------------------------------------------------
+  let flashTimer = null;
+  function flash(text, tone) {
+    const el = drawer?.querySelector('[data-term-flash]');
+    if (!el) return;
+    el.textContent = text; el.dataset.tone = tone; el.hidden = false;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { el.hidden = true; }, 1600);
+  }
+  function copySelection(clear) {
+    const text = term?.getSelection() || '';
+    if (!text) return;
+    if (clear) term.clearSelection();
+    copyText(text).then(ok => flash(ok ? 'Copied' : 'Copy blocked by the browser', ok ? 'ok' : 'warn'));
+  }
+  async function copyText(text) {
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(text); return true; } catch {}
+    }
+    return execCopy(text);
+  }
+  // Fallback for browsers without the async Clipboard API (or when it refuses).
+  function execCopy(text) {
+    const area = document.createElement('textarea');
+    const previous = document.activeElement;
+    area.value = text; area.readOnly = true; area.className = 'term-copy-holder';
+    document.body.appendChild(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    area.remove();
+    previous?.focus?.({preventScroll: true});
+    return ok;
   }
   function refit() { if (fit && drawer && !drawer.hidden) { try { fit.fit(); } catch {} } }
   function send(message) { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(message)); return true; } return false; }
@@ -172,13 +348,16 @@
         if (message.event !== 'reset') note(notes.join(' '));
         if (message.event === 'resumed') window.BoardUI?.toast?.('Resumed', 'success', {timeout: 4000});
         send({t: 'resize', cols: term.cols, rows: term.rows});
+        if (wantFocus) { wantFocus = false; term.focus(); }
+        emitSession();
         const queued = pending; pending = [];
         queued.forEach(fn => fn());
       } else if (message.type === 'viewers') { if (info) info.viewers = message.count; paint(); }
-      else if (message.type === 'reset') { term.reset(); note('Sandbox reset.'); }
+      else if (message.type === 'reset') { term.reset(); note('Sandbox reset.'); emitSession(); }
       else if (message.type === 'exit') { if (info) info.running = false; paint(); }
       else if (message.type === 'error') { note(message.message || 'The sandbox could not start.'); setStatus('error'); }
       else if (message.type === 'closed') { note(message.message || 'The sandbox closed.'); }
+      emit('message', message);
     };
     socket.onclose = () => {
       if (ws !== socket) return;
@@ -200,6 +379,18 @@
   const span = s => (s % 3600 === 0 ? `${s / 3600} ${s === 3600 ? 'hour' : 'hours'}` : s % 60 === 0 ? `${s / 60} min` : `${s} s`);
   const minutes = s => (s < 60 ? 'under a minute' : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`);
 
+  // Dock picker icons (16px, currentColor): a window with the docked side filled.
+  const dockIcon = fill => `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor"/>${fill}</svg>`;
+  const DOCK_BUTTONS = [
+    ['left', 'Dock left', dockIcon('<rect x="2" y="3" width="4.5" height="10" rx="1" fill="currentColor"/>')],
+    ['bottom', 'Dock bottom', dockIcon('<rect x="2" y="8.5" width="12" height="4.5" rx="1" fill="currentColor"/>')],
+    ['top', 'Dock top', dockIcon('<rect x="2" y="3" width="12" height="4.5" rx="1" fill="currentColor"/>')],
+    ['right', 'Dock right', dockIcon('<rect x="9.5" y="3" width="4.5" height="10" rx="1" fill="currentColor"/>')],
+  ];
+  const MAX_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const RESTORE_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M6 2.5V6H2.5M13.5 6H10V2.5M10 13.5V10h3.5M2.5 10H6v3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const shortcutText = () => shortcutLabel(prefs.shortcut);
+
   function buildDrawer() {
     drawer = document.createElement('section');
     drawer.className = 'term-drawer';
@@ -210,12 +401,17 @@
       <div class="term-head">
         <span class="term-title"><i class="fa fa-terminal" aria-hidden="true"></i> Sandbox</span>
         <span class="term-pill" data-term-status role="status" aria-live="polite"></span>
+        <span class="term-flash" data-term-flash role="status" aria-live="polite" hidden></span>
         <span class="hint term-meta" data-term-meta></span>
         <span class="term-steps" data-term-steps></span>
-        <span class="term-actions">
-          <button type="button" class="button sm" data-term-reset>Reset sandbox</button>
-          <button type="button" class="button sm" data-term-evidence>Save output as evidence</button>
-          <button type="button" class="button sm ghost icon-only" data-term-close aria-label="Close terminal" title="Close terminal (Ctrl+\`)"><i class="fa fa-times" aria-hidden="true"></i></button>
+        <span class="term-tools">
+          <span class="term-slots" data-term-slots></span>
+          <span class="term-dock" role="group" aria-label="Terminal position" data-term-dock>${DOCK_BUTTONS.map(([dock, label, svg]) => `<button type="button" class="term-dock-btn" data-dock="${dock}" aria-pressed="false" aria-label="${label}" title="${label}">${svg}</button>`).join('')}<span class="term-dock-sep" aria-hidden="true"></span><button type="button" class="term-dock-btn" data-dock-max aria-pressed="false" aria-label="Maximize" title="Maximize">${MAX_ICON}</button></span>
+          <span class="term-actions">
+            <button type="button" class="button sm" data-term-reset>Reset sandbox</button>
+            <button type="button" class="button sm" data-term-evidence>Save output as evidence</button>
+            <button type="button" class="button sm ghost icon-only" data-term-close aria-label="Close terminal"><i class="fa fa-times" aria-hidden="true"></i></button>
+          </span>
         </span>
       </div>
       <div class="term-note hint" data-term-note role="status" hidden></div>
@@ -225,53 +421,150 @@
         <div class="term-signin" data-term-down hidden><p>The terminal service is not running or not reachable. The Board keeps working; try again later.</p><button type="button" class="button" data-term-retry>Try again</button></div>
       </div>`;
     document.body.appendChild(drawer);
+    const slotHost = drawer.querySelector('[data-term-slots]');
+    slots.forEach(el => slotHost.appendChild(el));
     drawer.addEventListener('click', onDrawerClick);
     const handle = drawer.querySelector('[data-term-resize]');
     handle.addEventListener('pointerdown', event => {
       event.preventDefault();
       handle.setPointerCapture(event.pointerId);
-      const move = e => setHeight(window.innerHeight - e.clientY);
+      // Size follows the pointer from where the handle was grabbed.
+      const dock = currentDock(), start = currentSize(), x0 = event.clientX, y0 = event.clientY;
+      const move = e => setSize(start + (dock === 'bottom' ? y0 - e.clientY : dock === 'top' ? e.clientY - y0 : dock === 'right' ? x0 - e.clientX : e.clientX - x0));
       const up = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); savePrefs(); };
       handle.addEventListener('pointermove', move);
       handle.addEventListener('pointerup', up);
     });
+    // Arrow keys on the handle: the key pointing away from the docked edge grows the drawer.
+    const GROW = {bottom: ['ArrowUp', 'ArrowDown'], top: ['ArrowDown', 'ArrowUp'], right: ['ArrowLeft', 'ArrowRight'], left: ['ArrowRight', 'ArrowLeft']};
     handle.addEventListener('keydown', event => {
-      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); setHeight(prefs.height + (event.key === 'ArrowUp' ? 32 : -32)); savePrefs(); }
+      const dock = currentDock(), [grow, shrink] = GROW[dock];
+      if (event.key !== grow && event.key !== shrink) return;
+      event.preventDefault();
+      setSize(currentSize() + (event.key === grow ? 32 : -32));
+      savePrefs();
     });
-    window.addEventListener('resize', () => { if (!drawer.hidden) { setHeight(prefs.height); place(); } });
+    window.addEventListener('resize', () => { if (!drawer.hidden) layout(); });
+    const sidebar = document.querySelector('.app > .sidebar');
+    if (sidebar && window.ResizeObserver) new ResizeObserver(() => { if (!drawer.hidden) layout(); }).observe(sidebar);
     setInterval(paint, 30000);
+    paintTitles();
   }
 
-  function setHeight(px) {
-    const max = Math.max(200, window.innerHeight - 96);
-    prefs.height = Math.round(Math.min(max, Math.max(160, px)));
-    if (drawer) drawer.style.height = `${prefs.height}px`;
-    document.documentElement.style.setProperty('--term-drawer-space', drawer && !drawer.hidden ? `${prefs.height}px` : '0px');
+  // -- docking -------------------------------------------------------------------
+  const currentDock = () => (narrow() ? 'bottom' : prefs.dock);
+  const isMaximized = () => !narrow() && prefs.maximized;
+  const vertical = dock => dock === 'top' || dock === 'bottom';
+  // The sidebar stays visible: docks and maximize cover only the content column.
+  // EasyMDE's full-screen modes cover the sidebar too, so the drawer spans the window then.
+  function contentLeft() {
+    if (narrow() || document.querySelector('.CodeMirror-fullscreen')) return 0;
+    const sidebar = document.querySelector('.app > .sidebar');
+    return sidebar ? Math.max(0, Math.round(sidebar.getBoundingClientRect().right)) : 0;
   }
-  function place() {
-    const body = document.querySelector('.app > .body');
-    // EasyMDE's full-screen modes cover the sidebar too, so the drawer spans the window then.
-    const fullscreen = document.querySelector('.CodeMirror-fullscreen');
-    const left = body && window.innerWidth > 700 && !fullscreen ? Math.max(0, body.getBoundingClientRect().left) : 0;
-    drawer.style.left = `${left}px`;
+  // Minimum 160 px; at least about 320 px of content stays visible (phones keep a tall sheet).
+  function clampSize(dock, px) {
+    const room = vertical(dock) ? window.innerHeight - (narrow() ? 96 : 320) : window.innerWidth - contentLeft() - 320;
+    return Math.round(Math.min(Math.max(160, room), Math.max(160, px)));
   }
+  const currentSize = () => clampSize(currentDock(), vertical(currentDock()) ? prefs.height : prefs.width);
+  function setSize(px) {
+    const dock = currentDock();
+    if (vertical(dock)) prefs.height = clampSize(dock, px); else prefs.width = clampSize(dock, px);
+    layout();
+  }
+  // Positions the drawer and reserves its space through root classes and
+  // --term-space-{top,right,bottom,left} (see sandbox-terminal.css).
+  function layout() {
+    const root = document.documentElement;
+    const open = !!drawer && !drawer.hidden, dock = currentDock(), max = isMaximized();
+    root.classList.toggle('term-drawer-open', open);
+    root.classList.toggle('term-max', open && max);
+    for (const side of DOCKS) root.classList.toggle(`term-dock-${side}`, open && !max && dock === side);
+    const size = open && !max ? currentSize() : 0;
+    for (const side of DOCKS) root.style.setProperty(`--term-space-${side}`, side === dock && size ? `${size}px` : '0px');
+    root.style.setProperty('--term-drawer-space', `${size}px`);
+    if (!drawer) return;
+    const left = contentLeft(), style = drawer.style;
+    drawer.dataset.dock = max ? 'max' : dock;
+    style.left = max || vertical(dock) || dock === 'left' ? `${left}px` : 'auto';
+    style.right = max || vertical(dock) || dock === 'right' ? '0px' : 'auto';
+    style.top = max || !vertical(dock) || dock === 'top' ? '0px' : 'auto';
+    style.bottom = max || !vertical(dock) || dock === 'bottom' ? '0px' : 'auto';
+    style.height = !max && vertical(dock) ? `${size}px` : 'auto';
+    style.width = !max && !vertical(dock) ? `${size}px` : 'auto';
+    const handle = drawer.querySelector('[data-term-resize]');
+    handle.hidden = max;
+    handle.setAttribute('aria-orientation', vertical(dock) ? 'horizontal' : 'vertical');
+    paintDock();
+    if (open) requestAnimationFrame(refit);
+  }
+  function paintDock() {
+    if (!drawer) return;
+    const max = !!prefs.maximized;
+    drawer.querySelectorAll('[data-dock]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.dock === prefs.dock)));
+    const maxButton = drawer.querySelector('[data-dock-max]');
+    maxButton.setAttribute('aria-pressed', String(max));
+    maxButton.title = max ? 'Restore' : 'Maximize';
+    maxButton.setAttribute('aria-label', maxButton.title);
+    maxButton.innerHTML = max ? RESTORE_ICON : MAX_ICON;
+  }
+  // The dock picker and Settings share one stored choice; picking a side leaves maximize.
+  function setDock(dock) {
+    if (!DOCKS.includes(dock)) return;
+    prefs.dock = dock; prefs.maximized = false;
+    savePrefs(); layout(); notifyPrefs();
+  }
+  function setMaximized(value) { prefs.maximized = !!value; savePrefs(); layout(); notifyPrefs(); }
 
   function showDrawer(visible) {
     if (!drawer) buildDrawer();
     drawer.hidden = !visible;
-    document.documentElement.classList.toggle('term-drawer-open', visible);
-    setHeight(prefs.height);
-    if (visible) { place(); paint(); refreshSummary(); connect(); refit(); }
-    else disconnect();
+    layout();
+    if (visible) { paint(); refreshSummary(); connect(); refit(); }
+    else { disconnect(); emitClosed(); }
     document.querySelectorAll('[data-term-toggle]').forEach(b => b.setAttribute('aria-expanded', String(visible)));
   }
+  // Opening focuses the terminal; closing returns focus to where it was before
+  // opening (if that element still exists), else to the report editor.
+  let returnFocus = null, wantFocus = false;
   function toggle(force) {
     if (!sel || (blocked() && force !== false)) return;
-    prefs.open = force === undefined ? !prefs.open : force;
+    const next = force === undefined ? !prefs.open : force;
+    if (next && !prefs.open) {
+      const active = document.activeElement;
+      returnFocus = active && active !== document.body && !drawer?.contains(active) ? active : null;
+    }
+    const closing = !next && prefs.open;
+    prefs.open = next;
     savePrefs();
     showDrawer(prefs.open);
-    if (prefs.open && term) term.focus();
+    if (prefs.open) { if (term) term.focus(); else wantFocus = true; }
+    if (closing) restoreFocus();
   }
+  function restoreFocus() {
+    const target = returnFocus;
+    returnFocus = null; wantFocus = false;
+    if (target?.isConnected && !target.closest('[hidden]') && !target.disabled) { target.focus({preventScroll: true}); if (document.activeElement === target) return; }
+    const cm = document.querySelector('#live-report-host .CodeMirror')?.CodeMirror;
+    if (cm) { cm.focus(); return; }
+    (document.getElementById('report-source-editor') || document.querySelector('[data-term-toggle]'))?.focus({preventScroll: true});
+  }
+  // Tooltips name the current primary shortcut.
+  function paintTitles() {
+    const keys = shortcutText();
+    document.querySelectorAll('[data-term-toggle]').forEach(b => { if (!b.disabled) b.title = `Sandbox terminal (${keys})`; });
+    const close = drawer?.querySelector('[data-term-close]');
+    if (close) close.title = `Close terminal (${keys})`;
+  }
+  const notifyPrefs = () => prefListeners.forEach(fn => { try { fn(prefs); } catch (error) { console.error('Terminal settings listener failed:', error); } });
+  // Another tab changed the preferences: apply everything except the open state.
+  window.addEventListener('storage', event => {
+    if (event.key !== STORE && event.key !== null) return;
+    const {open, ...next} = cleanPrefs(readStored());
+    Object.assign(prefs, next);
+    layout(); paintTitles(); notifyPrefs();
+  });
 
   function paint() {
     if (!drawer) return;
@@ -299,6 +592,8 @@
     const target = event.target.closest('button,a');
     if (!target) return;
     if (target.matches('[data-term-close]')) toggle(false);
+    else if (target.matches('[data-dock]')) setDock(target.dataset.dock);
+    else if (target.matches('[data-dock-max]')) setMaximized(!prefs.maximized);
     else if (target.matches('[data-term-retry]')) { retry = 0; connect(); }
     else if (target.matches('[data-term-reset]')) {
       if (!resetArmed) {
@@ -449,14 +744,21 @@
     holder.remove();
     event.preventDefault();
   });
+  // Toggle shortcut (Settings, default Ctrl+E) and the fixed Ctrl+`, from anywhere
+  // in the Board, including the terminal and the editor. Whenever the Board has
+  // a terminal the keys are kept from the browser (Firefox focuses its search
+  // bar on Ctrl+E); they only toggle when the report has a terminal.
   window.addEventListener('keydown', event => {
-    if (event.ctrlKey && !event.altKey && !event.metaKey && (event.code === 'Backquote' || event.key === '`') && sel && base) { event.preventDefault(); if (!blocked()) toggle(); }
+    if (!base || !isToggleKey(event) || event.target?.closest?.('[data-shortcut-recorder]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat && sel && !blocked()) toggle();
   }, true);
   window.addEventListener('focus', () => { if (sel) loadChecks(); });
 
   // -- module hook --------------------------------------------------------------
   let observer = null, scheduled = false;
-  function schedule() { if (!scheduled) { scheduled = true; requestAnimationFrame(() => { scheduled = false; decorate(); if (drawer && !drawer.hidden) place(); }); } }
+  function schedule() { if (!scheduled) { scheduled = true; requestAnimationFrame(() => { scheduled = false; decorate(); if (drawer && !drawer.hidden) layout(); }); } }
 
   function placeToggle(host) {
     const holder = host.querySelector('.live-bar-actions') || host.closest('section')?.querySelector('h2');
@@ -467,7 +769,7 @@
     button.dataset.termToggle = '';
     button.setAttribute('aria-controls', 'term-drawer');
     button.setAttribute('aria-expanded', String(!!prefs.open));
-    button.title = 'Sandbox terminal (Ctrl+`)';
+    button.title = `Sandbox terminal (${shortcutText()})`;
     button.innerHTML = '<i class="fa fa-terminal" aria-hidden="true"></i><span>Terminal</span>';
     button.addEventListener('click', () => toggle());
     const reason = document.createElement('span');
@@ -485,7 +787,7 @@
     const message = blocked() ? mount.message : '';
     document.querySelectorAll('[data-term-toggle]').forEach(button => {
       button.disabled = !!message;
-      button.title = message || 'Sandbox terminal (Ctrl+`)';
+      button.title = message || `Sandbox terminal (${shortcutText()})`;
     });
     document.querySelectorAll('[data-term-reason]').forEach(el => { el.textContent = message; el.hidden = !message; });
     if (message && drawer && !drawer.hidden) showDrawer(false);
@@ -510,7 +812,7 @@
       const next = base && host?.dataset.path ? {family: host.dataset.family, program: host.dataset.program, lane: host.dataset.lane, path: host.dataset.path} : null;
       if (!next) {
         document.querySelectorAll('[data-term-toggle],[data-term-reason],[data-term-controls]').forEach(el => el.remove());
-        if (sel) { sel = null; selKey = ''; clearInterval(pollTimer); pollTimer = null; if (drawer) { drawer.hidden = true; document.documentElement.classList.remove('term-drawer-open'); disconnect(); setHeight(prefs.height); } }
+        if (sel) { sel = null; selKey = ''; clearInterval(pollTimer); pollTimer = null; if (drawer) { drawer.hidden = true; disconnect(); layout(); } emitClosed(); }
         return;
       }
       placeToggle(host);
@@ -518,7 +820,7 @@
       const key = keyOf(next);
       if (key !== selKey) {
         sel = next; selKey = key; checks = {}; checksOk = false; info = null; pending = []; mount = null;
-        disconnect(); retry = 0;
+        disconnect(); emitClosed(); retry = 0;
         if (term) term.reset();
         loadChecks();
         loadMount();
@@ -529,6 +831,70 @@
       schedule();
     },
   });
-  // Exposed for synthetic browser tests and diagnostics only.
-  window.BoardTerminal = {blockKeys, sha256hex, commandText, unsafeText, get status() { return status; }, get checks() { return checks; }, get term() { return term; }};
+  // -- settings section (static/modules/settings.js registry) ------------------
+  const SETTING_TOGGLES = [
+    ['copyOnSelect', 'Copy on select', 'Selecting text in the terminal copies it to the clipboard.'],
+    ['ctrlCCopy', 'Ctrl+C copies a selection', 'With text selected, Ctrl+C copies it instead of interrupting. Without a selection it still interrupts.'],
+    ['ctrlVPaste', 'Ctrl+V pastes', 'Off: Ctrl+V goes to the shell. Ctrl+Shift+V and Shift+Insert always paste.'],
+  ];
+  function renderSettings(host) {
+    const id = name => `set-term-${name}`;
+    host.innerHTML = `${SETTING_TOGGLES.map(([key, label, hint]) => `<div class="set-row"><div class="set-text"><label for="${id(key)}">${esc(label)}</label><p class="hint" id="${id(key)}-hint">${esc(hint)}</p></div><input type="checkbox" role="switch" class="set-switch" id="${id(key)}" data-term-pref="${key}" aria-describedby="${id(key)}-hint"></div>`).join('')}
+      <div class="set-row"><div class="set-text"><span class="set-label" id="${id('shortcut')}-label">Toggle shortcut</span><p class="hint" id="${id('shortcut')}-hint" data-shortcut-msg role="status" aria-live="polite"></p></div>
+        <div class="set-controls"><button type="button" class="button sm set-recorder" data-shortcut-recorder aria-labelledby="${id('shortcut')}-label ${id('shortcut')}-key" aria-describedby="${id('shortcut')}-hint"><span id="${id('shortcut')}-key" data-shortcut-key></span></button><button type="button" class="button sm ghost" data-shortcut-reset>Reset to Ctrl+E</button></div></div>
+      <div class="set-row"><div class="set-text"><span class="set-label" id="${id('dock')}-label">Default dock</span><p class="hint">The picker in the terminal header changes it too. Phones always use a bottom sheet.</p></div>
+        <div class="segmented" role="group" aria-labelledby="${id('dock')}-label">${['bottom', 'top', 'left', 'right'].map(d => `<button type="button" data-set-dock="${d}" aria-pressed="false">${d[0].toUpperCase()}${d.slice(1)}</button>`).join('')}</div></div>`;
+    const recorder = host.querySelector('[data-shortcut-recorder]'), message = host.querySelector('[data-shortcut-msg]');
+    const idleHint = () => `Opens and closes the terminal of the open report. Ctrl+\` also works.`;
+    let recording = false;
+    const sync = () => {
+      host.querySelectorAll('[data-term-pref]').forEach(box => { box.checked = !!prefs[box.dataset.termPref]; });
+      if (!recording) recorder.querySelector('[data-shortcut-key]').textContent = shortcutText();
+      recorder.setAttribute('aria-pressed', String(recording));
+      host.querySelector('[data-shortcut-reset]').disabled = !shortcutProblem(prefs.shortcut) && shortcutText() === 'Ctrl+E';
+      host.querySelectorAll('[data-set-dock]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.setDock === prefs.dock)));
+    };
+    const stop = text => { recording = false; message.textContent = text || idleHint(); sync(); };
+    const saveShortcut = shortcut => {
+      prefs.shortcut = shortcut; savePrefs(); paintTitles(); notifyPrefs();
+      stop(`Saved. ${shortcutText()} now opens and closes the terminal.${shortcutText() === 'Ctrl+E' ? '' : ' Ctrl+E goes to the shell again.'}`);
+    };
+    host.addEventListener('change', event => {
+      const key = event.target.dataset?.termPref;
+      if (!key) return;
+      prefs[key] = event.target.checked; savePrefs(); notifyPrefs();
+    });
+    host.addEventListener('click', event => {
+      const target = event.target.closest('button');
+      if (!target) return;
+      if (target === recorder) {
+        recording = !recording;
+        if (recording) { recorder.querySelector('[data-shortcut-key]').textContent = 'Press keys'; message.textContent = 'Press Ctrl or Alt (and Shift if you like) with one key. Esc cancels.'; sync(); }
+        else stop();
+      } else if (target.matches('[data-shortcut-reset]')) saveShortcut({...DEFAULT_SHORTCUT});
+      else if (target.dataset.setDock) setDock(target.dataset.setDock);
+    });
+    recorder.addEventListener('keydown', event => {
+      if (!recording || event.key === 'Tab') return;
+      event.preventDefault(); event.stopPropagation();
+      if (event.key === 'Escape') { stop(); return; }
+      if (['Control', 'Alt', 'Shift', 'Meta', 'AltGraph', 'OS'].includes(event.key)) return;
+      const next = shortcutFromEvent(event), problem = event.metaKey ? 'Use Ctrl or Alt.' : shortcutProblem(next);
+      if (problem) { message.textContent = `${shortcutLabel(next)} is not available. ${problem}`; return; }
+      saveShortcut(next);
+    });
+    recorder.addEventListener('blur', () => { if (recording) stop(); });
+    message.textContent = idleHint();
+    sync();
+    prefListeners.add(sync);
+    return () => prefListeners.delete(sync);
+  }
+  window.BoardSettings?.register?.({id: 'terminal', group: 'terminal', title: 'Terminal', order: 0, render: renderSettings});
+
+  // Public API. slot/on/off/selector/session are for other feature modules
+  // (documented in docs/integrations/terminal-ux.md); the rest is for synthetic
+  // browser tests and diagnostics only.
+  window.BoardTerminal = {blockKeys, sha256hex, commandText, unsafeText, unsafePaste, shortcutProblem, shortcutLabel,
+    get status() { return status; }, get checks() { return checks; }, get term() { return term; }, get prefs() { return {...prefs, shortcut: {...prefs.shortcut}}; },
+    slot, on, off, selector: () => (sel ? {...sel} : null), session: () => (sel && info && drawer && !drawer.hidden ? info : null)};
 })();

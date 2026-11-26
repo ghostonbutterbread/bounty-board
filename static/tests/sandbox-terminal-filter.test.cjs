@@ -44,3 +44,25 @@ test('typed text never ends with a newline and console prompts are stripped',()=
   assert.equal(commandText('echo a\n\n',''),'echo a');
   assert.equal(commandText('$ echo a\na\n$ echo b\n','console'),'echo a\necho b');
 });
+
+test('pastes use the same filter; CRLF line ends are newlines, a lone CR is refused',()=>{
+  const {unsafePaste,unsafeText}=loadModule();
+  assert.equal(unsafePaste('echo a\r\necho b\r\n'),false);
+  assert.equal(unsafeText('echo a\r\necho b'),true,'the typing filter itself is unchanged');
+  for(const bad of ['echo a\rtouch x','echo hi\x1b[201~\ntouch x\n','echo ⁧x⁩','a‮b','a\x9bb','a\x00']) assert.equal(unsafePaste(bad),true,JSON.stringify(bad));
+  for(const ok of ['echo hi','for i in 1 2; do\n\techo $i\ndone','echo "naïve café"','']) assert.equal(unsafePaste(ok),false,JSON.stringify(ok));
+});
+
+test('toggle shortcut: browser and terminal combos are refused with a reason',()=>{
+  const {shortcutProblem,shortcutLabel}=loadModule();
+  const s=(label)=>{const parts=label.split('+'),key=parts.pop();const code=/^[A-Z]$/.test(key)?`Key${key}`:/^\d$/.test(key)?`Digit${key}`:key;return {ctrl:parts.includes('Ctrl'),alt:parts.includes('Alt'),shift:parts.includes('Shift'),code};};
+  for(const ok of ['Ctrl+E','Ctrl+Shift+E'.replace('E','Y'),'Alt+T','Alt+Shift+T','Ctrl+G','Ctrl+B','Ctrl+Shift+1']) assert.equal(shortcutProblem(s(ok)),'',ok);
+  for(const bad of ['Ctrl+T','Ctrl+W','Ctrl+N','Ctrl+Q','Ctrl+L','Ctrl+R','Ctrl+Shift+C','Ctrl+C','Ctrl+V','Ctrl+D','Ctrl+Z','Ctrl+K','Ctrl+1','Ctrl+Shift+T','Ctrl+Shift+I','Ctrl+H','Ctrl+M','Ctrl+Alt+E','Shift+E','E','Alt+4'])
+    assert.notEqual(shortcutProblem(s(bad)),'',bad);
+  assert.notEqual(shortcutProblem({ctrl:true,alt:false,shift:false,code:'Tab'}),'','Ctrl+Tab');
+  assert.notEqual(shortcutProblem({ctrl:true,alt:false,shift:false,code:'Backquote'}),'','Ctrl+` is the fixed one');
+  assert.notEqual(shortcutProblem({ctrl:true,alt:false,shift:false,code:'F5'}),'');
+  assert.notEqual(shortcutProblem(null),'');
+  assert.equal(shortcutLabel({ctrl:true,alt:false,shift:true,code:'KeyE'}),'Ctrl+Shift+E');
+  assert.equal(shortcutLabel({ctrl:false,alt:true,shift:false,code:'Slash'}),'Alt+/');
+});
