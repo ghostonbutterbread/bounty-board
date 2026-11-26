@@ -58,6 +58,7 @@ Threat model additions:
 - **No new reach for the sandbox:** it still cannot reach host loopback, LAN or tailnet, its own exposed ports included (real-container test: 403 through the proxy).
 - **No host-side connects:** the host only accepts (on its listeners and on `ports.sock`); `terminal_ports.py` has no connect call (tested). A malicious agent can only answer opens with bytes from inside the container. Its control stream is strictly parsed and capped (see sandbox-ports.md).
 - Forwarded traffic keeps a sandbox from pausing and a connection unpauses it; removal still counts 4 h from the last terminal viewer.
+- Availability (review round 1): 16 forwarded connections per client IP across sessions, fair-share eviction at the global cap, idle connections closed under pressure. Switching Tailscale off closes its listeners before saving (fails closed). `auto` binds only an address on a `tailscale*` interface.
 
 ## Access control (terminal service only)
 
