@@ -102,6 +102,11 @@ def content_disposition(kind, name):
     return f'{kind}; filename="{fallback}"; filename*=UTF-8\'\'{quote(name, safe="")}'
 
 
+def file_version(info):
+    """Opaque identity of one file version: inode and mtime in nanoseconds."""
+    return f'{info.st_ino}-{info.st_mtime_ns}'
+
+
 def _clean_parts(relative):
     if not isinstance(relative, str) or not relative or '\0' in relative or relative.startswith('/') or '\\' in relative:
         raise ArtifactError('invalid path')
@@ -286,12 +291,15 @@ def associate(lane_fd, family, program, lane, report_path):
         raise ArtifactError('invalid report')
     text = _read_small(lane_fd, report_rel).decode('utf-8', errors='replace')
     findings = []
+    ledger_unreadable = False
     try:
         ledger = json.loads(_read_small(lane_fd, 'ledgers/ledger.json'))
         if isinstance(ledger, dict) and isinstance(ledger.get('findings'), list):
             findings = [f for f in ledger['findings'] if isinstance(f, dict)]
     except (ArtifactError, ValueError, UnicodeError):
-        pass
+        # A ledger that exists but cannot be read (mid-sync, too large) hides
+        # other findings' claims; callers that delete must refuse meanwhile.
+        ledger_unreadable = _kind_at(lane_fd, 'ledgers/ledger.json') is not None
 
     def rel(value):
         return recorded_relative(value, family, program, lane)
@@ -371,6 +379,23 @@ def associate(lane_fd, family, program, lane, report_path):
         if relative and _kind_at(lane_fd, relative) == 'file':
             add(relative, 'report_link', target)
 
+    # Files other findings name in their artifact fields (or folders they
+    # name): listed normally, but marked so they are never deleted from this
+    # report's panel.
+    foreign = set()
+    for finding in findings:
+        if id(finding) in owner_ids:
+            continue
+        for _field, value in _fields(finding):
+            relative = rel(value)
+            if relative and '/' in relative:
+                foreign.add(relative)
+
+    def referenced_elsewhere(relative):
+        return any(relative == ref or relative.startswith(ref + '/') for ref in foreign)
+
+    if ledger_unreadable:
+        notes.append('ledger_unreadable')
     artifacts = []
     for relative in sorted(reasons)[:MAX_LISTED]:
         try:
@@ -384,9 +409,13 @@ def associate(lane_fd, family, program, lane, report_path):
             'name': name, 'relative': relative,
             'display_path': relative[len(folder) + 1:] if folder and relative.startswith(folder + '/') else relative,
             'size': info.st_size, 'modified': int(info.st_mtime),
+            # Identity of this exact file version (inode + ns mtime); a delete
+            # must name it, so a replaced or edited file is never removed.
+            'version': file_version(info),
             'category': category(name), 'sensitive': is_sensitive,
             'preview': preview_kind(name, is_sensitive),
             'source_reason': reasons[relative][0]['reason'], 'reasons': reasons[relative],
+            'referenced_elsewhere': referenced_elsewhere(relative),
         })
     if len(reasons) > MAX_LISTED or budget[0] <= 0:
         notes.append('truncated')

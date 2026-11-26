@@ -26,6 +26,7 @@
     folder_not_dedicated: 'This report is not in its own folder, so only files linked to this report are shown.',
     flat_reports_root: 'This report sits in the reports root, so only files linked to this report are shown.',
     truncated: 'The list is truncated; some files are not shown.',
+    ledger_unreadable: 'Delete is off for now: the findings ledger could not be read, so it is unknown which files other findings use.',
   };
   const REASONS = {report_folder: 'Report folder', finding_field: 'Finding field', report_link: 'Linked from report'};
   const panels = new Map();
@@ -164,7 +165,10 @@
       body.push(el('p', {class: 'hint', text: data.folder
         ? `Files in the report folder ${data.folder}, plus files linked from the report or its finding.`
         : 'Files linked from the report or its finding.'}));
-      for (const note of data.notes || []) if (NOTES[note]) body.push(el('p', {class: 'hint', text: NOTES[note]}));
+      for (const note of data.notes || []) {
+        if (!NOTES[note] || (note === 'ledger_unreadable' && uploadState(panel) !== 'enabled')) continue;  // only matters where Delete would show
+        body.push(el('p', {class: 'hint', text: NOTES[note]}));
+      }
       const upload = uploadState(panel);
       if (upload === 'enabled') body.push(el('p', {class: 'hint artifacts-upload-hint', text: 'Drop files on this panel or use Upload files to add them to the report folder.'}));
       else if (upload === 'no_folder') body.push(el('p', {class: 'hint artifacts-upload-hint', id: `${panel.uploadId}-why`, text: NO_FOLDER_TEXT}));
@@ -479,7 +483,7 @@
     let status = 0, body = {};
     try {
       const response = await fetch(`/api/report-artifact-delete?${query(panel.selector, {artifact: item.relative})}`, {
-        method: 'POST', cache: 'no-store', body: JSON.stringify({size: item.size, modified: item.modified}),
+        method: 'POST', cache: 'no-store', body: JSON.stringify({size: item.size, modified: item.modified, version: item.version}),
         headers: {'X-Requested-With': 'Bounty-Board', 'Content-Type': 'application/json', Accept: 'application/json'}});
       status = response.status;
       body = (await response.json().catch(() => null)) || {};

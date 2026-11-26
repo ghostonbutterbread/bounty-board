@@ -13,14 +13,21 @@ SELECT, F1 = tu.SELECT, tu.F1
 
 
 class DeleteFixture(tu.Fixture):
-    def delete(self, artifact, size=None, modified=None, path=F1, headers=None, query=None, body=None, **extra):
+    def delete(self, artifact, size=None, modified=None, path=F1, headers=None, query=None, body=None, version=None, **extra):
         target = '/api/report-artifact-delete?' + (
             query if query is not None else urlencode({**SELECT, 'path': path, 'artifact': artifact, **extra}))
         if body is None:
             if size is None:
                 info = (self.lane / artifact).lstat()
                 size, modified = info.st_size, int(info.st_mtime)
-            body = json.dumps({'size': size, 'modified': modified}).encode()
+            if version is None:
+                # What the panel would send: the version of the file as it is now.
+                try:
+                    info = (self.lane / artifact).lstat()
+                    version = f'{info.st_ino}-{info.st_mtime_ns}'
+                except OSError:
+                    version = '0-0'
+            body = json.dumps({'size': size, 'modified': modified, 'version': version}).encode()
         base = {'Origin': self.origin, 'X-Requested-With': 'Bounty-Board', 'Content-Type': 'application/json',
                 'Content-Length': str(len(body)), 'Sec-Fetch-Site': 'same-origin'}
         items = headers(base) if headers is not None else list(base.items())
@@ -322,3 +329,64 @@ class DeleteTests(DeleteFixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReviewFixTests(DeleteFixture):
+    """Independent review of c5f9d0f: R1 (another finding's evidence), R2
+    (same-second replacement) and the unreadable-ledger window."""
+
+    def add_finding(self, **fields):
+        ledger = self.lane / 'ledgers/ledger.json'
+        data = json.loads(ledger.read_text())
+        data['findings'].append({'fid': 'F9', 'report_path': 'reports/loose/notes.md', **fields})
+        ledger.write_text(json.dumps(data))
+
+    def test_other_findings_file_is_not_deletable(self):
+        self.add_finding(poc='reports/F1/poc/exploit.py')
+        entry = self.entry('reports/F1/poc/exploit.py')
+        self.assertFalse(entry['deletable'])
+        self.assertTrue(entry['referenced_elsewhere'])
+        status, _, body = self.delete('reports/F1/poc/exploit.py', version=entry['version'])
+        self.assertEqual((status, body), (409, {'error': 'not_deletable'}))
+        self.assertTrue((self.folder / 'poc/exploit.py').exists())
+
+    def test_other_findings_folder_protects_its_files(self):
+        (self.folder / 'shared').mkdir()
+        (self.folder / 'shared/trace.txt').write_text('t\n')
+        (self.folder / 'mine.txt').write_text('m\n')
+        self.add_finding(artifacts=[{'path': 'reports/F1/shared'}])
+        self.assertFalse(self.entry('reports/F1/shared/trace.txt')['deletable'])
+        self.assertTrue(self.entry('reports/F1/mine.txt')['deletable'])
+        status, _, _ = self.delete('reports/F1/shared/trace.txt')
+        self.assertEqual(status, 409)
+        self.assertTrue((self.folder / 'shared/trace.txt').exists())
+
+    def test_same_second_same_size_replacement_is_refused(self):
+        p = self.folder / 'shot.txt'
+        p.write_text('AAAA'); os.utime(p, ns=(10**18, 1_700_000_000_100_000_000))
+        shown = self.entry('reports/F1/shot.txt')
+        new = self.folder / 'new.part'; new.write_text('BBBB')
+        os.utime(new, ns=(10**18, 1_700_000_000_900_000_000)); os.replace(new, p)
+        status, _, body = self.delete('reports/F1/shot.txt', size=shown['size'], modified=shown['modified'],
+                                      version=shown['version'])
+        self.assertEqual((status, body), (409, {'error': 'changed'}))
+        self.assertEqual(p.read_text(), 'BBBB')
+
+    def test_body_without_version_is_invalid(self):
+        (self.folder / 'v.txt').write_text('v')
+        info = (self.folder / 'v.txt').lstat()
+        body = json.dumps({'size': info.st_size, 'modified': int(info.st_mtime)}).encode()
+        status, _, payload = self.delete('reports/F1/v.txt', body=body)
+        self.assertEqual((status, payload), (400, {'error': 'invalid_body'}))
+        self.assertTrue((self.folder / 'v.txt').exists())
+
+    def test_unreadable_ledger_turns_delete_off(self):
+        (self.folder / 'keep.txt').write_text('k')
+        (self.lane / 'ledgers/ledger.json').write_text('{"findings": [')  # mid-write
+        listing = self.listing(F1)
+        self.assertIn('ledger_unreadable', listing['notes'])
+        entry = next(a for a in listing['artifacts'] if a['relative'] == 'reports/F1/keep.txt')
+        self.assertFalse(entry['deletable'])
+        status, _, body = self.delete('reports/F1/keep.txt')
+        self.assertEqual((status, body), (409, {'error': 'not_deletable'}))
+        self.assertTrue((self.folder / 'keep.txt').exists())

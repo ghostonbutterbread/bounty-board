@@ -447,23 +447,24 @@ def _entry(lane_fd, family, program, lane, path, relative):
     try:
         fd, info = ra.open_file(lane_fd, relative)
         os.close(fd)
-        size, modified = info.st_size, int(info.st_mtime)
+        size, modified, version = info.st_size, int(info.st_mtime), ra.file_version(info)
     except ra.ArtifactError:
-        size = modified = None
+        size = modified = version = None
     is_sensitive = ra.sensitive(name)
     folder = found.get('folder') or ''
     return {'name': name, 'relative': relative,
             'display_path': relative[len(folder) + 1:] if folder and relative.startswith(folder + '/') else relative,
-            'size': size, 'modified': modified, 'category': ra.category(name), 'sensitive': is_sensitive,
+            'size': size, 'modified': modified, 'version': version, 'category': ra.category(name), 'sensitive': is_sensitive,
             'preview': ra.preview_kind(name, is_sensitive), 'source_reason': 'report_folder',
-            'reasons': [{'reason': 'report_folder', 'detail': 'uploaded'}], 'listed': False}
+            'reasons': [{'reason': 'report_folder', 'detail': 'uploaded'}], 'referenced_elsewhere': False, 'listed': False}
 
 
 # --------------------------------------------------------------- artifact delete
 # ``POST /api/report-artifact-delete`` (feat/board-artifact-delete). Same opt-in
 # flag as uploads. Only regular, non-Markdown files that the report's dedicated
-# folder rule lists can be removed, one at a time, and only while their size and
-# modified time still match what the panel showed. Contract:
+# folder rule lists, and that no other finding names as its evidence, can be
+# removed, one at a time, and only while their size, modified time and version
+# (inode + ns mtime) still match what the panel showed. Contract:
 # docs/integrations/artifact-uploads.md ("Delete").
 MAX_DELETE_BODY = 4096
 MARKDOWN = ('.md', '.markdown')
@@ -484,7 +485,10 @@ def delete_refusal(uploads, found, item):
         return 404, 'artifact_not_found_or_unavailable'
     name = relative.rsplit('/', 1)[-1]
     if (relative == found.get('report') or name.lower().endswith(MARKDOWN) or name.startswith('.') or
-            not any(r.get('reason') == 'report_folder' for r in item.get('reasons') or [])):
+            not any(r.get('reason') == 'report_folder' for r in item.get('reasons') or []) or
+            # Another finding names this file (or its folder) as its evidence,
+            # or the ledger cannot be read right now so that is unknown.
+            item.get('referenced_elsewhere') or 'ledger_unreadable' in (found.get('notes') or [])):
         return 409, 'not_deletable'
     return None
 
@@ -529,21 +533,23 @@ def _delete_selector(handler, families):
 
 
 def _expected(raw):
-    """The ``{size, modified}`` body as two non-negative ints, or None."""
+    """The ``{size, modified, version}`` body (the list entry's values), or None."""
     import json
     try:
         body = json.loads(raw)
     except (ValueError, UnicodeError):
         return None
-    if not isinstance(body, dict) or set(body) != {'size', 'modified'}:
+    if not isinstance(body, dict) or set(body) != {'size', 'modified', 'version'}:
         return None
     values = (body['size'], body['modified'])
     if any(type(v) is not int or v < 0 for v in values):
         return None
-    return values
+    if not isinstance(body['version'], str) or not re.fullmatch(r'[0-9]{1,24}-[0-9]{1,24}', body['version']):
+        return None
+    return (*values, body['version'])
 
 
-def remove(uploads, lane_fd, folder, relative, size, modified):
+def remove(uploads, lane_fd, folder, relative, size, modified, version):
     """Unlink ``relative`` (inside ``folder``) if it is still the file the panel saw.
 
     The parent is reached by an ``O_NOFOLLOW`` descriptor walk, the name is
@@ -563,7 +569,8 @@ def remove(uploads, lane_fd, folder, relative, size, modified):
                 info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
             except FileNotFoundError:
                 raise UploadError(404, 'artifact_not_found_or_unavailable') from None
-            if not stat.S_ISREG(info.st_mode) or info.st_size != size or int(info.st_mtime) != modified:
+            if (not stat.S_ISREG(info.st_mode) or info.st_size != size or int(info.st_mtime) != modified or
+                    ra.file_version(info) != version):
                 raise UploadError(409, 'changed')
             try:
                 os.unlink(parts[-1], dir_fd=parent)
