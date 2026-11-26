@@ -1,6 +1,6 @@
 # Report agent, model relay and agent connect (phase 1: backend)
 
-- Branch: `feat/board-report-agent`; base `7493c3c` (the preview-ports branch, reviewed ACCEPT, not yet on beta). Commits: `7580117` (feature), `13eae46` (real-container tests), `33f4d22` (review fixes), plus this dossier.
+- Branch: `feat/board-report-agent`; base `7493c3c` (the preview-ports branch, reviewed ACCEPT, not yet on beta). Commits: `7580117` (feature), `13eae46` (real-container tests), `33f4d22` (review fixes), `f694a66` (dossier); review round r1: `5cd6a58` (`ports: refuse 3129`, cherry-pickable onto the ports branch), `79dc00f` (fixes), plus this dossier update.
 - Owner surfaces: new `terminal_report_agent.py`, `terminal_agent_cli.py`, `terminal_relay.py`, `terminal_connect.py`, `terminal_pty.py`, `agent_prompts/report-agent.md`; small hooks in `terminal_service.py`, `terminal_sandbox.py`, `sandbox/bbterm-forward.py`. Tests: `tests/test_terminal_report_agent.py`, `tests/test_terminal_relay.py`, `tests/test_terminal_connect.py`, `tests/test_terminal_agent_docker.py`, helpers `tests/fake_agent_cli.py`, `tests/fake_model_upstream.py`, `tests/fake_herdr.py`.
 - No `static/`, `app.py`, `terminal_ports.py` or `sandbox/bbterm-ports.py` changes. No Dockerfile change: the forwarder file the images already copy gained a thread.
 - Ryu's request, short: an Agent button on the report that changes the PoC format (curl to Python and back, browser JS, raw HTTP) and updates every place in the report, keeping our report format; then connect to that agent session from the report to talk to it. Settings choose the CLI and model. The report agent runs in the sandbox with a dedicated Claude login made once on Hoster; connecting to an already running agent needs no sandbox.
@@ -21,7 +21,9 @@ browser (Board origin) ── /terminal/* ──> terminal_service.py (127.0.0.1
    │     /report (rw)  /run/bbterm (ro: proxy.sock, ports.sock, model.sock)
    │     /opt/report-agent/claude (ro, host binary)  /opt/report-agent/skills/<name> (ro)
    │     PTY 1: docker exec -it ... bash -l                       (the shell, unchanged)
-   │     PTY 2: docker exec -it -w /report -e ... sh -c WRAPPER report-agent /opt/report-agent/claude [--model M] "Read ... task.md"
+   │     /etc/claude-code (ro, host-generated managed-settings.json: the permission policy)
+   │     PTY 2: docker exec -it -w /report -e ... sh -c WRAPPER report-agent /opt/report-agent/claude [--model M]
+   │            --setting-sources user --strict-mcp-config --mcp-config '{"mcpServers":{}}' -- "Read ... task.md"
    │     bbterm-forward: 127.0.0.1:3128 -> proxy.sock, 127.0.0.1:3129 -> model.sock
    │
    └─ model relay (host): model.sock -> strict HTTP/1.1 -> verified TLS -> https://api.anthropic.com
@@ -81,7 +83,7 @@ Any other `kind` is HTTP 400 `bad_kind`. Client messages are the same for every 
 | --- | --- | --- |
 | `--report-agent` | off | Off: no extra mounts, no `model.sock`, no relay, no 3129 listener in containers, `enabled: false`, POST config/start/stop 409. |
 | `--report-agent-cli ID=PATH` | none | Host binary per CLI id (`claude`, `codex`, `omp`, `opencode`; repeatable, each once). Symlinks are resolved on the host when a sandbox starts (`docker run`) and that file is mounted read-only at `/opt/report-agent/<id>`; only sandbox-ready CLIs (Claude Code) are mounted. A sandbox started while the binary was missing answers `cli_unavailable` until it is reset. |
-| `--report-agent-skill NAME=PATH` | none | Skill folder mounted read-only at `/opt/report-agent/skills/<NAME>` and linked from `~/.claude/skills/<NAME>`. Repeatable. Refused at start and skipped at `docker run` when it is a symlink or not a directory; names `[a-z0-9][a-z0-9-]{0,63}`. |
+| `--report-agent-skill NAME=PATH` | none | Skill folder. The service copies it into `<state-dir>/report-agent/skills/<NAME>-<hash>/` with `allowed-tools`, `hooks`, `mcpServers` and `permissionMode` removed from every `SKILL.md` frontmatter (symlinks inside are skipped, never followed; 64 MiB and 2000 files at most), makes a new copy when the source changes, and mounts the copy read-only at `/opt/report-agent/skills/<NAME>`, linked from `~/.claude/skills/<NAME>`. Repeatable. Refused at start and skipped at `docker run` when it is a symlink or not a directory; names `[a-z0-9][a-z0-9-]{0,63}`. |
 | `--report-agent-token-file PATH` | none | The dedicated login (from `claude setup-token`). Refused at start if inside `--root` (also through symlinked parents) or a symlink. Read on each use (create or rotate it without a restart); not ready when missing, a symlink, not a regular file, owned by another user, readable by group or others, or not a single token. Never logged. |
 | `--agent-connect` | off | Off: `/api/agents/active` answers `enabled: false`, `kind=connect` answers `agent_connect_disabled`. |
 | `--herdr-bin PATH` | `~/.local/bin/herdr` | Herdr CLI. |
@@ -117,16 +119,36 @@ Adding Codex later: one `CliSpec('codex', ..., adapter=CodexAdapter())` with `ar
 - **Report must be inside the mounted folder.** A legacy report mapped to a packet by the ledger (rule `ledger`) lives outside `/report`, so start answers 409 `report_outside_folder`.
 - **Claude Code HOME** (tmpfs, rewritten at every start), keys found by running the real 2.1.331 binary against a fake upstream (Evidence):
   - `~/.claude.json`: `hasCompletedOnboarding`, `lastOnboardingVersion` (from the binary's file name when it is a version), `hasSeenAutoDefaultNudge` (otherwise an "auto mode default" dialog appears), `theme`, `autoUpdates: false`, `officialMarketplaceAutoInstallAttempted: true` with fail reason `policy_blocked` (otherwise it fetches the plugin marketplace from downloads.claude.ai), `projects["/report"]`: `hasTrustDialogAccepted`, `hasCompletedProjectOnboarding`.
-  - `~/.claude/settings.json`: `permissions.defaultMode: "acceptEdits"`, `additionalDirectories: ["/home/sandbox/.report-agent"]`, `allow` only `Read(//home/sandbox/.report-agent/**)`, `Bash(python3 -m py_compile:*)`, `Bash(python3 poc.py --help)`, `Bash(python3 ./poc.py --help)`, `Bash(node --check:*)`, `Bash(bash -n:*)`, `Bash(sh -n:*)`; `disableAutoMode: "disable"` and `disableBypassPermissionsMode: "disable"` (so nothing approves itself); `env` with `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL`, `DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING` (also set in the process env).
-  - Everything else asks in the Agent tab (verified: an unlisted `curl` shows "This command requires approval" with Yes / Yes and don't ask again / No; no auto-mode option).
+  - `~/.claude/settings.json`: only `env` with `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL`, `DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING` (also set in the process env and in the managed file). HOME is writable from the sandbox, so no permission rule lives there (review r1).
+  - The permission policy is the managed settings file below.
+
+### Permission policy: managed settings (review r1 R1, R4)
+
+The policy must hold whatever the agent writes, whatever a mounted or planted skill declares, and whatever settings files exist in `/report` or HOME. HOME and `/report` are writable from the sandbox, so the policy lives in a file the sandbox cannot write:
+
+- **Where.** The service writes `<state-dir>/report-agent/managed/managed-settings.json` at start (atomic replace, 0644, the folder holds nothing else) and mounts that folder read-only at `/etc/claude-code`, where Claude Code reads managed (enterprise) settings on Linux (`/etc/claude-code`, found in the 2.1.331 binary). A file owned by the host user on a read-only bind counts as managed: the prompt then says "Rule Bash from enterprise managed settings says to ask".
+- **What** (`ClaudeAdapter.managed_settings`):
+  - `permissions.ask`: `Bash`, `WebFetch`, `WebSearch`, `mcp__*` (ask wins over any allow, at every level);
+  - `permissions.allow`: only `Read(//home/sandbox/.report-agent/**)` (the task file). No Bash rule at all: the old `python3 poc.py --help` allow ran code the agent wrote, and the syntax-check allows are overruled by the ask rule anyway;
+  - `permissions.defaultMode: "acceptEdits"`, `additionalDirectories: ["/home/sandbox/.report-agent"]`, `disableAutoMode: "disable"`, `disableBypassPermissionsMode: "disable"`;
+  - managed-only switches: `allowManagedPermissionRulesOnly: true` (permission rules from user, project, local and `--settings` sources, `--allowedTools`, and the `allowed-tools` frontmatter of user and project skills are ignored), `allowManagedHooksOnly: true` and `disableAllHooks: true`, `allowManagedMcpServersOnly: true` with `allowedMcpServers: []`, `enableAllProjectMcpServers: false`, `disableSkillShellExecution: true`;
+  - the same `env` switches.
+- **Flags.** `--setting-sources user` (project and local settings and project skills under `/report` are not loaded), `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` (no MCP server from anywhere), then `--` before the prompt (`--mcp-config` takes several values).
+- **Skills, defense in depth.** The mounted skills are stripped copies (see `--report-agent-skill`), so `allowed-tools` is gone even if a later Claude Code version stopped honouring `allowManagedPermissionRulesOnly`.
+- **Verified with the real binary** (Claude Code 2.1.331 in the sandbox chain, fake upstream scripted to return tool calls, `test_terminal_agent_docker.test_07`): the Agent PTY shows the Bash permission prompt citing the managed rule, and the marker file the command would create does not exist, in each case:
+  1. a skill declaring `allowed-tools: [Bash, WebFetch]` is loaded (Skill tool), then Bash;
+  2. the agent Reads and Writes `~/.claude/settings.json` with `allow: ["Bash"]` and a PreToolUse hook (the write lands: the file then contains `"Bash"`), then Bash; the hook never runs;
+  3. `/report/.claude/settings.json` (`allow: ["Bash"]`, `defaultMode: "bypassPermissions"`, a hook), `/report/.mcp.json` (a server that would create a marker) and a planted `/report/.claude/skills/planted` exist before start; the planted skill is "Unknown skill", no MCP dialog, no MCP marker, no hook marker, then Bash asks.
+  On `f694a66` the same test fails at case 1: `r1-skill-marker` was created without a prompt (R4 is real).
+- **Exploration that led here** (offline, `docker run --network none python:3.12-slim`, real binary, fake upstream): without managed settings a skill's `allowed-tools: [Bash]` let Bash run with no prompt; project `.mcp.json` alone showed a "New MCP server found" dialog (not a guarantee); with the managed file every Bash call asked; `--mcp-config` swallowed the prompt until `--` was added.
 - **Skills.** Docker creates a bind target's missing parents owned by root inside the tmpfs HOME, which made `~/.claude` unwritable for Claude Code (seen in a test container). So skills are mounted at `/opt/report-agent/skills/<name>` and `~/.claude/skills/<name>` are symlinks to them; Claude Code follows them (a marker skill's description appeared in the model request).
-- **Stop.** HUP, then TERM, then KILL to the agent inside the container (pid file written by the fixed wrapper, digits only), 3 s apart, then the `docker exec` client's own process group. Killing only the client would leave the CLI running in the container (tested: the in-container process is gone after stop).
+- **Stop.** The agent's in-container pid is read once right after start (the fixed wrapper writes it; the start archive empties the file first so an old pid is never read) and kept on the host. Stop sends HUP, then TERM, then KILL to that process group and pid inside the container while it is alive (checked with `kill -0`), 3 s apart, then stops the `docker exec` client's own process group. This also works when the client is already gone and the agent reads as `exited` (tested with a CLI that ignores SIGHUP: on `f694a66` it kept running after stop).
 
 ### Lifecycle
 
 - Agent tab viewers count as viewers: a sandbox with only an Agent tab open is never paused or removed, and `left_at` starts when the last viewer of either PTY leaves.
 - No pause while the agent printed output in the last 120 s. Once it is quiet (waiting for Ryu), the normal rule applies: pause `--pause-after` after the last viewer left. Attaching the Agent tab or the shell unpauses and continues the same process (tested with the same in-container pid).
-- Removal after 4 h without a viewer ends the agent with the container (it does not keep a sandbox alive on its own). Reset sandbox ends it (new container, no agent). Service stop ends it.
+- Removal after 4 h without a viewer ends the agent with the container, but never while the agent printed output in the last 120 s (review r1 R3): a working agent is not killed mid-edit; once it is quiet, removal applies. Reset sandbox ends it (new container, no agent). Service stop ends it.
 - Memory: 2 GiB at start (memory and swap limit), after the `--min-free-memory` check. It stays 2 GiB until the container is removed or reset.
 - Capacity eviction (`--max-sessions`) never picks a sandbox whose agent printed output in the last 120 s.
 - `model.sock` exists for every sandbox while `--report-agent` is on, but the relay answers 403 `agent_not_running` unless that sandbox's agent is starting or running.
@@ -140,7 +162,7 @@ Adding Codex later: one `CliSpec('codex', ..., adapter=CodexAdapter())` with `ar
 - Forwarded headers: only `content-type`, `content-length`, `accept`, `user-agent`, `x-app`, `anthropic-*` (except the incoming `anthropic-beta`, which is rebuilt), `x-stainless-*`, `x-claude-code-*`. Never `Authorization`, `x-api-key`, `Cookie`, `Host`, `Proxy-*` or hop-by-hop headers. Added: `Authorization: Bearer <token>`, `anthropic-beta` = the incoming list plus `oauth-2025-04-20` if missing, `Accept-Encoding: identity` (so SSE streams), `Connection: close`, `Host: api.anthropic.com`.
 - Upstream: `https://api.anthropic.com:443`, `ssl.create_default_context()` (certificate and host name verified). Tests override host, port and CA through constructor arguments only; no flag or route reaches them.
 - Response: status line and headers passed with `Connection`/`Keep-Alive`/`Set-Cookie`/`Alt-Svc` dropped and `Connection: close` added; the body is copied as it arrives (each SSE event goes out at once).
-- Caps: 8 requests in flight per sandbox, 24 in total (503 `busy`, after reading what the client sent so it gets the answer); 600 s idle on each side (Claude Code's own timeout); 1 h per request; 30 s TCP connect.
+- Caps: 8 requests in flight per sandbox, 24 in total (503 `busy`, after reading what the client sent so it gets the answer); 600 s idle on each side (Claude Code's own timeout); 1 h per request, enforced before every read on both sides (each read's timeout is the idle limit or what is left of the hour, whichever is shorter; review r1 R2): a spent budget answers 504 before the response starts, or ends the connection after; 30 s TCP connect.
 - Errors are short JSON (`relay_error` with a code: `not_allowed`, `agent_not_running`, `login_missing`, `upstream_unreachable`, `upstream_tls_failed`, ...). Nothing about a request (path, headers, body) and never the token is logged.
 
 ### Agent connect (D)
@@ -153,10 +175,10 @@ Adding Codex later: one `CliSpec('codex', ..., adapter=CodexAdapter())` with `ar
 ## Threat model
 
 Report agent (B) and relay (C):
-- **Unchanged isolation.** The container keeps `--network none`, read-only root, cap-drop ALL, no-new-privileges, host UID, limits (memory raised to 2 GiB while an agent runs), the egress filter and the mount identity checks. With `--report-agent` the mounts are exactly: `/report` (rw), `/run/bbterm` (ro), `/opt/report-agent/claude` (ro, the resolved host binary) and `/opt/report-agent/skills/<name>` (ro, one per configured skill). Tested in `test_terminal_agent_docker.test_01`. Without the flag they stay exactly the first two.
+- **Unchanged isolation.** The container keeps `--network none`, read-only root, cap-drop ALL, no-new-privileges, host UID, limits (memory raised to 2 GiB while an agent runs), the egress filter and the mount identity checks. With `--report-agent` the mounts are exactly: `/report` (rw), `/run/bbterm` (ro), `/opt/report-agent/claude` (ro, the resolved host binary), `/etc/claude-code` (ro, the generated managed settings) and `/opt/report-agent/skills/<name>` (ro, a stripped copy per configured skill). Tested in `test_terminal_agent_docker.test_01`. Without the flag they stay exactly the first two.
 - **The login never enters the container.** It lives in a 0600 file outside the data root, is read by the host relay per request and only written into the upstream TLS request. The container holds a fixed dummy. Tested with the real container: the environ and cmdline of every process, everything under HOME, /tmp, /report, /run/bbterm, /opt/report-agent and /etc, `docker exec env`, `docker top` and `docker inspect` contain no part of the token (the same scan does find the dummy, so it sees the agent's env).
 - **What the sandbox gains.** Any process in the sandbox can use the relay while the report's agent runs: it can spend the login's quota and choose the prompts (the model API only, two paths, no other host or path). It cannot read the login, reach another host through the relay, or use it when no agent runs.
-- **Prompt injection.** Report text, evidence and target responses are controlled by the target and can steer the agent. That stays inside the existing terminal model: the agent can change or delete files in that one folder and reach public internet addresses through the filter proxy, like any command in the terminal. The template tells it to treat that text as data; the permission settings make every tool call beyond reading, editing and the offline checks ask Ryu; auto mode and bypass mode are disabled. Edits to files in the folder do not ask (acceptEdits): the Board keeps report history, other files in the folder do not have it (see the terminal's threat model).
+- **Prompt injection.** Report text, evidence and target responses are controlled by the target and can steer the agent. That stays inside the existing terminal model: the agent can change or delete files in that one folder and reach public internet addresses through the filter proxy, like any command in the terminal. The template tells it to treat that text as data. Every Bash, WebFetch, WebSearch and MCP call asks Ryu, enforced by managed settings the sandbox cannot write, whatever the agent writes into HOME or `/report`, whatever a skill declares (review r1); auto mode, bypass mode, hooks and MCP servers are off. Edits to files in the folder do not ask (acceptEdits): the Board keeps report history, other files in the folder do not have it (see the terminal's threat model).
 - **Quota and cost.** The relay has concurrency caps but no token budget: a runaway agent or a malicious process in the sandbox can use the login's quota while the agent runs. Stop the agent to cut it off.
 - **Task text** is validated (size, unsafe characters) and reaches the container only as a file through stdin; never argv, never a shell string.
 
@@ -172,10 +194,10 @@ Agent connect (D):
 3. A pause is held while the agent printed output in the last 120 s, and only then; quiet agents follow the normal pause rule from when the last viewer left (the brief's "once it is waiting for input, normal pause and resume apply").
 4. Skills are mounted under `/opt/report-agent/skills/` and linked from `~/.claude/skills/` instead of mounted there directly (Docker made `~/.claude` root-owned, see Design).
 5. `model.sock` exists for every sandbox while the flag is on (mounts and sockets are fixed at `docker run`), but the relay serves a sandbox only while its agent is starting or running.
-6. Auto mode and bypass-permissions mode are disabled in the agent's settings, so only Ryu approves tool calls beyond the offline checks.
-7. The allow list is limited to syntax checks and `poc.py --help`; reading the report folder and editing files need no rule (acceptEdits). `--help` runs the PoC's top-level code; a PoC that makes requests at import would send them. The template asks for PoCs that do nothing before argument parsing.
+6. (Changed in review r1) The permission policy is a managed settings file the sandbox cannot write; auto mode, bypass mode, hooks and MCP servers are off there.
+7. (Changed in review r1) No Bash command is pre-approved, not even syntax checks: every Bash call asks. Reading the task file is the only allow rule; reading and editing the report folder need no rule (acceptEdits).
 8. A legacy report outside its packet folder is refused (`report_outside_folder`) instead of mounting more.
-9. Stop signals the in-container process through a pid file written by the fixed wrapper (digits only); a forged pid file can only make stop signal another process in that same sandbox.
+9. (Changed in review r1) Stop signals the in-container pid recorded right after start (written by the fixed wrapper, digits only); a forged file at that moment could only make stop signal another process in that same sandbox.
 10. The relay refuses `Transfer-Encoding` and pipelined bytes: Claude Code sends a single request with `Content-Length` (captured), so there is no reason to support more.
 11. The relay rebuilds `anthropic-beta` (keeps the incoming list, adds the OAuth beta) and drops unknown headers instead of passing everything except credentials.
 12. The memory limit stays at 2 GiB after the agent exits (lowering it could fail while the cgroup holds more); removal or reset brings a fresh 1 GiB container.
@@ -183,6 +205,8 @@ Agent connect (D):
 14. When a Herdr attach ends on its own, its viewers stay connected to read the exit note; their next keystroke closes the socket.
 15. Capacity eviction never picks a sandbox whose agent printed output in the last 120 s (review R9), like it never picks one with a viewer. If every slot is held that way, opening another report says all sandboxes are busy.
 16. Stop and reset cancel the agent's in-flight model requests (review R6).
+17. Idle removal, like pause and eviction, never takes a sandbox whose agent printed output in the last 120 s (review r1 R3). An agent that keeps printing for hours keeps its sandbox; Stop or Reset ends it.
+18. Skills are copied with permission-widening frontmatter removed even though the managed rules already win (defense in depth, review r1 R4).
 
 ## Evidence
 
@@ -241,12 +265,50 @@ A separate reviewer read the diff (no Docker, no real binaries) and found no blo
 | R8 | Stop signalled only the CLI's pid, not commands it started. | The in-container signal goes to the CLI's process group, then the pid. | `test_terminal_agent_docker.test_04` (a `sleep 300` the CLI started is gone after stop) OK -> OK: the kernel already hangs up the terminal's foreground group when the CLI exits; the group signal covers children that survive that. |
 | R9 | Eviction for capacity could pick a viewerless sandbox whose agent was working. | A sandbox whose agent printed output in the last 120 s is never evicted. | `test_review_r9_eviction_skips_a_working_agent` FAIL -> OK |
 
+### Review round r1 (f694a66, BLOCK) and fixes (5cd6a58, 79dc00f)
+
+Red/green: for each regression test only the named source files were replaced with their `f694a66` version (`git show f694a66:<file> > <file>`), the test was run, and the files were restored. The reviewer's repros (`repros/r1/test_r1_*.py`, `test_r2_*`, `test_r3_*`) became `tests/test_review_r1_permission_settings.py`, `tests/test_review_r2_relay_lifetime.py` and `tests/test_review_r3_removal_working_agent.py` (repo path, real assertions for the new design).
+
+| # | Finding | Fix | Regression test | Source swapped | On f694a66 | Now |
+| --- | --- | --- | --- | --- | --- | --- |
+| R1 (blocker) | The gate rested on files the sandbox can change (HOME and `/report` settings, `.mcp.json`, hooks), and `Bash(python3 poc.py --help)` ran agent-written code. | Managed settings at `/etc/claude-code` (read-only, host-generated) with ask rules and managed-only switches; `--setting-sources user`, `--strict-mcp-config` with an empty config; no Bash allow rules. | `test_review_r1_permission_settings` (7 tests: policy, flags, mount, no HOME policy) | `terminal_agent_cli.py`, `terminal_report_agent.py` | FAILED (2 failures, 4 errors) | 7 OK |
+| R1 + R4, real binary | (R4, Hermes) a mounted skill's `allowed-tools` pre-approves Bash and WebFetch; a planted skill could too. | The managed rules above, plus stripped read-only skill copies. | `test_terminal_agent_docker.test_07` (opt-in `BBTERM_CLAUDE_BIN`): three cases, prompt shown, no marker | same two files | FAIL: "no Bash permission prompt; markers created without asking: ['r1-skill-marker']" | OK (all three cases) |
+| R4, copies | Skill frontmatter widening permissions. | `strip_frontmatter`, `copy_skill`, regenerated on change, symlinks refused or skipped. | in `test_review_r1_permission_settings` (`HostFilesTests`, `StripTests`) | as R1 | (in the R1 count) | OK |
+| R2 (minor) | Lifetime checked only between reads; the response head loop never checked it. | `_budget` before every upstream read (head and body) and the client socket timeout capped too. | `test_review_r2_relay_lifetime` | `terminal_relay.py` | FAIL (the request lived 8 s with a 1 s lifetime) | OK (about 1.1 s) |
+| R3 (should-fix) | Idle removal killed a working agent. | Removal skips a sandbox whose agent printed in the last 120 s. | `test_review_r3_removal_working_agent` | `terminal_sandbox.py` | FAIL ("a working agent was removed as idle") | OK |
+| Stop, client gone | Stop skipped the in-container signal when the `docker exec` client had died. | Pid recorded at start; stop signals it while `kill -0` says it is alive. | `test_terminal_agent_docker.test_04b` (a CLI that ignores SIGHUP, client SIGKILLed) | `terminal_report_agent.py` | FAIL (`0 == 0`: still alive after stop) | OK |
+| Token scan, real binary | The scan ran only after the fake CLI. | `assert_token_absent` after `test_06` and inside `test_07`, with Claude Code running. | `test_06`, `test_07` | n/a | n/a (new checks) | OK |
+| 3129 as a preview port | Only the untrusted in-container helper excluded it. | `terminal_ports.py`: refused host side like 3128 (commit `5cd6a58`, `ports: refuse 3129`). | `test_terminal_ports.ForwardTests.test_model_relay_port_never_forwarded` | `terminal_ports.py` | FAIL ("expected 1 ports, got []") | OK |
+| Template | Stale `poc.py`, readiness label, runtime credential. | Ask before deleting an unreferenced `poc.py`; "YELLOW / not ready" in the chat only, never in the report; Cookie, or Bearer token or API key, at runtime. | `TaskTests.test_prompt_is_rendered_in_one_pass` (rule text present) | n/a | n/a | OK |
+
+Final runs on `79dc00f` (`TMPDIR=/tmp/bbagent`, `-W error::ResourceWarning`):
+
+| Module | Result |
+| --- | --- |
+| `test_terminal_service` | 29 OK |
+| `test_terminal_sandbox` | 47 OK |
+| `test_terminal_proxy` | 36 OK |
+| `test_terminal_ws` | 38 OK |
+| `test_terminal_ports` | 45 OK |
+| `test_terminal_relay` | 18 OK |
+| `test_terminal_report_agent` | 28 OK |
+| `test_terminal_connect` | 11 OK |
+| `test_review_r1_permission_settings` | 7 OK |
+| `test_review_r2_relay_lifetime` | 1 OK |
+| `test_review_r3_removal_working_agent` | 1 OK |
+| `test_terminal_docker` (`BBTERM_TEST_IMAGE=bbterm-test-image-agent:latest BBTERM_DOCKER_TESTS=1`) | 13 OK |
+| `test_terminal_agent_docker` (`BBTERM_CLAUDE_BIN=~/.local/bin/claude BBTERM_DOCKER_TESTS=1`) | 8 OK (without `BBTERM_CLAUDE_BIN`: 6 OK, 2 skipped) |
+
+No `bbterm-test-*` container remained after any run.
+
 ## Gaps
 
 - No UI (phase 2). No screenshots.
 - Only Claude Code is sandbox-ready. Codex, OMP and OpenCode are listed with `needs_sandbox_login`.
 - The production image was not rebuilt here (no network); tests use `sandbox/Dockerfile.test` built as `bbterm-test-image-agent:latest`. The forwarder change needs an image rebuild on Hoster; an old image has no 3129 listener, so the agent's model calls fail (connection refused) until the rebuild.
-- The host-side preview-ports filter only excludes 3128. 3129 is excluded by the in-container ports helper, which is untrusted; a process in the sandbox could re-serve the relay on another port and expose it as a preview (on 127.0.0.1, or the tailnet when that setting is on). It can already spend the quota from inside, so this widens who can, while the agent runs. A host-side exclusion of 3129 belongs in `terminal_ports.py` (sibling branch).
+- Port 3129 is now refused host side (`5cd6a58`, `ports: refuse 3129`, to cherry-pick onto the ports branch). A process in the sandbox could still run its own forwarder from another port to `model.sock` and expose that port as a preview while the agent runs (it can already spend the quota from inside; with the Tailscale setting on, tailnet peers could too).
+- Edits in `/report` do not ask (acceptEdits), including `/report/.claude/` files; they are ignored by `--setting-sources user`, but they stay in the packet folder (and sync) for other tools.
+- The managed settings path and switches were verified on Claude Code 2.1.331 only. A future version that renames them would fall back to asking per its defaults, with the stripped skills still in place; `test_07` is the check to run after an upgrade.
 - No token budget or per-day cap on the relay (concurrency only).
 - The task file stays in the sandbox's tmpfs HOME until the container is removed or reset.
 - Claude Code may change its first-run keys in a later version; an unexpected dialog would show in the Agent tab (Ryu can answer it there). `lastOnboardingVersion` is taken from the binary's file name.
@@ -282,15 +344,15 @@ Do these as the Board's user. Nothing here was done by this branch.
 5. Verify:
    - `GET /terminal/api/agent/config` shows `enabled: true`, `claude` `available: true`, `login.ready: true`.
    - Start an agent on a packet report (`POST /terminal/api/agent/start` from the Board origin, or the phase 2 button), attach `kind=agent`: Claude Code starts in `/report` with no dialog and reads the task.
-   - `docker inspect bbterm-<id>`: four kinds of mounts only (`/report` rw, `/run/bbterm` ro, `/opt/report-agent/claude` ro, skills ro), `Memory` 2147483648 after the start.
+   - `docker inspect bbterm-<id>`: five kinds of mounts only (`/report` rw, `/run/bbterm` ro, `/opt/report-agent/claude` ro, `/etc/claude-code` ro, skills ro), `Memory` 2147483648 after the start.
    - The login is not in the container: `docker exec bbterm-<id> sh -c 'cat /proc/[0-9]*/environ' | tr '\0' '\n' | grep -c "$(head -c 24 ~/.config/bounty-board/report-agent.token)"` prints 0, and so does `docker inspect bbterm-<id> | grep -c "$(head -c 24 ~/.config/bounty-board/report-agent.token)"` (both greps run on the host).
-   - The agent asks before any `curl`; offline checks run without asking.
+   - The agent asks before every shell command (offline checks included) and before any web fetch; the prompt says "Rule Bash from enterprise managed settings says to ask". After upgrading Claude Code on Hoster, rerun `test_terminal_agent_docker.test_07` with `BBTERM_CLAUDE_BIN`.
    - With connect on: `GET /terminal/api/agents/active?all=1` lists the Herdr agents; attaching one shows its TUI; closing the tab ends only the attach client (the agent keeps running in Herdr).
 
 ## Decisions for Ryu
 
 1. Any process in a report's sandbox can use the relay (spend the login's quota) while that report's agent runs, but never read the login. OK, or should the relay also require a per-agent secret that only the CLI process holds (it would still be readable by processes of the same user in the container)?
-2. Auto mode and bypass mode are disabled for the report agent, so every tool call beyond edits and offline checks asks you in the Agent tab. Keep?
+2. Every Bash, WebFetch, WebSearch and MCP call asks you in the Agent tab, including syntax checks (review r1). That is more prompts per PoC change. Keep, or allow a few read-only checks (they would have to be managed rules, and ask rules win over allow rules, so it needs a narrower ask list)?
 3. The agent edits files in the folder without asking (acceptEdits), as you asked for "update it then see it immediately". Report Markdown has history; `poc.py` and other files do not. Keep, or ask before every edit?
 4. Agent connect gives anyone who can sign in to the terminal control of every Herdr agent in the session, including ones working outside the data root (`all=1`). Should `all=1` be dropped so only agents under the report's program or lane are offered?
 5. No token budget on the relay. Want a daily request cap?
