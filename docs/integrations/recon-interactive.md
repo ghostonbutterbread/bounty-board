@@ -129,6 +129,14 @@ The URL browser follows the scope design in `docs/integrations/scope-check.md`:
   - The dashboard card row stays one link and shows in-scope counts.
 
   `recon-intel.css` and `BACKEND_API.md` keep both sides. The auto-merged `recon_intel.py` and `app.py` were reviewed: scope jobs (`('scope', program, 0)`) share the worker queue with the debounced mark refresh without key clashes.
+- **Suite results after the merge (2026-11-25, 394f455, load average 4 to 12):**
+  - `python3 -m unittest tests.test_scope_check tests.test_recon_urls tests.test_recon_intel tests.test_ledger_actions`: 106 OK. The first run had 1 failure, my own: an exact item key set without the new `scope` key. Fixed in 394f455.
+  - The recon (scope coverage is in `recon-intel.synthetic`), finding-actions, ledger-actions, recent-actions, report-links-recent and dashboard-coverage browser and node files: 54/54.
+  - `python3 tests/safe_suite.py`: 639 tests OK, 13 skipped.
+  - `npm test -- --test-concurrency=1`: 223 tests, 220 pass. The three failures were timeouts in files outside the URL browser:
+    - finding-actions "delete archives…": 13/13 alone.
+    - sandbox-terminal drawer: 8/8 alone.
+    - ui-redesign "multi-select filters…": failed once more alone, then passed alone. It is the known flake that the scope-check dossier and review 10 also saw on beta.
 - **Tests:**
   - `ScopeUrlTests` (3): a request with the worker not started queues the job and makes no BBH call; one call from the worker, then cache hits; items, history and the mark response carry scope; out-of-scope and failed-check URLs can still be marked.
   - The node `scope` helper test.
