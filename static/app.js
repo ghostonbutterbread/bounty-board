@@ -56,6 +56,7 @@
     if(!target || typeof target!=='object' || target.view==='dashboard')return '#/dashboard';
     if(target.view==='recent')return recentRoute(target.query);
     if(target.view==='recon')return reconRoute(target.query);
+    if(target.view==='settings')return '#/settings';
     const program=target.program==null ? state.program : String(target.program);
     if(!program)return '#/programs';
     const lane=target.lane!=null ? String(target.lane) : program===state.program ? state.lane : String((list(programs().find(p=>String(p.id)===program)?.lanes)||[])[0]?.name ?? '');
@@ -454,7 +455,7 @@
   // the Recent filters without a render, so they are also refreshed just before
   // the pointer or keyboard can use them (hover status, middle-click, menu).
   function syncNavLinks() {
-    document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('href',b.dataset.view==='recent' ? recentRoute(state.recentQuery) : b.dataset.view==='recon' ? reconRoute(state.reconQuery) : b.dataset.view==='program' ? programRoute() : '#/dashboard'));
+    document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('href',b.dataset.view==='recent' ? recentRoute(state.recentQuery) : b.dataset.view==='recon' ? reconRoute(state.reconQuery) : b.dataset.view==='program' ? programRoute() : b.dataset.view==='settings' ? '#/settings' : '#/dashboard'));
   }
   for(const type of ['pointerover','pointerdown','focusin','contextmenu'])document.querySelector('.sidebar .nav')?.addEventListener(type,syncNavLinks,true);
   document.querySelectorAll('[data-view]').forEach(link => link.addEventListener('click', event => {if(!plainClick(event))return;event.preventDefault();state.view=link.dataset.view;state.routeNotice='';routePush=true;render();}));
@@ -1728,7 +1729,7 @@
   function pageTitle() {
     if(state.loading)return 'Bounty Board';
     if(state.error)return 'Workspace unavailable · Bounty Board';
-    const views={dashboard:'Dashboard',recent:'Recent reports',recon:'Recon intel'};
+    const views={dashboard:'Dashboard',recent:'Recent reports',recon:'Recon intel',settings:'Settings'};
     if(views[state.view])return `${views[state.view]} · Bounty Board`;
     const program=currentProgram();if(!program)return 'Programs · Bounty Board';
     const report=state.section==='reports' && state.report ? reportById(state.report) : null;
@@ -1753,12 +1754,12 @@
     portfolioButton.disabled=!!state.data?._portfolioLoading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     syncNavLinks();
-    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':state.view==='recon'?'Recon intel':'Programs';
+    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':state.view==='recon'?'Recon intel':state.view==='settings'?'Settings':'Programs';
     const trail=document.querySelector('#breadcrumb-trail'), crumbProgram=state.view==='program' && !state.loading ? currentProgram() : null;
     if(trail)trail.innerHTML=crumbProgram ? [programLabel(crumbProgram),state.lane,(sections.find(([k])=>k===state.section)||[])[1]].filter(Boolean).map(part=>`<span class="sep" aria-hidden="true">/</span> <span class="crumb-current">${esc(part)}</span>`).join(' ') : '';
     if(state.loading) app.innerHTML=skeleton();
     else if(state.error) app.innerHTML=`<div class="panel empty error-state" role="alert">${icon('exclamation-circle')}<h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
-    else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():state.view==='recon'?reconView():workspace();
+    else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():state.view==='recon'?reconView():state.view==='settings'?settingsView():workspace();
     document.title=pageTitle();
     for(const old of keptHosts){const fresh=app.querySelector(`#${old.id}`);if(fresh && ['family','program','lane','path','reportId'].every(k=>fresh.dataset[k]===old.dataset[k]))fresh.replaceWith(old);}
     const reportList=app.querySelector('.report-links');if(reportList && reportListScroll)reportList.scrollTop=reportListScroll;
@@ -1838,6 +1839,10 @@
   // Incoming links may also use #/programs/<program>/<lane>/findings/<finding id>.
   // #/recent?<query>: the Recent view's filters (recent-reports.js owns the
   // keys and validation; the app only stores and round-trips the string).
+  // Settings view: the page frame only; static/modules/settings.js fills #settings-host.
+  function settingsView() {
+    return `${title('Settings','Preferences for how the Board works for you.')}<div id="settings-host" class="settings-page"><div class="panel state">Loading settings…</div></div>`;
+  }
   function recentRoute(query) { return `#/recent${query ? '?'+String(query) : ''}`; }
   function reconRoute(query) { return `#/recon${query ? '?'+String(query) : ''}`; }
   function programRoute() {
@@ -1847,6 +1852,7 @@
   function routeFor() {
     if(state.view==='recent')return recentRoute(state.recentQuery);
     if(state.view==='recon')return reconRoute(state.reconQuery);
+    if(state.view==='settings')return '#/settings';
     if(state.view!=='program')return '#/dashboard';
     return programRoute();
   }
@@ -1858,6 +1864,7 @@
     const path=raw.startsWith('programs/') && mark>=0 ? raw.slice(0,mark) : raw, query=path===raw ? '' : raw.slice(mark+1);
     const parts=path.split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
     if(parts[0]==='dashboard')return {view:'dashboard'};
+    if(parts[0]==='settings')return {view:'settings'};
     if(parts[0]==='programs'){
       const section=sections.some(([k])=>k===parts[3])?parts[3]:'findings', rest=parts.slice(4).join('/');
       return {view:'program',program:parts[1]||'',lane:parts[2]||'',section,report:section==='reports'?rest:'',...(section==='findings' && rest ? {highlight:rest} : {}),...(section==='scope' ? {scopeQuery:query} : {})};
