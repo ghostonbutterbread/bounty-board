@@ -158,7 +158,8 @@ class UrlListTests(Base):
         self.assertEqual(len(seen), 98)
         self.assertEqual(pages, 6)
         item = self.urls(limit=1)[1]['items'][0]
-        self.assertEqual(set(item), {'id', 'url', 'host', 'path', 'params', 'first_seen', 'last_seen', 'lanes', 'tests', 'last_test', 'unsafe_chars'})
+        self.assertEqual(set(item), {'id', 'url', 'host', 'path', 'params', 'first_seen', 'last_seen', 'lanes', 'tests', 'last_test', 'unsafe_chars', 'scope'})
+        self.assertEqual(item['scope']['reason'], 'no scope on file')  # no <root>/scopes/acme-demo: open scope
 
     def test_newest_first_by_default_and_both_directions_cover_every_url_once(self):
         first = self.urls(limit=5)[1]
