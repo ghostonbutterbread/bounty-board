@@ -15,22 +15,23 @@
 - **Toggle shortcut**: Ctrl+E (configurable) and the fixed Ctrl+` toggle the drawer for the current report from anywhere in the Board, including inside the terminal and the report editor. Opening focuses the terminal; closing returns focus to the element focused before opening (if it still exists), else the editor. With no terminal for the report (dashboard, Settings, a disabled Terminal button) nothing happens. Whenever the Board has a terminal the keys are kept from the browser (`preventDefault`), so Firefox does not focus its search bar. When the primary shortcut is not Ctrl+E, Ctrl+E reaches the shell again (bash end of line; tested).
 - Every tooltip names the current shortcut: "Sandbox terminal (Ctrl+E)" on the Terminal button, "Close terminal (Ctrl+E)" on the close button.
 - **Docking**: bottom (default, as before), top, left, right, plus maximize (fills the content column; the sidebar stays) that restores the previous dock. Side docks are full-height columns beside the content; top and bottom are full-width rows of the content column. Phones (700 px and below) always get the bottom sheet and the picker hides.
-- **Dock picker** in the drawer header: four dock icons and a maximize/restore icon, each a button with a tooltip, keyboard reachable, `aria-pressed` on the current one. It saves the choice.
+- **Dock picker** in the drawer header: four dock icons and a maximize/restore icon, each a button with a tooltip, keyboard reachable, `aria-pressed` on the current one. It changes the current dock of this tab (see Drag to dock).
 - **Resize** on the inner edge (drag or arrow keys; the key pointing away from the docked edge grows it). Height (top/bottom) and width (left/right) are remembered separately. Clamp: at least 160 px; top and bottom leave about 320 px of window height (phones keep the tall sheet, 96 px free as before); side docks leave at least 560 px of content. When the window cannot fit 560 px of content beside a 320 px drawer (for example 1024 px wide with the sidebar open) a side dock falls back to the bottom dock, and the left and right picker buttons say "(needs a wider window; using the bottom dock)"; the stored choice comes back on a wider window. The side width defaults to min(520 px, 40% of the content column) until the user resizes it. The drag follows the pointer from where the handle was grabbed, so grabbing it never jumps.
-- **Settings page** at `#/settings`, from a "Settings" sidebar link (gear icon, real `<a href="#/settings">`, above the sidebar footer; on phones it shows in the top bar). Tab title "Settings · Bounty Board". The Terminal card ("Saved in this browser.") has: Copy on select, Ctrl+C copies a selection, Ctrl+V pastes (switches), Toggle shortcut (press-a-key recorder plus "Reset to Ctrl+E"), Default dock (Bottom/Top/Left/Right). Without `capabilities.terminal_url` the card shows only "The sandbox terminal is not enabled on this Board." Changes apply live to an open drawer in other tabs (`storage` event) and to the drawer in the same tab the next time it shows (the drawer is hidden while Settings is open).
+- **Settings page** at `#/settings`, from a "Settings" sidebar link (gear icon, real `<a href="#/settings">`, above the sidebar footer; on phones it shows in the top bar). Tab title "Settings · Bounty Board". The Terminal card ("Saved in this browser.") has: Copy on select, Ctrl+C copies a selection, Ctrl+V pastes (switches), Toggle shortcut (press-a-key recorder plus "Reset to Ctrl+E"), Default dock position (Bottom/Top/Left/Right; "Where the terminal opens. Drag the terminal by its header to move it."). Without `capabilities.terminal_url` the card shows only "The sandbox terminal is not enabled on this Board." Switch and shortcut changes apply live to an open drawer in other tabs (`storage` event) and to the drawer in the same tab the next time it shows (the drawer is hidden while Settings is open). The default dock never moves an open drawer in another tab; see Drag to dock.
 
 ## Design
 
 ### Preferences (`localStorage` `bounty-board-terminal:v1`)
 
 ```json
-{"open": false, "height": 320, "width": null, "dock": "bottom", "maximized": false,
+{"open": false, "height": 320, "width": null, "dock": "bottom",
  "copyOnSelect": true, "ctrlCCopy": true, "ctrlVPaste": true,
  "shortcut": {"ctrl": true, "alt": false, "shift": false, "code": "KeyE"}}
 ```
 
 - `open` and `height` keep their meaning, so old values load unchanged. Every field is validated on read; a corrupt or unknown value falls back to its default (tested with `{"dock":"diagonal","height":"tall","shortcut":{"ctrl":true,"code":"KeyT"},"copyOnSelect":"yes"}`). Unknown fields written by a newer Board are preserved on save.
-- Another tab's change (`storage` event) applies everything except `open` (closing the drawer in one tab does not close it in another).
+- `dock` is the **default** position. The **current** position of a tab is `sessionStorage` `bounty-board-terminal-dock:v1` = `{"dock": "right", "maximized": false}`, written by dragging the header, the dock picker and the maximize button; a reload keeps it, a new tab starts at the default. Until a tab moves its drawer it follows the default. (A `maximized` field left in `localStorage` by the earlier build is ignored.)
+- Another tab's change (`storage` event) applies everything except `open` (closing the drawer in one tab does not close it in another). When the default dock changes while this tab's drawer is open and still follows the default, the tab first pins its current position, so the open drawer does not move.
 - Stored sizes are the user's wish; the clamp is applied when laying out, so a temporarily small window does not shrink the saved size.
 
 ### Shortcut rules
@@ -83,9 +84,23 @@ window.BoardTerminal.session();                   // the hello `session` object 
 - `on` returns an unsubscribe function; a throwing listener is logged and does not affect others.
 - The other `BoardTerminal` members (`term`, `status`, `checks`, `prefs`, `unsafeText`, `unsafePaste`, `shortcutProblem`, ...) are for tests and diagnostics only.
 
+### Drag to dock
+
+- Press on the drawer header (its empty area, the title and status text, or the grip at the left; never on buttons, the dock picker, the slots, links or the terminal screen) and move at least 6 px: pointer events with pointer capture (mouse, pen, touch). `pointerdown` is cancelled, so focus stays in the terminal and nothing is selected; the root gets `term-dragging` (`user-select: none`, `grabbing` cursor), so copy on select cannot fire. The header shows a `grab` cursor.
+- While dragging, a dashed translucent rectangle (`[data-term-drop-preview]`) shows exactly where the drawer will land (the size it will have there, from the per-orientation memory), and a 4 px accent bar (`[data-term-drop-edge]`) highlights the target edge. The target is the nearest edge of the content area (sidebar excluded) when the pointer is within 30% of the content width or height from it; the middle is a dead zone that keeps the current dock (the preview shows the current place, no edge). Side edges are not offered when a side dock does not fit (round 1 rule). Maximize stays a button.
+- Releasing on an edge docks the drawer there (current dock of this tab, maximize left); releasing in the dead zone keeps it; releasing outside the content area or Esc cancels. After a drop xterm is refit and the new size goes to the server; focus stays in the terminal; height and width memory are unchanged.
+- Phones (700 px and below): no grip, no drag, the bottom sheet as before. Keyboard and screen-reader users have the dock picker; the grip is `role="img"` with the label "Drag to move the terminal".
+
+### Header
+
+- Two rows in the DOM: [grip, title, status pill, Copied flash, slots, dock picker] and [session text (age, viewers, folder, steps), Reset, Save output as evidence, Close].
+- Bottom, top and maximize flatten both rows into one line (`display: contents` plus `order`), as before. Left and right docks keep two lines down to 360 px: the title text hides (the icon stays), the session text is one muted ellipsized line with the full text in its tooltip, and Reset and Save are icon-only with tooltips (their labels stay for screen readers; an armed reset shows "Confirm reset"). Phones wrap with full-width labelled buttons as before.
+
 ## Decisions
 
-- The dock picker and Settings "Default dock" are one stored value: picking a side in the drawer changes the default too, and Settings says so. Maximize is a separate flag and persists.
+- Default vs current dock (changed in the drag follow-up, replacing "one stored value"): Settings "Default dock position" is where the terminal opens in a new tab; dragging, the dock picker and maximize change only the current tab (`sessionStorage`). A new default moves a tab's drawer only if that tab has not moved it and the drawer is not open in another tab. There is no separate "reset position" action: a new tab, or closing the browser tab, starts at the default again.
+- Drag zones: nearest edge within 30% of the content size, dead zone in the middle; the preview animates between targets but appears in place.
+- A refused input-event insertion that is safe but contains a newline says "Multi-line text must be pasted with Ctrl+V."; control characters keep "Paste refused: the clipboard text contains control characters."
 - Shortcut keys are kept from the browser whenever the Board has a terminal, even on pages without one (Ctrl+E "does nothing" there rather than opening Firefox's search bar). Plain browser behavior returns when the Board has no terminal configured.
 - Ctrl+Shift+V and Shift+Insert always paste; the "Ctrl+V pastes" switch only governs Ctrl+V (off: ^V reaches the shell, for `quoted-insert`).
 - Ctrl+Shift+C never sends ^C, even without a selection. Ctrl+Insert keeps the selection; Ctrl+C clears it (as specified).
@@ -132,7 +147,24 @@ Run on Ghost (shared box, load 10 to 15), `NODE_PATH=$PWD/node_modules CHROME_BI
 
 Screenshots (`TERMINAL_SCREENSHOT_DIR=$TMPDIR/screens`, here `/tmp/bbt-ux/screens/`, synthetic fixture data only, not committed): `drawer-right-copied-{light,dark}.png`, `dock-picker-{light,dark}.png`, `drawer-head-right-{light,dark}.png`, `settings-{light,dark}.png`, `phone-sheet-{light,dark}.png`, plus `dock-{right,left,top,bottom}-light.png` and `side-by-side-{right,left,top,bottom}-light.png`. Review round 1: `topbar-1280-{left,right}-{default,max}-{light,dark}.png` (full page) and `topbar-strip-1280-{left,right}-{default,max}-{light,dark}.png` (topbar close-up); `drawer-right-copied-*`, `dock-picker-*` and `drawer-head-right-*` refreshed with the new default side width. The reviewer's matrix screenshots are in `/tmp/bbt-ux/rev1/screens/`.
 
+## Drag to dock follow-up: evidence
+
+Red/green: `sandbox-terminal.js` and `sandbox-terminal.css` swapped back to `efeb330`, the new and changed tests run, then restored. All four failed on `efeb330` and pass on `205a442`:
+
+| Test | efeb330 → now |
+|---|---|
+| `drag to dock: the header docks the drawer on each edge with a preview; clicks, buttons, Esc, the dead zone and outside drops do not move it` (each edge with the preview and edge bar visible mid-drag, drawer on that edge, content not covered, focus kept in the terminal, xterm refit; click and sub-6 px move do nothing; a drag from a header button does not start; Esc cancels; dead zone keeps; drop over the sidebar cancels; no terminal or page selection and the clipboard keeps its sentinel; side header at most two lines at the default width and at 360 px; reload keeps the current dock; a new tab opens at the default; a new default moves neither the dragged tab nor an open drawer in another tab, and a later new tab uses it) | red → green |
+| `drag to dock: narrow windows offer no side zones; phones have no grip and no drag` (1024 px: no right zone, the dead zone keeps bottom, top still offered; 390 px phone: no grip, no preview, bottom sheet) | red → green |
+| `settings page: ...` (changed: a new default does not move an open drawer in another tab, the drawer picker does not change the default) | red → green |
+| `typing filter ... (review F2)` (changed: safe multi-line insertions say "Multi-line text must be pasted with Ctrl+V.") | red → green |
+
+Runs after `205a442` (Ghost, serially): `sandbox-terminal-filter.test.cjs` 5 pass, 0 fail; `sandbox-terminal.synthetic.test.cjs` (alone) 17 pass, 0 fail; the reviewer's `review_builder.test.cjs` 5 pass, 0 fail.
+
+Screenshots (`/tmp/bbt-ux/screens/`): `drag-preview-right-{light,dark}.png` (mid-drag, preview over the right edge), `drag-result-right-{light,dark}.png` (after the drop), `drawer-head-{left,right}-360-{light,dark}.png` and `dock-{left,right}-360-{light,dark}.png` (two-line side header at 360 px).
+
 ## Gaps
+
+- Drag was tested with a mouse (Playwright); touch and pen use the same pointer-event path but were not driven in a test. Phones never drag.
 
 - The F2 guard was tested with synthetic input events and Playwright's `insertText`; it was not checked on a real Android keyboard (neither was the original bypass).
 - The tab edge fade needs scroll-driven animations (Chromium); Firefox shows plain scrolling tabs.
