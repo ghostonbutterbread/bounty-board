@@ -672,11 +672,25 @@ def main(argv=None):
             hash_record = terminal_auth.read_hash_file(args.password_hash_file)
         except (OSError, UnicodeError, terminal_auth.HashFileError) as error:
             parser.error(f'password hash file: {error}')
+    tailscale = None
     if args.backend == 'local-test-only':
         tmp = os.path.realpath(os.environ.get('TMPDIR', '/nonexistent'))
         if os.environ.get('BBTERM_ALLOW_LOCAL_BACKEND') != '1' or not os.path.realpath(args.root).startswith(tmp + '/'):
             parser.error('the local backend is for tests only (needs BBTERM_ALLOW_LOCAL_BACKEND=1 and a root under TMPDIR)')
         backend = sb.LocalBackend(args.state_dir / 'local')  # ports_hub is set by make_service
+        test_tailscale = os.environ.get('BBTERM_TEST_TAILSCALE_FILE')
+        if test_tailscale:
+            # TEST ONLY, behind the local-backend gate above: the "Tailscale address" is the
+            # loopback alias named in this file (empty file: no address). Browser fixtures use
+            # it to switch Tailscale on and off; the Docker backend never reads it.
+            def alias():
+                try:
+                    return Path(test_tailscale).read_text().strip() or None
+                except OSError:
+                    return None
+            tailscale = terminal_ports.TailscaleAddress(
+                networks=[ipaddress.ip_network('127.0.0.0/8')], addresses=lambda: {a for a in [alias()] if a},
+                interfaces=lambda: ['tailscale0'], interface=lambda name: alias())
     else:
         import terminal_proxy
         backend = sb.DockerBackend(image=args.image, state_dir=args.state_dir, proxy=terminal_proxy.FilteringProxy(),
@@ -687,7 +701,7 @@ def main(argv=None):
                               backend=backend, max_sessions=args.max_sessions, pause_after=args.pause_after,
                               remove_after=args.remove_after, min_free_memory=args.min_free_memory,
                               reap_interval=max(1, args.reap_interval), preview_ports=args.preview_ports,
-                              ports_range=args.ports_range, tailscale_address=args.tailscale_address)
+                              ports_range=args.ports_range, tailscale_address=args.tailscale_address, tailscale=tailscale)
     except ValueError as error:
         parser.error(str(error))
     import signal

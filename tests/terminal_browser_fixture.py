@@ -11,8 +11,13 @@ MODE is a comma list:
   nolive     the Board runs without live editing
   down       --terminal-url is set but no terminal service runs
   fastpause  sandboxes pause after 10 s without a viewer (reaper every second)
+  ports      --preview-ports, a TEST-ONLY Tailscale address (loopback alias 127.0.0.2 named in
+             DIR/tailscale.txt; empty file = no address), a synthetic "sandbox" HTTP server on
+             127.0.0.1, and a fake agent thread that reports the ports listed in DIR/ports.json
+             and answers opens with the real agent's forward() (sandbox/bbterm-ports.py)
 
-Prints one JSON line {port, password, keys, lane}. Uses the TEST-ONLY local
+Prints one JSON line {port, password, keys, lane} (+ {sandbox_port, ports_file,
+tailscale_file, ports_range} in ports mode). Uses the TEST-ONLY local
 backend (plain bash in the report folder); the Docker sandbox is covered by
 tests/test_terminal_docker.py.
 """
@@ -124,6 +129,90 @@ def front_proxy(port, board_port, term_port, modes):
     threading.Thread(target=loop, daemon=True).start()
 
 
+def free_range(size=10):
+    for lo in range(31000, 60000, 37):
+        socks = []
+        try:
+            for n in range(lo, lo + size):
+                s = socket.socket()
+                socks.append(s)
+                s.bind(('127.0.0.1', n))
+            return lo, lo + size - 1
+        except OSError:
+            continue
+        finally:
+            for s in socks:
+                s.close()
+    raise RuntimeError('no free port range')
+
+
+def sandbox_server():
+    """The PoC server "inside the sandbox" (a plain 127.0.0.1 listener; the agent connects to it)."""
+    import http.server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'<!doctype html><title>Synthetic PoC</title><p>synthetic-preview-ok</p>'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server.server_address[1]
+
+
+def fake_agent(sock_dir, ports_file):
+    """Connects to the newest session's ports.sock, reports DIR/ports.json, answers opens
+    with the real agent's forward(). Reconnects when the session is reset."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('bbterm_ports_agent', ROOT / 'sandbox/bbterm-ports.py')
+    agent = importlib.util.module_from_spec(spec)
+    old, sys.argv = sys.argv, ['bbterm-ports']
+    try:
+        spec.loader.exec_module(agent)
+    finally:
+        sys.argv = old
+
+    def session(path):
+        agent.SOCKET = str(path)
+        ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        ctl.connect(str(path))
+        lock = threading.Lock()
+        stop = threading.Event()
+        agent.send_line(ctl, lock, {'t': 'hello', 'v': 1})
+        threading.Thread(target=agent.reader, args=(ctl, lock, stop), daemon=True).start()
+        last = None
+        try:
+            while not stop.is_set():
+                try:
+                    wanted = json.loads(Path(ports_file).read_text() or '[]')
+                except (OSError, ValueError):
+                    wanted = []
+                if wanted != last:
+                    agent.send_line(ctl, lock, {'t': 'ports', 'ports': wanted})
+                    last = wanted
+                newest = max(Path(sock_dir).glob('*/ports.sock'), key=lambda p: p.stat().st_mtime, default=None)
+                if newest is not None and newest != path:
+                    break  # a reset made a new sandbox
+                stop.wait(0.2)
+        finally:
+            ctl.close()
+
+    while True:
+        try:
+            newest = max(Path(sock_dir).glob('*/ports.sock'), key=lambda p: p.stat().st_mtime, default=None)
+            if newest is not None:
+                session(newest)
+        except OSError:
+            pass
+        time.sleep(0.2)
+
+
 def main():
     target, modes = Path(sys.argv[1]), set(sys.argv[2].split(','))
     root = fx.make_root(target)
@@ -132,15 +221,26 @@ def main():
                             **({} if 'nolive' in modes else {'live_edit_dir': target / 'live-state'}))
     threading.Thread(target=board.serve_forever, daemon=True).start()
     proc = None
+    extra_info, ports_args, extra_env = {}, [], {}
+    if 'ports' in modes:
+        ports_range = free_range()
+        ports_file, tailscale_file = target / 'ports.json', target / 'tailscale.txt'
+        ports_file.write_text('[]')
+        tailscale_file.write_text('127.0.0.2')
+        ports_args = ['--preview-ports', '--ports-range', f'{ports_range[0]}-{ports_range[1]}']
+        extra_env = {'BBTERM_TEST_TAILSCALE_FILE': str(tailscale_file)}
+        extra_info = {'sandbox_port': sandbox_server(), 'ports_file': str(ports_file),
+                      'tailscale_file': str(tailscale_file), 'ports_range': list(ports_range)}
+        threading.Thread(target=fake_agent, args=(target / 'term-state/local/ports', ports_file), daemon=True).start()
     if not ({'noterm', 'down'} & modes):
         hash_file = target / 'terminal.hash'
         terminal_auth.write_hash_file(hash_file, terminal_auth.hash_password(PASSWORD, n=2 ** 14))
-        env = {**os.environ, 'BBTERM_ALLOW_LOCAL_BACKEND': '1', 'TMPDIR': os.environ.get('TMPDIR', str(target))}
+        env = {**os.environ, 'BBTERM_ALLOW_LOCAL_BACKEND': '1', 'TMPDIR': os.environ.get('TMPDIR', str(target)), **extra_env}
         proc = subprocess.Popen([sys.executable, str(ROOT / 'terminal_service.py'), '--root', str(root), '--port', str(term_port),
                                  '--allowed-origin', f'http://127.0.0.1:{front}', '--allow-tailnet-user', 'ryu@example.test',
                                  '--password-hash-file', str(hash_file), '--state-dir', str(target / 'term-state'),
                                  '--backend', 'local-test-only', '--min-free-memory', '0',
-                                 *(['--pause-after', '10', '--reap-interval', '1'] if 'fastpause' in modes else [])],
+                                 *(['--pause-after', '10', '--reap-interval', '1'] if 'fastpause' in modes else []), *ports_args],
                                 env=env, stdout=subprocess.DEVNULL)
         for _ in range(200):
             try:
@@ -150,7 +250,8 @@ def main():
                 time.sleep(0.05)
     front_proxy(front, board.server_port, term_port, modes)
     lane = root / fx.FAMILY / fx.PROGRAM / fx.LANE
-    print(json.dumps({'port': front, 'password': PASSWORD, 'keys': terminal_checks.block_keys(BLOCKS), 'lane': str(lane)}), flush=True)
+    print(json.dumps({'port': front, 'password': PASSWORD, 'keys': terminal_checks.block_keys(BLOCKS), 'lane': str(lane),
+                      **extra_info}), flush=True)
     try:
         while True:
             time.sleep(3600)
