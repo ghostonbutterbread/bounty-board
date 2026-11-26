@@ -193,9 +193,14 @@ def read_tail(path, max_lines=HISTORY_LINES, max_bytes=HISTORY_TAIL_BYTES, base=
     except OSError as error:
         return [], False, {'state': 'unreadable', 'error': text(error.strerror or 'cannot read', 120)}
     lines = data.split(b'\n')
+    if not data.endswith(b'\n'):
+        lines = lines[:-1]  # the last line is still being appended
     if start > 0:
         lines = lines[1:]  # the first line is partial
     lines = [line for line in lines if line.strip()]
+    if start > 0 and not lines and data.strip():
+        # One line longer than the tail window: report it instead of an empty log.
+        return [b'\0' * (HISTORY_LINE_BYTES + 1)], True, {'state': 'ok', 'size': size}
     more = start > 0 or len(lines) > max_lines
     return list(reversed(lines[-max_lines:])), more, {'state': 'ok', 'size': size}
 
@@ -382,6 +387,10 @@ class ScopeInventory:
         root = self.root_fn()
         result = {'version': 1, 'family': family, 'program': text(program, 200), 'copy_safe': not is_unsafe(program),
                   'computed_at': iso(now), 'stale_days': STALE_DAYS}
+        if program.startswith(('_', '.')):
+            # Discovery skips underscore and hidden program dirs; never turn them into paths here.
+            result['scope'] = {'state': 'failed', 'reason': 'not a discovered program'}
+            return result
         directory, reason = resolve_scope_dir(root, program)
         if directory is None:
             result['scope'] = {'state': 'none' if reason == NO_SCOPE else 'failed', 'reason': text(reason, 200)}
@@ -409,7 +418,9 @@ class ScopeInventory:
                                'last_error': last.get('last_error'), 'failed': last.get('last_attempt_status') == 'failed',
                                'platform': last.get('platform')}
 
-        lanes = self.lane_info(root, program) if root is not None else {}
+        # Stat binaries lanes only when an asset can link to one.
+        linkable = any(item['kind'] in LANE_FOR_KIND for item in parsed['assets'])
+        lanes = self.lane_info(root, program) if root is not None and linkable else {}
         assets = []
         for item in parsed['assets']:
             item = dict(item)

@@ -111,6 +111,7 @@ def make_globex(root, now=None):
     write(scopes / 'in-scope.txt', '# comment\n*.globex.example.test\nshop.globex.example.test\n\n')
     write(scopes / 'out-of-scope.txt', 'admin.globex.example.test\n')
     write(scopes / 'program-policy.md', '# Globex policy\n\nBe kind.\n')
+    (scopes / 'scope-history.jsonl').mkdir(exist_ok=True)  # an unreadable history file must still be reported
     return scopes
 
 

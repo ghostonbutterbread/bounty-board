@@ -171,6 +171,7 @@ test('scope panel: section route, stale banner, rules, policy, assets, releases,
     assert.equal(await host.locator('[data-sp-stale]').count(), 0);
     assert.match(await host.locator('[data-sp-fresh]').innerText(), /estimated from the in-scope\.txt time/);
     assert.equal(await host.locator('[data-sp-asset], [data-sp-release-row], .sp-change').count(), 0);
+    assert.equal(await host.locator('[data-sp-file-error="scope-history.jsonl"]').count(), 1); // history error shown without an inventory
     assert.match(await host.locator('[data-sp-policy]').innerText(), /Be kind/);
     assert.match(await page.locator('[data-scope-badge]').innerText(), /Scope today \(est\.\)/);
     await shot('scope-panel-no-inventory.png');

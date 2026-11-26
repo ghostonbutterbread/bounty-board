@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlencode
 
 import app
@@ -346,6 +347,55 @@ class HttpTests(Base):
                        {'family': 'web_bounty', 'program': 'acme-demo', 'x': '1'}, {'family': 'web_bounty', 'program': ''}):
             self.assertEqual(self.get(params)[0], 400, params)
         self.assertEqual(self.get(None, raw='?family=web_bounty&program=a&program=b')[0], 400)
+
+
+def _history_line(at, **kw):
+    import json as _json
+    return _json.dumps({'at': at, 'source': 'pull', 'added': [], 'removed': [], 'changed': [], 'release_changed': [], **kw})
+
+
+class ReviewOneTests(unittest.TestCase):
+    """Independent review 1 of the scope panel (minor findings 1-4)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='sp-review-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.d = self.root / 'scopes' / 'acme-demo'
+        self.d.mkdir(parents=True)
+        (self.d / 'in-scope.txt').write_text('*.acme.example.test\n')
+        self.inv = si.ScopeInventory(lambda: self.root, ('apk', 'exe', 'mac'))
+
+    def test_partial_last_line_is_not_shown_as_newest_entry(self):
+        (self.d / 'scope-history.jsonl').write_text(
+            _history_line('2026-11-20T00:00:00Z') + '\n' + _history_line('2026-11-21T00:00:00Z') + '\n' + '{"at": "2026-11-22T0')
+        entries = self.inv.payload('web_bounty', 'acme-demo')['history']['entries']
+        self.assertEqual([e['state'] for e in entries], ['ok', 'ok'])
+
+    def test_huge_single_line_reports_unreadable_not_empty(self):
+        (self.d / 'scope-history.jsonl').write_text(_history_line('2026-11-20T00:00:00Z', note='x' * 300_000) + '\n')
+        entries = self.inv.payload('web_bounty', 'acme-demo')['history']['entries']
+        self.assertEqual([(e['state'], e.get('error')) for e in entries], [('invalid', 'line too long')])
+
+    def test_lane_scan_skipped_without_linkable_assets(self):
+        lane = self.root / 'binaries' / 'acme-demo' / 'apk'
+        lane.mkdir(parents=True)
+        for i in range(50):
+            (lane / f'f{i}').write_text('x')
+        self.inv.payload('web_bounty', 'acme-demo')
+        real = os.scandir
+        with mock.patch.object(si.os, 'scandir', side_effect=lambda p: real(p)) as spy:
+            self.inv.payload('web_bounty', 'acme-demo')
+        self.assertEqual(spy.call_count, 0)
+
+    def test_undiscovered_program_names_are_not_read(self):
+        for name in ('_archived', '.hidden'):
+            hidden = self.root / 'scopes' / name
+            hidden.mkdir()
+            (hidden / 'in-scope.txt').write_text('secret.example.test\n')
+            d = self.inv.payload('web_bounty', name)
+            self.assertEqual(d['scope']['state'], 'failed')
+            self.assertNotIn('rules', d)
 
 
 if __name__ == '__main__':
