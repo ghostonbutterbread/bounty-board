@@ -301,6 +301,20 @@ Final runs on `79dc00f` (`TMPDIR=/tmp/bbagent`, `-W error::ResourceWarning`):
 
 No `bbterm-test-*` container remained after any run.
 
+### Review round r2 (184d82e, ACCEPT) and minors closed by Hermes
+
+The narrow re-review confirmed R1 to R4 and the smaller items fixed. It found three minors, all closed here with one regression test each, red on `184d82e` (only the named source files swapped back) and green now.
+
+| Finding | Problem | Fix | Regression test | Red on 184d82e | Now |
+| --- | --- | --- | --- | --- | --- |
+| N1 (backup layer) | `strip_frontmatter` kept `allowed-tools` for quoted keys, an explicit `?` key, a BOM before `---`, and an indented `---` inside a block scalar. The managed ask rule still won (reviewer's real-binary check). | The copy's frontmatter is rewritten to only `name` and `description` (JSON-quoted); a leading BOM is dropped; a block that does not close, a repeated key or an unparseable quoted value raises and the skill is skipped. | `test_review_r2_minors.FrontmatterRewriteTests` (5 tests) | 9 failures | OK |
+| N2 | `read_pid` accepted `1` from the sandbox-writable `agent.pid` (stop would run `kill -- -1` in the container), and stop could signal a pid another sandbox process reused after the agent exited. | `read_pid` requires a pid above 1; `alive` (checked before every signal) also requires the pid's command line to name a binary under `/opt/report-agent/` (first argument, or second for an interpreter). Fixed shell text, values as positional arguments. | `test_review_r2_minors.AgentPidTests` (2 tests, the real identity script against live processes) | 2 failures | OK |
+| N3 | Writes to `~/.claude/settings.json` and `~/.claude.json` asked, but an approved one could still set non-permission settings (`apiKeyHelper`, `env`). | Managed `deny`: `Edit(//home/sandbox/.claude/**)`, `Edit(//home/sandbox/.claude.json)`. `test_07` case 2 now expects the agent's write to be refused (it landed before, with the driver approving the prompt), and Bash still asks. | `test_review_r2_minors.ConfigDenyTests`; `test_terminal_agent_docker.test_07` | 1 error | OK |
+
+The reviewer's own repros (`repros/r2/test_n1_strip_bypass.py`, `test_n3_pid_one.py`, path rewritten) pass on the fix. The earlier gate failure of `test_terminal_docker.test_09` ("No such container") came from the reviewer's docker tests running at the same time (shared `bbterm-test-` prefix); the module passes alone (below).
+
+Runs on the fix (`TMPDIR=/tmp/bbagent`, `-W error::ResourceWarning`): `test_review_r1_permission_settings` 7 OK, `test_review_r2_relay_lifetime` 1 OK, `test_review_r3_removal_working_agent` 1 OK, `test_review_r2_minors` 8 OK, `test_terminal_report_agent` 28 OK, `test_terminal_relay` 18 OK, `test_terminal_connect` 11 OK, `test_terminal_sandbox` 47 OK, `test_terminal_service` 29 OK, `test_terminal_ports` 45 OK, `test_terminal_docker` 13 OK, `test_terminal_agent_docker` with the real Claude Code 2.1.331 8 OK (`R1 POLICY EVIDENCE` prompts shown for all three cases). No container left behind.
+
 ## Gaps
 
 - No UI (phase 2). No screenshots.
@@ -350,6 +364,17 @@ Do these as the Board's user. Nothing here was done by this branch.
    - With connect on: `GET /terminal/api/agents/active?all=1` lists the Herdr agents; attaching one shows its TUI; closing the tab ends only the attach client (the agent keeps running in Herdr).
 
 ## Decisions for Ryu
+
+Hermes decided these under Ryu's direction (Discord thread 1575609533987029023); he can overrule any:
+
+- Relay use by other sandbox processes while the agent runs: accepted (they can spend quota, never read the login; the same processes could already do so through the agent). No per-agent secret.
+- Every Bash, WebFetch, WebSearch and MCP call asks, syntax checks included: kept (it is how live runs get his OK).
+- acceptEdits in `/report`: kept (edits land live, the stated goal); the prompt forbids deleting or overwriting files without his yes.
+- `all=1` agent connect: kept, as the UI's "Show all" toggle (4 hunt agents sit at the `web_bounty` root and match no lane); the default list is lane and program matches.
+- No daily request cap on the relay (his subscription limits apply).
+
+The builder's original questions follow.
+
 
 1. Any process in a report's sandbox can use the relay (spend the login's quota) while that report's agent runs, but never read the login. OK, or should the relay also require a per-agent secret that only the CLI process holds (it would still be readable by processes of the same user in the container)?
 2. Every Bash, WebFetch, WebSearch and MCP call asks you in the Agent tab, including syntax checks (review r1). That is more prompts per PoC change. Keep, or allow a few read-only checks (they would have to be managed rules, and ask rules win over allow rules, so it needs a narrower ask list)?

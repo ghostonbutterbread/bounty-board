@@ -39,6 +39,10 @@ CLAUDE_ALWAYS_ASK = ['Bash', 'WebFetch', 'WebSearch', 'mcp__*']
 # The only pre-approved rule: reading the task file. No Bash rule at all (an allow for a file the
 # agent can write, such as poc.py --help, ran its code without asking: review r1).
 CLAUDE_MANAGED_ALLOW = [f'Read(/{AGENT_DIR}/**)']
+# The agent's own Claude Code config in the writable HOME: writes there would ask (outside the
+# working dirs), but an approved one could still set non-permission settings (apiKeyHelper, env).
+# Edit rules cover every file-editing tool (review r2 N3).
+CLAUDE_MANAGED_DENY = [f'Edit(/{SANDBOX_HOME}/.claude/**)', f'Edit(/{SANDBOX_HOME}/.claude.json)']
 # Flags that keep project settings, project skills and MCP servers out (verified with 2.1.331:
 # /report/.claude/settings.json, /report/.claude/skills and /report/.mcp.json are ignored).
 CLAUDE_FIXED_ARGS = ['--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
@@ -74,6 +78,7 @@ class ClaudeAdapter:
         return {
             'permissions': {
                 'ask': list(CLAUDE_ALWAYS_ASK),
+                'deny': list(CLAUDE_MANAGED_DENY),
                 'allow': list(CLAUDE_MANAGED_ALLOW),
                 'defaultMode': 'acceptEdits',
                 'additionalDirectories': [AGENT_DIR],
@@ -235,34 +240,58 @@ def resolve_binary(path):
 
 # -- skills: read-only copies without permission-widening frontmatter ---------------------
 
-# Frontmatter keys a skill could use to widen what runs without asking (allowed-tools pre-approves
-# tools while the skill is loaded; hooks and MCP servers run code). Dropped from every copy.
-STRIP_KEYS = ('allowed-tools', 'allowed_tools', 'allowedTools', 'hooks', 'mcpServers', 'mcp-servers', 'permissionMode',
-              'permission-mode')
+# A skill's frontmatter can widen what runs without asking (allowed-tools pre-approves tools while
+# the skill is loaded; hooks and MCP servers run code). Copies keep only name and description.
 SKILL_COPY_MAX = 64 * 1024 * 1024
 SKILL_FILES_MAX = 2000
 
 
 def strip_frontmatter(text):
-    """SKILL.md text with the STRIP_KEYS removed from its YAML frontmatter (with their
-    indented or list continuation lines). Everything else is kept byte for byte."""
-    if not text.startswith('---\n') and not text.startswith('---\r\n'):
-        return text
+    """SKILL.md text whose YAML frontmatter is rewritten to only ``name`` and ``description``
+    (quoted), so no spelling of ``allowed-tools``, hooks or MCP servers (quoted or explicit
+    keys, a BOM, block scalars) survives in the copy. The body is kept byte for byte.
+
+    No frontmatter: returned as is (minus a leading BOM). A frontmatter block that does not
+    close, or a name/description this reader cannot parse, raises CliError and the skill is
+    skipped rather than mounted with keys it could not check (review r2 N1).
+    """
+    text = text.lstrip('\ufeff')
     lines = text.splitlines(keepends=True)
-    out, dropping = [lines[0]], False
-    for index in range(1, len(lines)):
-        line = lines[index]
-        if line.strip() == '---':
-            out.extend(lines[index:])
-            return ''.join(out)
-        top = re.match(r'([A-Za-z0-9_-]+)\s*:', line)
-        if top and not line[:1].isspace():
-            dropping = top.group(1) in STRIP_KEYS
-        elif not (line[:1].isspace() or line.lstrip().startswith('- ') or not line.strip()):
-            dropping = False
-        if not dropping:
-            out.append(line)
-    return text  # no closing marker: not frontmatter, leave it alone
+    if not lines or lines[0].rstrip('\r\n') != '---':
+        return text
+    close = next((i for i in range(1, len(lines)) if lines[i].rstrip('\r\n') == '---'), None)
+    if close is None:
+        raise CliError('skill frontmatter has no closing ---')
+    fields, index = {}, 1
+    while index < close:
+        line = lines[index].rstrip('\r\n')
+        index += 1
+        match = re.match(r'(name|description)[ \t]*:(.*)$', line)
+        if not match:
+            continue
+        key, value = match.group(1), match.group(2).strip()
+        if key in fields:
+            raise CliError(f'skill frontmatter repeats {key}')
+        if re.fullmatch(r'[|>][+-]?[0-9]?', value):
+            block = []
+            while index < close and (not lines[index].strip() or lines[index][:1] in ' \t'):
+                block.append(lines[index].strip())
+                index += 1
+            value = ('\n' if value[0] == '|' else ' ').join(part for part in block).strip()
+        elif value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                raise CliError(f'skill frontmatter {key} is not a simple quoted string') from None
+        elif value.startswith("'"):
+            if len(value) < 2 or not value.endswith("'"):
+                raise CliError(f'skill frontmatter {key} is not a simple quoted string')
+            value = value[1:-1].replace("''", "'")
+        if not isinstance(value, str):
+            raise CliError(f'skill frontmatter {key} is not a string')
+        fields[key] = value
+    head = ['---\n'] + [f'{key}: {json.dumps(fields[key])}\n' for key in ('name', 'description') if key in fields]
+    return ''.join(head) + '---\n' + ''.join(lines[close + 1:])
 
 
 def skill_signature(path):

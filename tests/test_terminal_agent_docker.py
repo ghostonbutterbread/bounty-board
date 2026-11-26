@@ -389,7 +389,9 @@ class ReportAgentDockerTests(unittest.TestCase):
                 self.assertIn('enterprisemanagedsettingssaystoask', screen)
                 if index == 1:
                     written = self.exec('cat', '/home/sandbox/.claude/settings.json', sel=sel).stdout
-                    self.assertIn('"Bash"', written)  # the agent's own write landed, and still no free Bash
+                    # The managed deny refuses the agent's write to its own config (review r2 N3);
+                    # Bash still asks either way.
+                    self.assertNotIn('"Bash"', written)
                 if index == 2:
                     self.assertIn('Unknownskill:planted', re.sub(r'\s+', '', bytes(viewer.output).decode('utf-8', 'replace')))
                 evidence.append(label)

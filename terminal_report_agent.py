@@ -59,6 +59,10 @@ FORMATS = {
     'best_fit': 'the format that fits this finding best (say in one sentence why, then do it)',
 }
 WRAPPER = 'echo $$ > "$HOME/.report-agent/agent.pid"; exec "$@"'
+# $1 pid, $2 binary dir with a trailing slash. Fixed text; the values are positional arguments.
+AGENT_IDENTITY_CHECK = ('kill -0 "$1" 2>/dev/null || exit 1; '
+                        'tr "\\000" "\\n" < "/proc/$1/cmdline" 2>/dev/null | head -n 2 | '
+                        '{ while IFS= read -r arg; do case "$arg" in "$2"*) exit 0;; esac; done; exit 1; }')
 
 
 class AgentError(Exception):
@@ -218,15 +222,21 @@ class DockerExec:
             except (OSError, subprocess.TimeoutExpired):
                 result = None
             text = result.stdout.decode('ascii', 'replace').strip() if result is not None and result.returncode == 0 else ''
-            if re.fullmatch(r'[1-9][0-9]{0,9}', text):
+            # Not 1: agent.pid is writable from the sandbox, and stop signals the pid's process
+            # group, so a planted 1 would mean ``kill -- -1`` (review r2 N2).
+            if re.fullmatch(r'[2-9]|[1-9][0-9]{1,9}', text):
                 return int(text)
             time.sleep(0.2)
         return None
 
     def alive(self, session, agent, pid):
+        """The recorded pid still runs **and** is still the agent CLI: its command line names a
+        binary under ``cli.BIN_DIR`` (first argument, or second for a script run by its
+        interpreter). A pid the agent left behind and another sandbox process reused is never
+        signalled (review r2 N2)."""
         try:
-            result = self.backend.run('exec', self.backend.name(session), '/bin/sh', '-c', 'kill -0 "$1" 2>/dev/null',
-                                      'report-agent', str(pid), check=False, timeout=15)
+            result = self.backend.run('exec', self.backend.name(session), '/bin/sh', '-c', AGENT_IDENTITY_CHECK,
+                                      'report-agent', str(pid), cli.BIN_DIR + '/', check=False, timeout=15)
         except (OSError, subprocess.TimeoutExpired):
             return False
         return result.returncode == 0

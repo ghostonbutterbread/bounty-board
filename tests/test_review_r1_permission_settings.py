@@ -87,8 +87,8 @@ class HostFilesTests(unittest.TestCase):
         self.assertNotIn('allowed-tools: [', text)
         self.assertNotIn('hooks:', text)
         self.assertNotIn('mcpServers', text)
-        self.assertIn('name: wide', text)
-        self.assertIn('version: 2', text)
+        self.assertIn('name: "wide"', text)
+        self.assertNotIn('version: 2', text)  # only name and description are kept (review r2 N1)
         self.assertIn('allowed-tools: this line is body text', text)  # the body is untouched
         self.assertEqual((copy / 'scripts/helper.py').read_text(), 'print(1)\n')
         self.assertFalse((copy / 'outside-link').exists() or (copy / 'outside-link').is_symlink())
@@ -96,10 +96,10 @@ class HostFilesTests(unittest.TestCase):
         # The source changes: a new copy is made; no change: the same copy is reused.
         self.assertEqual(self.hub.run_args_extra(session), args)
         time.sleep(0.01)
-        (self.skill / 'SKILL.md').write_text(SKILL.replace('version: 2', 'version: 3'))
+        (self.skill / 'SKILL.md').write_text(SKILL.replace('# Body', '# Body v3'))
         newer = [a for a in self.hub.run_args_extra(session) if 'skills/wide' in a][0]
         self.assertNotEqual(newer, mount[0])
-        self.assertIn('version: 3', (Path(newer.split('source=', 1)[1].split(',', 1)[0]) / 'SKILL.md').read_text())
+        self.assertIn('# Body v3', (Path(newer.split('source=', 1)[1].split(',', 1)[0]) / 'SKILL.md').read_text())
 
     def test_symlinked_skill_folder_is_still_refused(self):
         self.skill.rename(self.base / 'real')
@@ -112,12 +112,14 @@ class HostFilesTests(unittest.TestCase):
 class StripTests(unittest.TestCase):
     def test_strip_frontmatter(self):
         out = cli.strip_frontmatter(SKILL)
-        self.assertEqual(out, '---\nname: wide\ndescription: declares tools\nversion: 2\n---\n# Body\n\n'
+        # Only name and description survive, quoted (review r2 N1 made it an allowlist).
+        self.assertEqual(out, '---\nname: "wide"\ndescription: "declares tools"\n---\n# Body\n\n'
                               'allowed-tools: this line is body text\n')
         self.assertEqual(cli.strip_frontmatter('no frontmatter\nallowed-tools: x\n'), 'no frontmatter\nallowed-tools: x\n')
-        self.assertEqual(cli.strip_frontmatter('---\nallowed-tools: x\nno end'), '---\nallowed-tools: x\nno end')
+        with self.assertRaises(cli.CliError):  # an unclosed block is refused, not passed through
+            cli.strip_frontmatter('---\nallowed-tools: x\nno end')
         listed = '---\nname: a\nallowed-tools:\n  - Bash\n  - WebFetch\ndescription: b\n---\n'
-        self.assertEqual(cli.strip_frontmatter(listed), '---\nname: a\ndescription: b\n---\n')
+        self.assertEqual(cli.strip_frontmatter(listed), '---\nname: "a"\ndescription: "b"\n---\n')
 
 
 if __name__ == '__main__':
