@@ -109,7 +109,7 @@ class DisabledTests(Fixture):
         self.assertEqual((status, body), (404, {'error': 'uploads_disabled'}))
         self.assertEqual(headers.get('connection'), 'close')
         self.assertFalse((self.folder / 'a.txt').exists())
-        self.assertEqual(self.listing()['upload'], {'enabled': False, 'reason': 'disabled', 'max_bytes': None})
+        self.assertEqual(self.listing()['upload'], {'enabled': False, 'reason': 'disabled', 'max_bytes': None, 'delete': False})
         status, _, body, _ = self.raw('GET', '/api/data', [])
         self.assertFalse(json.loads(body)['capabilities']['artifact_uploads'])
 
@@ -118,7 +118,7 @@ class GateTests(Fixture):
     def test_capability_and_list_state(self):
         status, _, body, _ = self.raw('GET', '/api/data', [])
         self.assertTrue(json.loads(body)['capabilities']['artifact_uploads'])
-        self.assertEqual(self.listing()['upload'], {'enabled': True, 'reason': None, 'max_bytes': au.MAX_UPLOAD_BYTES})
+        self.assertEqual(self.listing()['upload'], {'enabled': True, 'reason': None, 'max_bytes': au.MAX_UPLOAD_BYTES, 'delete': True})
         self.assertEqual(self.listing('loose/notes.md')['upload']['reason'], 'no_report_folder')
 
     def test_each_gate_refusal(self):

@@ -63,6 +63,56 @@ Success: `201 {artifact, renamed, requested_name}`. `artifact` is the entry the 
 
 Edits outside the new module (kept small and commented): `app.py` (route in `do_POST`, thin `artifact_upload` handler, `upload` block in the list reply, `capabilities.artifact_uploads`, `make_server(artifact_uploads=False)`, `--artifact-uploads`), `static/modules/report-artifacts.js`/`.css` (the panel owner), `package.json` (test list), README and `BACKEND_API.md`.
 
+## Delete
+
+- Branch: `feat/board-artifact-delete`; base `cc48d46` (`origin/beta`, uploads merged).
+- Request: "Yup I'd love a delete button with the confirmation window" (answer to "There's no delete button for uploaded files yet. Want one?").
+
+The same opt-in flag, `--artifact-uploads`, covers upload and delete. Without it nothing below exists (no buttons; the endpoint answers 404 `uploads_disabled`).
+
+### What can be deleted
+
+A listed artifact is deletable only when all hold:
+
+- uploads are enabled;
+- the report has a dedicated folder (`associate()['folder']`), the artifact's `relative` is inside it (subfolders such as `poc/` included), and its reasons include `report_folder`;
+- it is not Markdown (`.md`, `.markdown`, any case). Markdown files are reports in the Board's model (`REPORT.md`, `EVIDENCE.md`, submission drafts) and are never deletable from the panel; the report itself is never even listed;
+- no other ledger finding names it, or a folder containing it, in its artifact fields (`poc`, `evidence`, `artifacts`, `attachments`, `evidence_files`, `files`); such entries carry `referenced_elsewhere: true` in the list. Deleting it from this report would silently break the other finding's evidence;
+- the lane's ledger is readable. While it exists but cannot be read (mid-sync, over the 5 MB read cap) the list adds the note `ledger_unreadable` and nothing is deletable, since other findings' claims are unknown;
+- its name does not start with a dot (staged uploads `.syncthing.board-*.tmp` are never listed anyway; the rule refuses them again);
+- it is a regular file: symlinks are never listed, and the name is checked with `lstat` before unlinking.
+
+`GET /api/report-artifacts` adds `version` (inode and nanosecond mtime of that exact file, opaque), `referenced_elsewhere: bool` and `deletable: bool` to every entry and `delete: bool` to the `upload` block (true when uploads are on and the report has a folder). The upload response's `artifact` carries `deletable` too, so it stays equal to the list entry. Rule code: `artifact_uploads.delete_refusal` / `mark_deletable`.
+
+### HTTP contract
+
+`POST /api/report-artifact-delete?family=&program=&lane=&path=&artifact=[&root_instance=]`, body `{"size": <int>, "modified": <int>}`: the values the panel showed for that row (exact keys, non-negative integers, booleans refused).
+
+| Check | Refusal |
+| --- | --- |
+| `--artifact-uploads` not set | 404 `uploads_disabled` (connection closed, body unread) |
+| `trusted_request(require_origin=True)`, exactly one `X-Requested-With: Bounty-Board`, exactly one `Content-Type: application/json`, one decimal `Content-Length` of at most 4096, no `Transfer-Encoding` | 403 `untrusted_origin` (connection closed, body unread) |
+| Body shorter than `Content-Length` within 10 s | 400 `incomplete_body` (connection closed) |
+| Selector: exactly `family, program, lane, path, artifact` (+ optional `root_instance`), each once, same rules as the list; `artifact` a clean relative path; more than 8 query fields | 404 `artifact_not_found_or_unavailable` |
+| Body not exactly `{size, modified, version}` (integers and the list entry's version string) | 400 `invalid_body` |
+| `root_instance` given and not the current root instance | 409 `root_changed` |
+| Association re-run at request time: report missing, artifact not listed, report without a folder, artifact outside the folder | 404 `artifact_not_found_or_unavailable` |
+| Listed inside the folder but Markdown, a dot name, listed only by a link or field (for example a file under the folder's `_meta/`), named by another finding, or the ledger unreadable | 409 `not_deletable` |
+| Folder (or a subfolder) unreachable without following a symlink, or the file already gone | 404 `artifact_not_found_or_unavailable` |
+| Name is no longer a regular file (symlink or directory swapped in), or its size or integer mtime differ from the body | 409 `changed` (the file is left alone; the panel reloads) |
+
+Success: `200 {"deleted": "<relative>"}`. An unexpected filesystem error is 500 `delete_failed`.
+
+**Removal.** The parent directory is reached by the same `O_NOFOLLOW` descriptor walk as uploads (`report_artifacts._open_dir` from the lane descriptor); the name is `lstat`ed relative to that descriptor (`follow_symlinks=False`), compared, then `os.unlink(name, dir_fd=parent)` and the directory is fsynced. Check and unlink run under `Uploads.place_lock`, the lock uploads hold while choosing and linking a name, so an upload in this process can never pick the name between the check and the unlink. `unlink` never follows a symlink and fails on a directory (reported as `changed`). Nothing else is touched: no folders removed, no ledger write.
+
+### Frontend
+
+- Rows with `deletable: true` get a **Delete** button (trash icon, `button subtle danger-ghost`, danger text color, `aria-label="Delete <name>"`, `data-artifact-delete=<relative>`) left of Preview and Download, so Download keeps one right-edge column. Other rows get none.
+- Click opens a modal dialog: title `Delete <name>?`, text `This removes <display path> from the report folder. Synced devices remove it too. This cannot be undone.`, buttons Delete (`danger-button`) and Cancel. Cancel has focus; Escape cancels. The dialog comes from `window.BoardLedgerActions.dialog()` when that module is loaded, otherwise from a native `<dialog>` built in the panel module with the same classes (fallback styles in `report-artifacts.css`). Never `window.confirm`.
+- While the request runs, the row's buttons are disabled. On 200 the row is removed in place (its media paused first, its preview gone with it) and the counts update; the in-memory list is updated so the next quiet reload sees no change and other rows, their open previews and the upload rows are not redrawn. A "Deleted <name>" note fades after 4 s.
+- On 409 `changed`: "This file changed since the list loaded. Check it and try again." and a quiet reload shows the new size and time. Other errors get a plain message. Error notes stay until dismissed or the next full list load (Reload list); quiet auto-refreshes keep them.
+- Everything is built with `createElement`/`textContent`. Focus in the deleted row moves to the panel itself, never outside it; the editor, drafts and upload queue are not touched.
+
 ## Evidence
 
 Synthetic only, `TMPDIR=~/.hermes/cache/scratch/bb-uploads/tmp`, fixture `tests/report_artifacts_fixture.py`:
@@ -72,6 +122,9 @@ Synthetic only, `TMPDIR=~/.hermes/cache/scratch/bb-uploads/tmp`, fixture `tests/
 - `static/tests/artifact-uploads.synthetic.test.cjs` (5 tests; the last two cover review U1, R3 and N2): button present and enabled; picker upload of two files including a case-insensitive collision ("Saved as Shot-2.PNG"); New highlight; byte-identical download; drag and drop with the highlight; progress row during a slowed 6 MB upload that survives switching reports and back; Cancel leaves no file and no staged file; 8 MB precheck sends nothing; a server 507 is shown until dismissed; a drop outside the panel is prevented and does not navigate; disabled with reason for non-dedicated, flat-root and shared reports, drops there upload nothing; absent with the flag off and file drops not intercepted; live editor draft, cursor and focus unaffected by an upload; image paste saved as `pasted-<time>.png`.
 - `python3 -m unittest tests.test_artifact_uploads tests.test_report_artifacts`: 55 tests OK. Full Python suite (43 modules, 4 in parallel): 587 tests OK, 13 skipped (12 Docker terminal tests, 1 dashboard); run before the review fixes, which added 2 upload tests (rerun alone, OK). `npm test` (now including the new file): 210 pass, 0 fail; nothing needed a rerun.
 - Screenshots: `~/.hermes/cache/scratch/bb-uploads/tmp/screens/artifact-uploads-{idle,uploading,after-upload,dropping,error,disabled}-{light,dark}.png`.
+- Delete (synthetic only, `TMPDIR=~/.hermes/cache/scratch/bb-delete/tmp`): `tests/test_artifact_delete.py` (18 tests): flag off 404 with no Delete flags; 17 gate refusals plus a foreign Host; invalid selectors, path traversal in `artifact`, more than 8 fields (404); invalid bodies (400); `root_instance` mismatch and match; `deletable` flags (true for non-Markdown files in the folder; false for `.md`, `.MARKDOWN`, `.Md`, finding-field and report-link files outside the folder, and every file of folderless reports); the upload reply carries `deletable`; success removes exactly one path (tree compared before/after) and a second delete is 404; 409 `not_deletable` for Markdown and for a folder file listed only by a link; 404 for associated files outside the folder; 409 `changed` for size, older and newer mtime with the file untouched; symlink swapped in after listing (409, link and target untouched); folder swapped for a symlink (404, target untouched); a directory is never removed; a staged `.syncthing.board-*.tmp` name is not listed and refused; 8 rounds of concurrent upload and delete of the same name each leave exactly one file with the uploaded bytes and no staged file. Review fixes (independent review of `c5f9d0f`, ACCEPT with R1 and R2): another finding's file or folder is not deletable, a same-size replacement within the same second is refused by `version`, a body without `version` is invalid, an unreadable ledger turns delete off (5 tests in `ReviewFixTests`, all red on `c5f9d0f`). Re-review of `241e847` (ACCEPT, minor N3): a ledger that parses but is not `{findings: [...]}` also counts as unreadable (`test_ledger_with_wrong_shape_turns_delete_off`, red on `241e847`). `static/tests/artifact-delete.synthetic.test.cjs` (4 tests): Delete only on deletable rows (none on `.md`, `.MARKDOWN`, outside-folder rows, folderless reports or with the flag off); aligned with Download, also at 420 px; dialog title and text, Cancel focused, Enter on Cancel and Escape keep the file; Delete removes the file and row, shows the fading note, keeps another row's open preview node and focus inside the panel; a file changed on disk after listing shows the changed message, stays on disk, the list reloads and the message survives quiet reloads until dismissed; the native fallback dialog without `BoardLedgerActions`; live editor draft and upload error rows unaffected; no page errors.
+- `python3 -m unittest tests.test_artifact_delete tests.test_artifact_uploads tests.test_report_artifacts`: 76 tests OK. Full Python suite (44 modules, 4 in parallel): 610 tests OK, 13 skipped. `npm test` (with the new file): 217 pass, 0 fail; no reruns.
+- Delete screenshots: `~/.hermes/cache/scratch/bb-delete/tmp/screens/artifact-delete-{row,dialog,dialog-fallback,after-delete,changed,narrow}-{light,dark}.png`.
 
 ## Gaps and limits
 
@@ -85,6 +138,15 @@ Synthetic only, `TMPDIR=~/.hermes/cache/scratch/bb-uploads/tmp`, fixture `tests/
 - Each socket read has a 60 s timeout, but there is no overall deadline: a client that trickles bytes can hold one of the two upload slots for a long time (tailnet clients with a forged Origin only).
 - There is no authentication; anyone who can reach the Board through the tailnet boundary can upload. Uploaded files are distributed by Syncthing to every device sharing the root.
 
+Delete gaps:
+
+- The changed check compares size, whole-second mtime and `version` (inode + nanosecond mtime), so a replacement (new inode) or an edit (new mtime) after the list loaded is refused. Another process (Syncthing, an agent) can still replace the file in the instant between the `lstat` and the `unlink`; the replacement is then removed. This process's own uploads cannot interleave (shared lock).
+- Protection from other findings covers their artifact fields only; a file another report links to by a relative Markdown link (and not through any ledger field) is not detected.
+- Delete is permanent in the Board and Syncthing removes the file on every peer. Only Syncthing file versioning on a peer, if configured, keeps a copy.
+- One file per request; there is no multi-select or delete-all.
+- Files linked from the report or a finding field but stored outside the folder (for example `evidence/` at lane level) cannot be deleted here, by design: other reports may use them.
+- Folders emptied by a delete stay; no directory is ever removed.
+
 ## Decisions for the owner
 
 1. Keep uploads limited to reports with a dedicated folder (recommended), or offer to create `reports/<FID>-<slug>/` for the 94 reports without one?
@@ -92,3 +154,10 @@ Synthetic only, `TMPDIR=~/.hermes/cache/scratch/bb-uploads/tmp`, fixture `tests/
 3. Keep uploads in the folder root (recommended), or add a target subfolder choice (`poc/`, `evidence/`)?
 4. Keep renaming on collision (recommended), or ask before saving under a new name?
 5. Strip image metadata (EXIF) on upload? Recommended: not by default; revisit if screenshots from phones are common.
+
+Delete (feat/board-artifact-delete):
+
+6. Keep delete under the same `--artifact-uploads` flag (recommended), or give it its own `--artifact-delete` flag so a deployment can upload without being able to delete?
+7. Keep Markdown files undeletable from the panel (recommended), or allow deleting non-report Markdown such as notes the owner uploaded?
+8. Keep delete permanent (recommended for now, matches the request), or move files to a Board trash folder (`_trash/` inside the report folder, hidden from the list and ignored by the association) so a mistake can be undone?
+9. Keep error notes until dismissed or a full Reload list (recommended), or also clear them on the 4 s quiet auto-refresh?
