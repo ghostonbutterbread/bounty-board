@@ -18,6 +18,9 @@ Routes (after the optional prefix):
   GET  /api/session?<selector>  session info, if one is running
   POST /api/reset               recreate a report's sandbox
   POST /api/evidence            save the transcript into <report folder>/validation/
+  GET  /api/settings            terminal settings (preview ports, Tailscale binding)
+  POST /api/settings            {ports_tailscale: bool}
+  GET  /api/ports?<selector>    preview ports of a report's sandbox
   GET  /ws?<selector>           WebSocket attach (RFC 6455)
 
 Every request must carry an allowed Host; WebSocket upgrades and state changes
@@ -46,6 +49,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import terminal_auth
 import terminal_checks
+import terminal_ports
 import terminal_sandbox as sb
 import terminal_ws
 
@@ -136,7 +140,11 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                  backend=None, max_sessions=12, pause_after=300, remove_after=4 * 3600, min_free_memory=2 * 1024 ** 3,
                  idle_timeout=None, reap_interval=10, clock=time.time, mem_available=None,
                  max_connections=MAX_CONNECTIONS, ping_interval=PING_INTERVAL, peer_timeout=PEER_TIMEOUT,
-                 max_anonymous=MAX_ANONYMOUS, max_pending=MAX_PENDING, request_deadline=REQUEST_DEADLINE):
+                 max_anonymous=MAX_ANONYMOUS, max_pending=MAX_PENDING, request_deadline=REQUEST_DEADLINE,
+                 preview_ports=False, ports_range=terminal_ports.DEFAULT_RANGE, tailscale_address='auto',
+                 tailscale=None, ports_refresh=terminal_ports.TAILSCALE_REFRESH):
+    """``tailscale`` (a terminal_ports.TailscaleAddress) is for tests only; the
+    command line reaches ``tailscale_address``."""
     root = Path(root).absolute()
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -151,10 +159,30 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
     if not origins:
         raise ValueError('at least one --allowed-origin is required')
     auth = terminal_auth.Auth(allowed_users=allowed_users, trusted_hosts=hosts, hash_record=hash_record, clock=clock)
+    ports_range = tuple(ports_range)
+    if ports_range[0] <= port <= ports_range[1]:
+        raise ValueError('--ports-range must not contain the service port')
+    ports = None
+    if preview_ports:
+        ports = terminal_ports.PortsHub(state_dir=state_dir, ports_range=ports_range, exclude={port},
+                                        tailscale=tailscale or terminal_ports.TailscaleAddress(tailscale_address),
+                                        refresh_interval=ports_refresh)
+    # Off: no ports.sock, no listeners, no agent connection.
+    if backend is not None and hasattr(backend, 'ports_hub'):
+        backend.ports_hub = ports
     checks = terminal_checks.CheckStore(state_dir / 'checks.sqlite3')
     manager = sb.SessionManager(root, backend, max_sessions=max_sessions, pause_after=pause_after,
                                 remove_after=idle_timeout if idle_timeout is not None else remove_after,
                                 min_free_memory=min_free_memory, reap_interval=reap_interval, mem_available=mem_available)
+    def settings_payload():
+        if ports is None:
+            return terminal_ports.disabled_settings(ports_range)
+        return ports.settings_payload()
+
+    def ports_flags():
+        current = settings_payload()
+        return {'preview_ports': current['preview_ports'], 'ports_tailscale': current['ports_tailscale']}
+
     login_html = (STATIC / 'login.html').read_bytes()
     login_js = (STATIC / 'login.js').read_bytes()
     login_css = (STATIC / 'login.css').read_bytes()
@@ -328,7 +356,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                                             'password_login': auth.password_enabled})
                 return self.reply(200, {'user': user, 'method': method, 'idle_timeout': manager.remove_after,
                                         'pause_after': manager.pause_after, 'remove_after': manager.remove_after,
-                                        'max_sessions': manager.max_sessions})
+                                        'max_sessions': manager.max_sessions, **ports_flags()})
             if not user:
                 return self.reply(401, {'error': 'login_required', 'login_url': f'{PREFIX}/login'})
             try:
@@ -347,6 +375,12 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                         return self.reply(200, {'ok': False, 'code': error.code, 'message': error.message})
                     return self.reply(200, {'ok': True, 'folder': mount.folder, 'fid': mount.fid, 'rule': mount.rule,
                                             'reason': mount.reason})
+                if path == '/api/settings':
+                    return self.reply(200, settings_payload())
+                if path == '/api/ports':
+                    session = manager.get(self.selector_from_query())
+                    items = session.ports.items() if session is not None and session.ports is not None else []
+                    return self.reply(200, {'ports': items, **ports_flags()})
                 if path == '/api/session':
                     session = manager.get(self.selector_from_query())
                     return self.reply(200, {'session': session.info() if session else None})
@@ -378,6 +412,8 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             user, _ = self.identity()
             if not user:
                 return self.reply(401, {'error': 'login_required', 'login_url': f'{PREFIX}/login'})
+            if path == '/api/settings':
+                return self.post_settings(body)
             try:
                 sel = sb.clean_selector(body)
                 if path == '/api/checks':
@@ -402,6 +438,20 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                           'unsafe_folder': 409, 'too_many_sessions': 503}.get(error.code, 500)
                 return self.reply(status, {'error': error.code, 'message': error.message})
             return self.reply(404, {'error': 'not_found'})
+
+        def post_settings(self, body):
+            if set(body) != {'ports_tailscale'} or not isinstance(body['ports_tailscale'], bool):
+                return self.reply(400, {'error': 'bad_request'})
+            if ports is None:
+                return self.reply(409, {'error': 'preview_ports_disabled',
+                                        'message': 'Preview ports are off (start the terminal service with --preview-ports).'})
+            try:
+                return self.reply(200, ports.set_tailscale(body['ports_tailscale']))
+            except terminal_ports.PortsError as error:
+                status = 409 if error.code == 'tailscale_not_found' else 500
+                return self.reply(status, {'error': error.code, 'message': error.message})
+            except OSError:
+                return self.reply(500, {'error': 'settings_failed', 'message': 'The settings could not be saved.'})
 
         def do_PUT(self):
             self.request_ready()
@@ -519,6 +569,8 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
             try:
                 manager.close()
                 checks.close()
+                if ports is not None:
+                    ports.close()
             finally:
                 super().server_close()
 
@@ -526,7 +578,7 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
     server.identified_slots = threading.BoundedSemaphore(max_connections)
     server.anonymous_slots = threading.BoundedSemaphore(max_anonymous)
     server.pending, server.pending_lock, server.max_pending = {}, threading.Lock(), max_pending
-    server.manager, server.auth, server.checks = manager, auth, checks
+    server.manager, server.auth, server.checks, server.ports = manager, auth, checks, ports
     return server
 
 
@@ -593,7 +645,20 @@ def main(argv=None):
     parser.add_argument('--cpus', default='1.0')
     parser.add_argument('--pids', type=int, default=256)
     parser.add_argument('--backend', choices=('docker', 'local-test-only'), default='docker')
+    parser.add_argument('--preview-ports', action='store_true',
+                        help='forward ports that a sandbox listens on to host ports (127.0.0.1, plus Tailscale when '
+                             'switched on in Settings)')
+    parser.add_argument('--ports-range', default='9100-9199', help='host ports for preview ports (default 9100-9199)')
+    parser.add_argument('--tailscale-address', default='auto',
+                        help='"auto" (an address in 100.64.0.0/10, tailscale0 first) or that IPv4 address')
     args = parser.parse_args(argv)
+    try:
+        args.ports_range = terminal_ports.parse_range(args.ports_range)
+        args.tailscale_address = terminal_ports.parse_tailscale_address(args.tailscale_address)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.ports_range[0] <= args.port <= args.ports_range[1]:
+        parser.error('--ports-range must not contain the service port')
     if args.remove_after is not None and args.idle_timeout is not None and args.remove_after != args.idle_timeout:
         parser.error('--idle-timeout is the old name of --remove-after; give only one')
     args.remove_after = args.remove_after if args.remove_after is not None else (args.idle_timeout or 4 * 3600)
@@ -611,7 +676,7 @@ def main(argv=None):
         tmp = os.path.realpath(os.environ.get('TMPDIR', '/nonexistent'))
         if os.environ.get('BBTERM_ALLOW_LOCAL_BACKEND') != '1' or not os.path.realpath(args.root).startswith(tmp + '/'):
             parser.error('the local backend is for tests only (needs BBTERM_ALLOW_LOCAL_BACKEND=1 and a root under TMPDIR)')
-        backend = sb.LocalBackend(args.state_dir / 'local')
+        backend = sb.LocalBackend(args.state_dir / 'local')  # ports_hub is set by make_service
     else:
         import terminal_proxy
         backend = sb.DockerBackend(image=args.image, state_dir=args.state_dir, proxy=terminal_proxy.FilteringProxy(),
@@ -621,7 +686,8 @@ def main(argv=None):
                               allowed_users=args.allow_tailnet_user, hash_record=hash_record, state_dir=args.state_dir,
                               backend=backend, max_sessions=args.max_sessions, pause_after=args.pause_after,
                               remove_after=args.remove_after, min_free_memory=args.min_free_memory,
-                              reap_interval=max(1, args.reap_interval))
+                              reap_interval=max(1, args.reap_interval), preview_ports=args.preview_ports,
+                              ports_range=args.ports_range, tailscale_address=args.tailscale_address)
     except ValueError as error:
         parser.error(str(error))
     import signal

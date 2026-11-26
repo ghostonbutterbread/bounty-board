@@ -18,8 +18,9 @@ RUN groupadd -g "${GID}" sandbox \
  && mkdir -p /report /run/bbterm
 
 COPY bbterm-forward.py /usr/local/bin/bbterm-forward
+COPY bbterm-ports.py /usr/local/bin/bbterm-ports
 COPY bashrc /etc/bbterm.bashrc
-RUN chmod 0755 /usr/local/bin/bbterm-forward \
+RUN chmod 0755 /usr/local/bin/bbterm-forward /usr/local/bin/bbterm-ports \
  && echo '[ -f /etc/bbterm.bashrc ] && . /etc/bbterm.bashrc' >> /etc/bash.bashrc \
  && echo '[ -f /etc/bbterm.bashrc ] && . /etc/bbterm.bashrc' >> /etc/profile
 
@@ -27,4 +28,6 @@ USER sandbox
 WORKDIR /report
 # The service runs the container with --init, --network none, --read-only and
 # the proxy socket mounted at /run/bbterm/proxy.sock. The forwarder is PID 1's child.
-CMD ["python3", "/usr/local/bin/bbterm-forward", "3128", "/run/bbterm/proxy.sock"]
+# The preview-ports agent dials out to /run/bbterm/ports.sock (only present with
+# --preview-ports) and is restarted if anything in the sandbox kills it.
+CMD ["sh", "-c", "while :; do python3 /usr/local/bin/bbterm-ports /run/bbterm/ports.sock 3128; sleep 1; done & exec python3 /usr/local/bin/bbterm-forward 3128 /run/bbterm/proxy.sock"]

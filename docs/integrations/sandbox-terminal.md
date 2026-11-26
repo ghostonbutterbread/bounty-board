@@ -48,6 +48,17 @@ browser (Board origin https://<node>:9001)
 - **Network.** `--network none`; the only way out is the service's filtering proxy, reached through the per-session socket and the in-container forwarder on 127.0.0.1:3128. `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY=socks5h://…` (and lower-case), `NO_PROXY=localhost,127.0.0.1,::1`, `NODE_USE_ENV_PROXY=1` are set, so curl, wget, Python requests/urllib, httpie and Go tools work. The proxy speaks HTTP CONNECT, absolute-form HTTP (one request per connection) and SOCKS5 CONNECT. It resolves names itself, refuses the whole name if any answer is non-global, connects only to the vetted address (no rebinding), and vets every connection. Refused: loopback, RFC 1918, CGNAT 100.64.0.0/10 (Tailscale), link-local incl. 169.254.169.254, IPv6 ULA incl. fd7a:115c:a1e0::/48, multicast, unspecified/reserved, plus IPv4 embedded in mapped, NAT64, 6to4 and Teredo addresses.
 - **Save output as evidence.** The service (never the container) writes the session transcript (ANSI stripped, each line stamped with its arrival time, header with report and times, capped at 1 MiB keeping the newest output) to `<mounted folder>/validation/terminal-YYYYMMDD-HHMMSS.txt`: directories opened with `O_NOFOLLOW` from the root, `validation/` must not be a symlink, the file is created with `O_EXCL|O_NOFOLLOW` (a planted symlink at the name is skipped, never followed), and it refuses with "The Board data folder is read-only" when the root or folder is not writable. The drawer then reloads the artifacts panel (the file is listed for dedicated folders).
 
+## Preview ports (opt-in, `--preview-ports`)
+
+Full design, contract and limits: [`sandbox-ports.md`](sandbox-ports.md). Short version: an in-container agent dials out to a host-owned `ports.sock` (0600, created through `/proc/self/fd/<dir_fd>/` in the same read-only `/run/bbterm` directory as `proxy.sock`) and reports listening TCP ports; the service exposes each on `127.0.0.1:<9100-9199>` and, when the `ports_tailscale` setting is on, on the Tailscale IPv4 too. The container keeps `--network none` and exactly two mounts; the egress proxy filter is unchanged.
+
+Threat model additions:
+- **Newly reachable:** with the flag on, ports a sandbox listens on are reachable from local processes on the host (127.0.0.1). With the Tailscale setting on, also from every tailnet peer the ACLs allow, **with no Board auth**. Never on 0.0.0.0 or ::, never the control API port, never the sandbox's proxy port 3128.
+- **Origin isolation:** previews are `http://<ip>:<port>`, a different origin from the Board, so they cannot read or write it; the terminal cookie is `Secure` and `Path=/terminal`, so it is never sent to them.
+- **No new reach for the sandbox:** it still cannot reach host loopback, LAN or tailnet, its own exposed ports included (real-container test: 403 through the proxy).
+- **No host-side connects:** the host only accepts (on its listeners and on `ports.sock`); `terminal_ports.py` has no connect call (tested). A malicious agent can only answer opens with bytes from inside the container. Its control stream is strictly parsed and capped (see sandbox-ports.md).
+- Forwarded traffic keeps a sandbox from pausing and a connection unpauses it; removal still counts 4 h from the last terminal viewer.
+
 ## Access control (terminal service only)
 
 - Allowed without password: request came through Serve (Host is the configured Board authority from `--allowed-origin`) **and** carries exactly one `Tailscale-User-Login` in the `--allow-tailnet-user` list (case-insensitive). The header is trusted only because the service binds to 127.0.0.1 (hard-coded) and Serve sets/replaces that header; a request straight to 127.0.0.1:9011 has a different Host and is not trusted by header. **Assumption:** local processes on Hoster are trusted, as for the Board itself (any local process could forge the headers).
@@ -111,7 +122,7 @@ Not changed (accepted by the reviewer): the host-address list refreshes every 60
 | --- | --- | --- |
 | `GET /healthz` | none | `{ok: true}` |
 | `GET /login`, `/login.js`, `/login.css` | Host check | password page (CSP `default-src 'none'`, `frame-ancestors 'none'`) |
-| `GET /api/status` | yes, else 401 `{error: login_required, login_url}` | `{user, method: tailnet\|password, pause_after, remove_after, idle_timeout (= remove_after), max_sessions}` |
+| `GET /api/status` | yes, else 401 `{error: login_required, login_url}` | `{user, method: tailnet\|password, pause_after, remove_after, idle_timeout (= remove_after), max_sessions, preview_ports, ports_tailscale}` |
 | `POST /api/login` `{username, password}` / `POST /api/logout` | Origin + CSRF header | 200 + cookie; 401 invalid, 429 locked, 403 disabled |
 | `GET /api/checks?family&program&lane&path` | yes | `{checks: {key: epoch}}` |
 | `POST /api/checks` `{family, program, lane, path, key, checked}` | yes + Origin + CSRF | `{checks}`; 400 bad key, 409 cap reached |
@@ -119,9 +130,11 @@ Not changed (accepted by the reviewer): the host-address list refreshes every 60
 | `GET /api/session?…` | yes | `{session: info or null}` |
 | `POST /api/reset` `{selector}` | yes + Origin + CSRF | `{session}` |
 | `POST /api/evidence` `{selector}` | yes + Origin + CSRF | `{relative, name}`; 409 no session / read-only root / unsafe folder |
+| `GET /api/settings` / `POST /api/settings` `{ports_tailscale}` | yes (POST + Origin + CSRF) | preview-ports settings; see sandbox-ports.md |
+| `GET /api/ports?…` | yes | `{ports, preview_ports, ports_tailscale}`; see sandbox-ports.md |
 | `GET /ws?…` (WebSocket) | yes + Origin | client text `{"t":"in","d":…}`, `{"t":"resize","cols","rows"}`; server binary = terminal output, text = `hello{session}`, `viewers{count}`, `reset`, `exit`, `error{code,message}`, `closed{message}` |
 
-Session info: `{id, created, pause_after, remove_after, idle_timeout, folder, workdir, mount_reason, mount_rule, fid, viewers, notes, running, paused}`. The WebSocket `hello` carries `event`: `started`, `attached`, `resumed`, `recreated_idle`, `recreated_vanished` or `reset`. Errors on attach include `low_memory` and `too_many_sessions`.
+Session info: `{id, created, pause_after, remove_after, idle_timeout, folder, workdir, mount_reason, mount_rule, fid, viewers, notes, running, paused, ports}` (`ports` is `[]` unless `--preview-ports`; the WebSocket also sends `{"type":"ports","ports":[…]}` on change). The WebSocket `hello` carries `event`: `started`, `attached`, `resumed`, `recreated_idle`, `recreated_vanished` or `reset`. Errors on attach include `low_memory` and `too_many_sessions`.
 
 WebSocket server (`terminal_ws.py`, RFC 6455, server side only, no extensions/subprotocols): client frames must be masked; RSV bits, unknown opcodes, fragmented or >125-byte control frames, continuation without start, a new data frame mid-message and 64-bit lengths with the MSB set close with 1002; frames or messages over 256 KiB close with 1009 before the payload is read; invalid UTF-8 text or close reason closes with 1007; close codes are validated and echoed; pings are answered; the service pings every 20 s and drops peers silent for 75 s. A standard library has no WebSocket server, and the alternatives (polling, SSE plus POST) would add latency for keystrokes, so a minimal strict implementation with 35 unit tests was chosen.
 
