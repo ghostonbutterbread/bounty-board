@@ -164,7 +164,7 @@ def home_archive(files, links, task_text):
     out = io.BytesIO()
     now = int(time.time())
     with tarfile.open(fileobj=out, mode='w', format=tarfile.PAX_FORMAT) as archive:
-        dirs = {'.report-agent', '.claude', '.claude/skills'}
+        dirs = {'.report-agent', '.claude'}  # ~/.claude/skills is one link to the skills tree
         for name in sorted(dirs):
             info = tarfile.TarInfo(name)
             info.type, info.mode, info.mtime = tarfile.DIRTYPE, 0o700, now
@@ -362,13 +362,14 @@ class ReportAgentHub:
     """Everything the report agent needs for one service: settings, CLI registry,
     login, relay, and the per-session agents."""
 
-    def __init__(self, *, enabled, root, state_dir, clis=None, skills=None, token_file=None, relay_upstream=None,
+    def __init__(self, *, enabled, root, state_dir, clis=None, skills=None, skills_dir=None, token_file=None, relay_upstream=None,
                  relay_ssl_context=None, relay_limits=None, clock=time.monotonic, log=None,
                  working_window=WORKING_WINDOW, pause_hold=PAUSE_HOLD, template=None, stop_grace=3.0):
         self.enabled = bool(enabled)
         self.root = Path(root)
         self.clis = dict(clis or {})
         self.skills = dict(skills or {})
+        self.skills_dir = None if skills_dir is None else str(skills_dir)
         self.clock = clock
         self.log = log or (lambda message: print(f'bbterm agent: {message}', flush=True, file=__import__('sys').stderr))
         self.working_window, self.pause_hold = working_window, pause_hold
@@ -379,7 +380,11 @@ class ReportAgentHub:
         self.relay = None
         self.relay_paths = {}
         self.agent_root = Path(state_dir) / 'report-agent'
-        self.skill_copies = {}  # name -> (source signature, copy path)
+        # One generated tree of stripped skill copies for every sandbox (skills_tree).
+        self.tree = None          # (digest, path, names) of the current tree
+        self.tree_refused = None  # digest of a source set over the total cap (not retried until it changes)
+        self.tree_users = {}      # session id -> tree path its container mounts
+        self.tree_lock = threading.Lock()
         if self.enabled:
             self._prepare_agent_root()
             self.relay = terminal_relay.ModelRelay(self.token, upstream=relay_upstream, ssl_context=relay_ssl_context,
@@ -409,36 +414,106 @@ class ReportAgentHub:
             os.fsync(stream.fileno())
         os.chmod(tmp, 0o644)
         os.replace(tmp, managed / 'managed-settings.json')
-        skills = self.agent_root / 'skills'
-        shutil.rmtree(skills, ignore_errors=True)  # copies from an earlier run; their containers were reaped
-        skills.mkdir(mode=0o755)
-        os.chmod(skills, 0o755)
+        # Copies from an earlier run: their containers were reaped when the service started.
+        shutil.rmtree(self.agent_root / 'skills', ignore_errors=True)
+        for old in self.agent_root.glob('*skills-tree-*'):
+            shutil.rmtree(old, ignore_errors=True)
 
     @property
     def managed_dir(self):
         return self.agent_root / 'managed'
 
-    def skill_copy(self, name, source):
-        """Path of a read-only copy of the skill with permission-widening frontmatter stripped,
-        made again whenever the source changes. Raises cli.CliError (symlinked source, too large)."""
-        cli.check_skill_dir(source)
-        signature = cli.skill_signature(source)
-        with self.lock:
-            cached = self.skill_copies.get(name)
-            if cached is not None and cached[0] == signature and os.path.isdir(cached[1]):
-                return cached[1]
-            digest = hashlib.sha256(signature.encode()).hexdigest()[:12]
-            target = self.agent_root / 'skills' / f'{name}-{digest}'
-            if not target.is_dir():
-                tmp = self.agent_root / 'skills' / f'.{name}-{secrets.token_hex(4)}'
+    def skill_sources(self):
+        """{name: source dir}: every skill of the skills dir, then the explicit --report-agent-skill
+        folders (an explicit skill wins a name clash)."""
+        sources = cli.discover_skills(self.skills_dir, self.root, self.log) if self.skills_dir else {}
+        for name, path in sorted(self.skills.items()):
+            try:
+                cli.check_skill_dir(path)
+            except cli.CliError as error:
+                self.log(f'skill {name!r} not used: {error}')
+                continue
+            if name in sources:
+                self.log(f'skill {name!r}: the --report-agent-skill folder replaces the skills dir entry')
+            sources[name] = path
+        return sources
+
+    def skills_tree(self):
+        """(path, names) of the one read-only tree of stripped skill copies, or (None, []).
+
+        The tree is ``<state>/report-agent/skills-tree-<digest>/``, built whole in a temp folder
+        and renamed into place; the digest covers the skills dir listing (top-level link targets)
+        and a walk of every source, so any change makes a new tree. Trees that no live container
+        mounts are removed. Over TREE_MAX_BYTES or TREE_MAX_FILES the tree is refused (logged)."""
+        with self.tree_lock:
+            sources = self.skill_sources()
+            parts = []
+            if self.skills_dir:
                 try:
-                    cli.copy_skill(source, tmp)
+                    listing = sorted(os.listdir(self.skills_dir))
+                    parts.append([(n, os.readlink(os.path.join(self.skills_dir, n))
+                                   if os.path.islink(os.path.join(self.skills_dir, n)) else '') for n in listing])
+                except OSError:
+                    parts.append(None)
+            for name, path in sorted(sources.items()):
+                try:
+                    parts.append((name, path, cli.skill_signature(path)))
+                except OSError:
+                    self.log(f'skill {name!r} not used: it changed while it was read')
+                    sources.pop(name)
+            if not sources:
+                self.tree = None
+                self._gc_trees()
+                return None, []
+            digest = hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
+            if self.tree is not None and self.tree[0] == digest and os.path.isdir(self.tree[1]):
+                return self.tree[1], list(self.tree[2])
+            if self.tree_refused == digest:
+                return None, []
+            target = self.agent_root / f'skills-tree-{digest}'
+            if not target.is_dir():
+                tmp = self.agent_root / f'.skills-tree-{secrets.token_hex(6)}'
+                try:
+                    os.mkdir(tmp, 0o755)
+                    total = files = skipped = 0
+                    for name, path in sorted(sources.items()):
+                        try:
+                            size, count = cli.copy_skill(path, tmp / name)
+                        except (cli.CliError, OSError) as error:
+                            shutil.rmtree(tmp / name, ignore_errors=True)
+                            skipped += 1
+                            self.log(f'skill {name!r} not copied: {error}')
+                            continue
+                        total += size
+                        files += count
+                        if total > cli.TREE_MAX_BYTES or files > cli.TREE_MAX_FILES:
+                            self.log(f'skills tree refused: more than {cli.TREE_MAX_BYTES // (1024 * 1024)} MiB or '
+                                     f'{cli.TREE_MAX_FILES} files ({len(sources)} skills); no skills are mounted')
+                            shutil.rmtree(tmp, ignore_errors=True)
+                            self.tree_refused, self.tree = digest, None
+                            self._gc_trees()
+                            return None, []
+                    os.chmod(tmp, 0o755)
                     os.replace(tmp, target)
+                    self.log(f'skills tree built: {len(sources) - skipped} skills, {skipped} skipped, '
+                             f'{files} files, {total // 1024} KiB')
                 except BaseException:
                     shutil.rmtree(tmp, ignore_errors=True)
                     raise
-            self.skill_copies[name] = (signature, str(target))
-            return str(target)
+            names = sorted(os.listdir(target))
+            self.tree = (digest, str(target), names)
+            self.tree_refused = None
+            self._gc_trees()
+            return str(target), names
+
+    def _gc_trees(self):
+        """Remove generated trees that are neither current nor mounted by a live container (tree_lock held)."""
+        keep = set(self.tree_users.values())
+        if self.tree is not None:
+            keep.add(self.tree[1])
+        for folder in self.agent_root.glob('skills-tree-*'):
+            if str(folder) not in keep:
+                shutil.rmtree(folder, ignore_errors=True)
 
     # -- settings / config ---------------------------------------------------------
     def selected(self):
@@ -543,16 +618,17 @@ class ReportAgentHub:
             args += ['--mount', f'type=bind,source={real},target={cli.BIN_DIR}/{cli_id},readonly']
         # The permission policy: host-generated, read-only, where Claude Code reads managed settings.
         args += ['--mount', f'type=bind,source={self.managed_dir.absolute()},target={cli.MANAGED_DIR},readonly']
-        skills = []
-        for name, path in sorted(self.skills.items()):
-            try:
-                copy = self.skill_copy(name, path)
-            except (cli.CliError, OSError) as error:
-                self.log(f'skill {name} not mounted: {error}')
-                continue
-            skills.append(name)
-            args += ['--mount', f'type=bind,source={copy},target={cli.SKILLS_DIR}/{name},readonly']
-        session.agent_mounts = {'clis': mounted, 'skills': skills}
+        # Every skill in one generated read-only tree; ~/.claude/skills links to it.
+        try:
+            tree, skills = self.skills_tree()
+        except OSError as error:
+            self.log(f'skills tree not built: {type(error).__name__}')
+            tree, skills = None, []
+        if tree is not None:
+            args += ['--mount', f'type=bind,source={tree},target={cli.SKILLS_DIR},readonly']
+            with self.tree_lock:
+                self.tree_users[getattr(session, 'id', None) or id(session)] = tree
+        session.agent_mounts = {'clis': mounted, 'skills': skills, 'skills_tree': tree}
         return args
 
     def open_relay(self, dir_fd, session):
@@ -581,6 +657,9 @@ class ReportAgentHub:
             agent.pty.stop(signals=(signal.SIGHUP,), grace=0.5)
         relay, session.relay = getattr(session, 'relay', None), None
         self.relay_paths.pop(session.id, None)
+        with self.tree_lock:
+            if self.tree_users.pop(getattr(session, 'id', None) or id(session), None) is not None:
+                self._gc_trees()
         if relay is not None and self.relay is not None:
             self.relay.close_session(relay)
 

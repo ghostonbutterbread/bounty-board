@@ -31,7 +31,8 @@ DUMMY_OAUTH_TOKEN = 'sk-ant-oat01-report-agent-relay-placeholder-not-a-credentia
 
 MODEL_RE = re.compile(r'[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?')
 CLI_ID_RE = re.compile(r'[a-z][a-z0-9-]{0,30}')
-SKILL_NAME_RE = re.compile(r'[a-z0-9][a-z0-9-]{0,63}')
+# Real skill names use letters, digits, '.', '_' and '-' (bounded; never '.' or '..' since the first is alnum).
+SKILL_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 
 MANAGED_DIR = '/etc/claude-code'       # Claude Code's managed (enterprise) settings directory on Linux
 # Every one of these asks Ryu in the Agent tab, whatever lower settings, skills or the agent itself say.
@@ -138,9 +139,9 @@ class ClaudeAdapter:
             '.claude/settings.json': json.dumps(settings, indent=2).encode() + b'\n',
         }
         # Docker would create a bind target's parents root-owned inside the tmpfs
-        # HOME, and Claude Code must write ~/.claude, so skills are mounted under
-        # SKILLS_DIR and linked from ~/.claude/skills (Claude Code follows the links).
-        links = {f'.claude/skills/{name}': f'{SKILLS_DIR}/{name}' for name in sorted(skills)}
+        # HOME, and Claude Code must write ~/.claude, so the one skills tree is mounted
+        # at SKILLS_DIR and ~/.claude/skills is a single link to it (Claude Code follows it).
+        links = {'.claude/skills': SKILLS_DIR} if skills else {}
         return files, links
 
 
@@ -244,6 +245,81 @@ def resolve_binary(path):
 # the skill is loaded; hooks and MCP servers run code). Copies keep only name and description.
 SKILL_COPY_MAX = 64 * 1024 * 1024
 SKILL_FILES_MAX = 2000
+# The whole generated tree (every skill of --report-agent-skills-dir plus --report-agent-skill).
+TREE_MAX_BYTES = 256 * 1024 * 1024
+TREE_MAX_FILES = 20000
+
+
+def check_skills_dir(path):
+    """``--report-agent-skills-dir``: a real directory (not a symlink) owned by this user and not
+    writable by others. Group-writable is accepted (Hoster's umask 002). Raises CliError."""
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        raise CliError(f'skills directory {path}: {error.strerror}') from None
+    if stat.S_ISLNK(info.st_mode):
+        raise CliError(f'skills directory {path} is a symlink (refused)')
+    if not stat.S_ISDIR(info.st_mode):
+        raise CliError(f'skills directory {path} is not a directory')
+    if info.st_uid != os.getuid():
+        raise CliError(f'skills directory {path} is owned by another user')
+    if info.st_mode & 0o002:
+        raise CliError(f'skills directory {path} is writable by other users')
+    return info
+
+
+def _inside(path, real_root):
+    return path == real_root or path.startswith(real_root.rstrip('/') + '/')
+
+
+def discover_skills(skills_dir, root, log):
+    """{name: real source directory} for every top-level entry of ``skills_dir`` that is a
+    directory, or a symlink to one, with a top-level regular SKILL.md. A top-level symlink is
+    resolved once; its target must be a directory owned by this user and outside ``root``.
+    Everything else is skipped with one log line (names and reasons only, never contents)."""
+    try:
+        check_skills_dir(skills_dir)
+        names = sorted(os.listdir(skills_dir))
+    except (CliError, OSError) as error:
+        log(f'skills dir not used: {error}')
+        return {}
+    real_root = os.path.realpath(str(root))
+    out, skipped = {}, 0
+    for name in names:
+        full = os.path.join(skills_dir, name)
+
+        def skip(reason):
+            nonlocal skipped
+            skipped += 1
+            log(f'skills dir: skipped {name!r}: {reason}')
+        if not SKILL_NAME_RE.fullmatch(name):
+            skip('name not allowed')
+            continue
+        try:
+            info = os.lstat(full)
+            target = os.path.realpath(full) if stat.S_ISLNK(info.st_mode) else full
+            target_info = os.lstat(target)
+        except OSError:
+            skip('broken link')
+            continue
+        if not stat.S_ISDIR(target_info.st_mode):
+            skip('not a directory')
+            continue
+        if target_info.st_uid != os.getuid():
+            skip('owned by another user')
+            continue
+        if _inside(os.path.realpath(target), real_root):
+            skip('inside the Board data root')
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(os.path.join(target, 'SKILL.md')).st_mode):
+                raise OSError
+        except OSError:
+            skip('no top-level SKILL.md')
+            continue
+        out[name] = target
+    log(f'skills dir: {len(out)} skills found, {skipped} skipped')
+    return out
 
 
 def strip_frontmatter(text):
@@ -309,7 +385,8 @@ def skill_signature(path):
 
 def copy_skill(src, dest):
     """Copy a skill folder into ``dest`` (new): regular files and folders only, symlinks skipped
-    (never followed), SKILL.md files stripped, dirs 0755 and files 0644, size and count capped."""
+    (never followed), SKILL.md files stripped, dirs 0755 and files 0644, size and count capped.
+    Returns (bytes, files) copied."""
     total = count = 0
     os.mkdir(dest, 0o755)
     for folder, dirs, files in os.walk(src, followlinks=False):
@@ -341,3 +418,4 @@ def copy_skill(src, dest):
             out = os.open(os.path.join(target, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
             with os.fdopen(out, 'wb') as stream:
                 stream.write(data)
+    return total, count

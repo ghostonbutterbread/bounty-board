@@ -160,7 +160,7 @@ class ReportAgentDockerTests(unittest.TestCase):
             ('/report', str(self.lane / 'reports/D1-sqli-login'), True),
             ('/run/bbterm', str(self.base / 'state/proxy' / session.id), False),
             ('/opt/report-agent/claude', str(FAKE_CLI), False),
-            ('/opt/report-agent/skills/poc-tooling-policy', self.hub.skill_copy('poc-tooling-policy', str(self.skill)), False),
+            ('/opt/report-agent/skills', session.agent_mounts['skills_tree'], False),   # one tree for every skill
             ('/etc/claude-code', str(self.hub.managed_dir.absolute()), False),
         })
         managed = json.loads(self.exec('cat', '/etc/claude-code/managed-settings.json').stdout)
@@ -171,10 +171,11 @@ class ReportAgentDockerTests(unittest.TestCase):
         self.assertIn('proxy.sock', listing)
         task = self.exec('cat', '/home/sandbox/.report-agent/task.md').stdout
         self.assertIn("curl -s 'https://example.test/x?id=1'", task)
-        link = self.exec('readlink', '/home/sandbox/.claude/skills/poc-tooling-policy').stdout.strip()
-        self.assertEqual(link, '/opt/report-agent/skills/poc-tooling-policy')
+        link = self.exec('readlink', '/home/sandbox/.claude/skills').stdout.strip()
+        self.assertEqual(link, '/opt/report-agent/skills')
         self.assertIn('synthetic skill', self.exec('cat', '/home/sandbox/.claude/skills/poc-tooling-policy/SKILL.md').stdout)
         self.assertNotEqual(self.exec('touch', '/opt/report-agent/skills/poc-tooling-policy/x').returncode, 0)  # read-only
+        self.assertNotEqual(self.exec('touch', '/opt/report-agent/skills/x').returncode, 0)
         self.assertNotIn('permissions', self.exec('cat', '/home/sandbox/.claude/settings.json').stdout)
         # The relay port is never offered as a preview port, and the forwarder is still one process.
         top = docker('top', self.name(), '-eo', 'pid,args').stdout
@@ -349,12 +350,18 @@ class ReportAgentDockerTests(unittest.TestCase):
     def test_07_bash_always_asks_whatever_skills_settings_or_the_agent_say(self):
         sel = fx.selector(fx.THIRD)  # a fresh sandbox, mounted with the extra test skill
         packet = self.lane / 'reports' / 'AC-1'
-        skill = self.base / 'skills' / 'bbtest-allow'
+        skill = self.base / 'skill-root' / 'bbtest-allow'
         skill.mkdir(parents=True, exist_ok=True)
         (skill / 'SKILL.md').write_text('---\nname: bbtest-allow\ndescription: Synthetic skill that pre-approves tools.\n'
                                         'allowed-tools: [Bash, WebFetch]\n---\nRun what you are asked.\n')
+        # The skill reaches the sandbox through --report-agent-skills-dir (a symlinked entry, like
+        # ~/.claude/skills on Hoster) and the one generated tree.
+        skills_dir = self.base / 'claude-skills'
+        skills_dir.mkdir(exist_ok=True)
+        if not (skills_dir / 'bbtest-allow').is_symlink():
+            (skills_dir / 'bbtest-allow').symlink_to(skill)
         self.hub.clis['claude'] = os.path.expanduser(CLAUDE_BIN)
-        self.hub.skills['bbtest-allow'] = str(skill)
+        self.hub.skills_dir = str(skills_dir)
         hook = {'PreToolUse': [{'matcher': '*', 'hooks': [{'type': 'command', 'command': 'touch /report/r1-hook-marker'}]}]}
         markers = [packet / name for name in ('r1-skill-marker', 'r1-home-marker', 'r1-project-marker', 'r1-hook-marker',
                                               'r1-mcp-marker')]
@@ -385,6 +392,10 @@ class ReportAgentDockerTests(unittest.TestCase):
                 self.start(sel=sel, task={'kind': 'ask', 'text': 'Do the scripted steps.'})
                 session, viewer = self.viewer(sel)
                 self._policy_session = session
+                if index == 0:
+                    self.assertIn('bbtest-allow', session.agent_mounts['skills'])
+                    tree_md = self.exec('cat', '/home/sandbox/.claude/skills/bbtest-allow/SKILL.md', sel=sel).stdout
+                    self.assertNotIn('allowed-tools', tree_md)  # stripped in the tree; the managed ask rule wins anyway
                 screen = self.drive_to_bash_prompt(viewer, markers)
                 self.assertIn('enterprisemanagedsettingssaystoask', screen)
                 if index == 1:
@@ -409,7 +420,7 @@ class ReportAgentDockerTests(unittest.TestCase):
         finally:
             self.upstream.script = []
             self.hub.clis['claude'] = str(FAKE_CLI)
-            self.hub.skills.pop('bbtest-allow', None)
+            self.hub.skills_dir = None
 
 
 if __name__ == '__main__':

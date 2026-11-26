@@ -703,6 +703,9 @@ def agent_flags(parser):
                         help='host binary of a CLI (claude, codex, omp, opencode); symlinks are resolved at sandbox start')
     parser.add_argument('--report-agent-skill', action='append', default=[], metavar='NAME=PATH',
                         help='skill folder mounted read-only for the agent (repeatable; no symlinks)')
+    parser.add_argument('--report-agent-skills-dir', type=Path, metavar='PATH',
+                        help='every skill in this folder (e.g. ~/.claude/skills; top-level symlinks resolved once) is '
+                             'copied, stripped, into one read-only tree for the agent')
     parser.add_argument('--report-agent-token-file', type=Path,
                         help='0600 file with the dedicated login from "claude setup-token" (outside --root)')
     parser.add_argument('--agent-connect', action='store_true',
@@ -724,10 +727,15 @@ def build_agent_hubs(args):
             token = terminal_relay.TokenFile.check_path(args.report_agent_token_file, args.root)
             if os.path.islink(token):
                 raise ValueError('--report-agent-token-file must not be a symlink')
+        skills_dir = None
+        if args.report_agent_skills_dir is not None:
+            skills_dir = os.path.abspath(str(args.report_agent_skills_dir))
+            terminal_agent_cli.check_skills_dir(skills_dir)
         report_agent = terminal_report_agent.ReportAgentHub(enabled=True, root=args.root, state_dir=args.state_dir,
-                                                            clis=clis, skills=skills, token_file=token)
-    elif args.report_agent_cli or args.report_agent_skill or args.report_agent_token_file:
-        raise ValueError('--report-agent-cli, --report-agent-skill and --report-agent-token-file need --report-agent')
+                                                            clis=clis, skills=skills, skills_dir=skills_dir, token_file=token)
+    elif args.report_agent_cli or args.report_agent_skill or args.report_agent_token_file or args.report_agent_skills_dir:
+        raise ValueError('--report-agent-cli, --report-agent-skill, --report-agent-skills-dir and --report-agent-token-file '
+                         'need --report-agent')
     if args.agent_connect:
         if not args.herdr_session or not terminal_connect.SESSION_NAME_RE.fullmatch(args.herdr_session):
             raise ValueError('--agent-connect needs --herdr-session NAME (letters, digits, _ . -)')

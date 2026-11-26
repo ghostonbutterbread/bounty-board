@@ -101,10 +101,37 @@ class TaskTests(unittest.TestCase):
         self.assertIn('echo {{REPORT_PATH}} ```x```', text)  # not expanded again
         self.assertIn('````text\n', text)  # fence longer than the block's backticks
         self.assertIn('a standalone Python PoC (poc.py)', text)
-        for rule in ('bunny-report-and-triage', 'triager-first-poc-authoring', 'poc-tooling-policy', 'Never edit `EVIDENCE.md`',
-                     'has not been run', 'Never send requests to the target', 'Never ask Ryu to paste cookies',
-                     'Manual Reproduction', '--proxy URL', 'No em dashes'):
-            self.assertIn(rule, text)
+        for name in ('bunny-report-and-triage', 'triager-first-poc-authoring', 'poc-tooling-policy', 'Manual Reproduction'):
+            self.assertIn(name, text)
+        rules = (
+            'Never edit `EVIDENCE.md`', '--proxy URL', 'No em dashes', 'ask whether to delete it',
+            # skills to load (follow-up 2)
+            'vulnerability-class skill that matches this report (for example `xss`, `idor` or `ssrf`)',
+            'Load `live-testing-policy` before any live request',
+            # what the sandbox lacks
+            'sandbox egress proxy. It stands in for the task MITM here',
+            'no task MITM, no Bitwarden, no inbox and no ledger', "The PoC's own output, saved in the packet, is the record",
+            'say what is missing and continue with what is possible', 'Never improvise a substitute for credentials',
+            # order of work
+            '1. Offline checks first', '2. Then ask to run the PoC end to end. The approval prompt shows',
+            'only to the target and endpoints named in the report and the evidence, with the fewest requests needed, and nothing destructive',
+            '3. Show Ryu the observed result', '4. Save the run output as a new file in the packet',
+            '`poc-run-<UTC timestamp>.txt`', 'with secrets redacted', 'Never overwrite an earlier run file',
+            # verdict
+            'say GREEN only when a live run showed the expected impact', 'YELLOW / not ready, and what is missing',
+            'Never write a status word into the report file',
+            # credentials
+            'also supports `--auth-file PATH`', 'Never ask Ryu to paste cookies, tokens or passwords into this chat',
+            'never print a credential or the contents of a credential file',
+            "`read -rs BB_AUTH && printf '%s' \"$BB_AUTH\" > /tmp/bb-auth && chmod 600 /tmp/bb-auth && unset BB_AUTH`",
+            'The sandbox `/tmp` is shared within this container', 'run the PoC with `--auth-file /tmp/bb-auth`',
+            'ask Ryu whether to delete `/tmp/bb-auth`',
+            # out of scope
+            'looks out of scope or different from the report, stop and ask Ryu',
+        )
+        for rule in rules:
+            self.assertEqual(text.count(rule), 1, rule)
+        self.assertNotIn('Never send requests to the target unless', text)  # replaced by the approval flow
         self.assertNotIn('—', template)
         self.assertNotIn('{{', ra.render_prompt(template, 'r.md', ra.validate_task({'kind': 'ask', 'text': 'hi'})))
 
@@ -144,8 +171,10 @@ class CliRegistryTests(unittest.TestCase):
             cli.parse_skill_flags([f'x={link}'])
         with self.assertRaises(cli.CliError):
             cli.parse_skill_flags([f'x={self.dir / "missing"}'])
-        with self.assertRaises(cli.CliError):
-            cli.parse_skill_flags([f'Bad_Name={skill}'])
+        self.assertEqual(cli.parse_skill_flags([f'Bunny_Report.v2={skill}']), {'Bunny_Report.v2': str(skill)})  # real names
+        for bad in ('.hidden', 'a/b', 'x' * 129, '-lead'):
+            with self.assertRaises(cli.CliError):
+                cli.parse_skill_flags([f'{bad}={skill}'])
 
     def test_binary_is_resolved_through_symlinks(self):
         real = self.dir / 'versions' / '9.9.9'
@@ -171,7 +200,8 @@ class CliRegistryTests(unittest.TestCase):
         self.assertEqual(set(settings), {'env'})  # the policy is in the read-only managed file (test_review_r1_*)
         self.assertEqual(settings['env']['DISABLE_AUTOUPDATER'], '1')
         self.assertEqual(settings['env']['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], '1')
-        self.assertEqual(links, {'.claude/skills/poc-tooling-policy': '/opt/report-agent/skills/poc-tooling-policy'})
+        self.assertEqual(links, {'.claude/skills': '/opt/report-agent/skills'})  # one link to the one tree
+        self.assertEqual(cli.ClaudeAdapter().home_files([])[1], {})
         env = cli.ClaudeAdapter().env()
         self.assertEqual(env['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:3129')
         self.assertEqual(env['CLAUDE_CODE_OAUTH_TOKEN'], cli.DUMMY_OAUTH_TOKEN)
@@ -187,7 +217,8 @@ class CliRegistryTests(unittest.TestCase):
             self.assertEqual(archive.extractfile(members['.report-agent/task.md']).read(), b'task body')
         self.assertEqual(members['.report-agent'].mode, 0o700)
         self.assertEqual(members['.claude.json'].mode, 0o600)
-        self.assertTrue(members['.claude/skills/s1'].issym())
+        self.assertTrue(members['.claude/skills'].issym())
+        self.assertEqual(members['.claude/skills'].linkname, '/opt/report-agent/skills')
         self.assertFalse(any(m.name.startswith('/') or '..' in m.name for m in members.values()))
 
 
@@ -297,11 +328,11 @@ class DockerExecTests(unittest.TestCase):
             try:
                 session = type('S', (), {})()
                 args = hub.run_args_extra(session)
-                copy = hub.skill_copy('poc-tooling-policy', str(skill))
+                tree = hub.tree[1]
                 self.assertEqual(args, ['--mount', f'type=bind,source={real},target=/opt/report-agent/claude,readonly',
                                         '--mount', f'type=bind,source={hub.managed_dir.absolute()},target=/etc/claude-code,readonly',
-                                        '--mount', f'type=bind,source={copy},target=/opt/report-agent/skills/poc-tooling-policy,readonly'])
-                self.assertEqual(session.agent_mounts, {'clis': {'claude': str(real)}, 'skills': ['poc-tooling-policy']})
+                                        '--mount', f'type=bind,source={tree},target=/opt/report-agent/skills,readonly'])
+                self.assertEqual(session.agent_mounts, {'clis': {'claude': str(real)}, 'skills': ['poc-tooling-policy'], 'skills_tree': tree})
                 skill.rmdir()
                 skill.symlink_to(base)  # swapped for a symlink after start: refused at docker run
                 self.assertEqual(hub.run_args_extra(session)[4:], [])

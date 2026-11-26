@@ -78,11 +78,11 @@ class HostFilesTests(unittest.TestCase):
     def test_skills_are_mounted_from_stripped_read_only_copies(self):
         session = type('S', (), {})()
         args = self.hub.run_args_extra(session)
-        mount = [a for a in args if a.endswith('target=/opt/report-agent/skills/wide,readonly')]
+        mount = [a for a in args if a.endswith('target=/opt/report-agent/skills,readonly')]
         self.assertEqual(len(mount), 1)
-        copy = Path(mount[0].split('source=', 1)[1].split(',', 1)[0])
+        copy = Path(mount[0].split('source=', 1)[1].split(',', 1)[0]) / 'wide'
         self.assertNotEqual(copy, self.skill)
-        self.assertTrue(str(copy).startswith(str(self.base / 'state/report-agent/skills/')))
+        self.assertTrue(str(copy).startswith(str(self.base / 'state/report-agent/skills-tree-')))
         text = (copy / 'SKILL.md').read_text()
         self.assertNotIn('allowed-tools: [', text)
         self.assertNotIn('hooks:', text)
@@ -97,15 +97,15 @@ class HostFilesTests(unittest.TestCase):
         self.assertEqual(self.hub.run_args_extra(session), args)
         time.sleep(0.01)
         (self.skill / 'SKILL.md').write_text(SKILL.replace('# Body', '# Body v3'))
-        newer = [a for a in self.hub.run_args_extra(session) if 'skills/wide' in a][0]
+        newer = [a for a in self.hub.run_args_extra(session) if 'target=/opt/report-agent/skills,' in a][0]
         self.assertNotEqual(newer, mount[0])
-        self.assertIn('# Body v3', (Path(newer.split('source=', 1)[1].split(',', 1)[0]) / 'SKILL.md').read_text())
+        self.assertIn('# Body v3', (Path(newer.split('source=', 1)[1].split(',', 1)[0]) / 'wide' / 'SKILL.md').read_text())
 
     def test_symlinked_skill_folder_is_still_refused(self):
         self.skill.rename(self.base / 'real')
         self.skill.symlink_to(self.base / 'real')
         session = type('S', (), {})()
-        self.assertFalse([a for a in self.hub.run_args_extra(session) if 'skills/wide' in a])
+        self.assertFalse([a for a in self.hub.run_args_extra(session) if '/opt/report-agent/skills' in a])
         self.assertEqual(session.agent_mounts['skills'], [])
 
 
