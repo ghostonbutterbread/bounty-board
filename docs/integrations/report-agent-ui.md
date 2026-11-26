@@ -49,6 +49,14 @@ Each block bar in the preview (play, Run, Checked) gets "Convert" before Checked
 
 In the popover, under the start form or the live section: "Running agents on this program", loaded from `GET /api/agents/active?<selector>`, lane matches first, then program matches (stable within each). "Show all" (`aria-pressed`) reloads with `all=1` and the heading reads "All running agents"; because `all=1` carries no selector (its items all have `match: null`), the scoped list is fetched alongside and its matches are carried over, so lane and program agents still come first. Rows follow the Recent row: title and a muted monospace subline (`cwd_relative`, or "outside Shared") on the left; pills on the right on one line ("escaped" warning when `unsafe_chars`, agent kind Claude/OMP, status working/idle/blocked/done). Every string is set with `textContent`; escaped values are shown as the service escaped them. The copy says: "These are the agents' real sessions on Hoster, outside any sandbox. What you type goes straight to the agent." A connect tab's drawer heading reads "Hoster" (not "Sandbox") and its meta says "Real session on Hoster, no sandbox. Typing goes to the agent." With connect off the section is one muted line: "Connecting to running agents is off on this Board."
 
+## Follow-up 2: Hoster's skills and end-to-end validation (backend and prompt only)
+
+Ryu: the PoC should be validated end to end with web access, and the agent should have our skills without anyone maintaining a list. No UI change was needed: the Agent button, popover, tab and approval flow are the same; what the agent knows and does changed.
+
+- `--report-agent-skills-dir ~/.claude/skills` gives the agent every skill Claude Code uses on Hoster (about 200), copied with permission-widening frontmatter removed into one read-only tree mounted at `/opt/report-agent/skills`; `~/.claude/skills` in the sandbox links to it. New skills appear in the next sandbox started after the change; nothing to maintain. Details, mounts and the threat model: [`report-agent.md`](report-agent.md) (Skills tree).
+- The prompt now has the agent load the vulnerability-class skill and `live-testing-policy`, run offline checks, then ask to run the PoC end to end (the Agent tab shows the approval prompt for each command), show the result, save `poc-run-<UTC timestamp>.txt` in the packet, and give GREEN only after a live run showed impact (else "YELLOW / not ready"). For a test-account credential it gives Ryu a `read -rs` one-liner for the Terminal tab that writes `/tmp/bb-auth`, runs the PoC with `--auth-file /tmp/bb-auth`, and asks afterwards whether to delete the file.
+- Commit `4d79074`. Runs: see `report-agent.md`, "Follow-up 2". The browser file `static/tests/report-agent.synthetic.test.cjs` still passes (6 pass, 0 fail) with the new template.
+
 ## Seams added to `sandbox-terminal.js`
 
 All on `window.BoardTerminal` (the drawer still owns everything; agent logic stays in `report-agent.js`):
@@ -160,3 +168,6 @@ Regenerate: `REPORT_AGENT_SCREENSHOT_DIR=$PWD/docs/integrations node --test --te
 7. Exited agents get "Close session" without a confirmation (nothing is running); running ones get Stop with a confirmation.
 8. (Follow-up) The page checks the setup-token shape before sending, so a mistyped password or the wrong paste never leaves the browser; the service checks it again.
 9. (Follow-up) The status pill stays visible next to the login field, so "No sandbox login on Hoster yet" and the field show together; Replace keeps the saved login until a new Save succeeds.
+10. (Follow-up 2) The agent gets every Hoster skill through `--report-agent-skills-dir`; skills are readable by code in the sandbox, so they must hold no secrets (deploy check in `report-agent.md`).
+11. (Follow-up 2) The agent can read the test-account credential file it is given (`/tmp/bb-auth`), and so can any process in that sandbox, until it is deleted; it asks after the run whether to delete it, and the file vanishes with the container's tmpfs anyway.
+12. (Follow-up 2) Live runs are gated by Ryu's per-command approval and the egress filter; staying on the report's endpoints is a prompt rule, not a technical limit.
