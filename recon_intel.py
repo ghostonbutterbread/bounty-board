@@ -1310,16 +1310,36 @@ class ReconIntel:
         finally:
             self.url_slots.release()
 
+    def annotate_urls(self, program, items):
+        """Scope verdicts for URL browser items, from the scope cache only (scope_check.py).
+
+        Missing URLs are queued as one background classify job for the program
+        (front of the queue); a request never starts BBH. Returns the summary, or
+        None without a scope checker. Items are fresh per request, so they are
+        annotated in place."""
+        if self.scope is None:
+            return None
+        targets = [item['url'] for item in items if isinstance(item, dict) and item.get('url')]
+        verdicts, summary = self._scope_lookup(program, list(dict.fromkeys(targets)), front=True)
+        for item in items:
+            if isinstance(item, dict):
+                item['scope'] = verdicts.get(item.get('url')) if item.get('url') else None
+        return summary
+
     def urls(self, family, program, lane, filters, cursor=0, limit=50, order='desc'):
         status, body = self._url_call(family, program, lane, lambda path: list_urls(path, filters, cursor, limit, self.budget, order))
         if status == 200:
             body['filters'] = {k: (text(v, 300) if isinstance(v, str) else v) for k, v in filters.items() if v}
+            if isinstance(body.get('items'), list):
+                body['scope_summary'] = self.annotate_urls(program, body['items'])
         return status, body
 
     def url(self, family, program, lane, url_id):
         status, body = self._url_call(family, program, lane, lambda path: url_history(path, url_id, self.budget))
         if status == 200 and body is None:
             return 404, {'error': 'url_not_found'}
+        if status == 200 and isinstance(body, dict) and body.get('url'):
+            body['scope_summary'] = self.annotate_urls(program, [body])
         return status, body
 
     def refresh_url_index(self, family, program, lane):

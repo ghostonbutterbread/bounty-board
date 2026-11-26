@@ -254,6 +254,14 @@ test('writer off: no Mark; layouts in light, dark, dusk, wide and phone', {timeo
   await waitRows(page, 50, 'rows');
   assert.equal(await page.locator('[data-ru-mark], .ru-row-select').count(), 0);
   assert.match(await page.locator('#ri-urls').innerText(), /Editing is off: the backend has not enabled the BBH writer\./);
+  // A program with a scope folder on a Board without --bbh: rows shown, "Scope not checked", copy blocked.
+  await page.goto(`${origin}/#/recon?p=web_bounty%2Finitech-demo&lane=web&u=1&uh=api.example.test`);
+  await waitRows(page, 30, 'unchecked rows');
+  assert.equal(await page.locator('tr[data-ru-row][data-ru-scope="unchecked"]').count(), 30);
+  assert.equal(await rows(page).first().locator('[data-ri-scope="unchecked"]').innerText(), 'Scope not checked');
+  assert.match(await rows(page).first().innerText(), /scope not checked/);
+  assert.equal(await rows(page).first().locator('[data-ru-copy]').count(), 0);
+  await page.goto(`${origin}/#/recon?p=web_bounty%2Facme-demo&lane=web&u=1`);
   await page.locator('#recon-scope-panels').waitFor();
   await until(async () => (await page.locator('.ri-computing').count()) === 0 && (await page.locator('[data-ri-depth] a[data-ri-urls]').count()) > 0, 'summary computed', 30000);
   await page.evaluate(() => document.querySelectorAll('.toast').forEach(t => t.remove()));
@@ -270,4 +278,48 @@ test('writer off: no Mark; layouts in light, dark, dusk, wide and phone', {timeo
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(overflow <= 1, `phone layout overflows by ${overflow}px`);
   await shot('recon-program-phone.png');
+}));
+
+test('scope in the URL browser: hidden by default, oos=1 shows muted rows, copy gated, mark allowed', {timeout: 150000}, () => withBoard('writer', async ({page, origin, calls, shot}) => {
+  const initech = (extra = '') => `${origin}/#/recon?p=web_bounty%2Finitech-demo&lane=web${extra}`;
+  await page.goto(initech('&u=1&uh=static.example.test'));
+  // static.example.test is excluded by initech-demo's scope: its rows are hidden with a Show link.
+  const line = page.locator('#ri-urls [data-ru-oos-hidden]');
+  await until(async () => /8 out-of-scope URLs on this page hidden/.test(await line.innerText()), 'hidden line', 30000);
+  assert.equal(await rows(page).count(), 0);
+  assert.match(await page.locator('#ri-urls').innerText(), /Every URL on this page is out of scope\./);
+  const show = line.locator('a[data-ru-oos="1"]');
+  assert.match(await show.getAttribute('href'), /&oos=1/);
+  assert.match(await show.getAttribute('href'), /&u=1&uh=static\.example\.test/);
+  await show.click();
+  await page.waitForFunction(() => location.hash.includes('oos=1'));
+  await waitRows(page, 8, 'out-of-scope rows shown');
+  const out = rows(page).first();
+  assert.match(await out.getAttribute('class'), /ri-oos/);
+  assert.equal(await out.getAttribute('data-ru-scope'), 'out');
+  assert.equal(await out.locator('[data-ri-scope="out"]').innerText(), 'OOS');
+  assert.equal(await out.locator('[data-ri-scope="out"]').getAttribute('title'), 'excluded by static.example.test');
+  assert.equal(await out.locator('button[data-ru-copy-blocked][disabled]').count(), 1);
+  assert.match(await out.innerText(), /out of scope/);
+  assert.equal(await out.locator('[data-ru-copy]').count(), 0);
+  assert.match(await page.locator('#ri-urls [data-ru-oos-hidden]').innerText(), /shown · Hide/);
+  // Count links into the URL browser carry the current oos state.
+  assert.match(await page.locator('[data-ri-depth] .ri-stat').filter({hasText: 'URLs'}).first().locator('a[data-ri-urls]').getAttribute('href'), /oos=1/);
+  await shot('recon-urls-scope-light.png', page.locator('#ri-urls'));
+  // Out-of-scope URLs can still be marked (for example dismissed).
+  const id = Number(await out.getAttribute('data-ru-row'));
+  await out.locator('[data-ru-mark]').click();
+  await page.locator('.ru-mark-form select[name=status]').selectOption('dismissed');
+  await page.locator('.ru-mark-form').getByRole('button', {name: 'Mark', exact: true}).click();
+  await until(async () => (await page.locator(`tr[data-ru-row="${id}"] .ru-result.is-ok`).count()) === 1, 'out-of-scope URL marked');
+  assert.deepEqual(calls().at(-1).slice(0, 3), ['agents/url_ingest.py', 'mark', 'initech-demo']);
+  assert.ok(calls().at(-1).includes('--status=dismissed'));
+  // In-scope rows: copy enabled, no pill.
+  await page.goto(initech('&u=1&uh=app.example.test'));
+  await waitRows(page, 50, 'in-scope rows');
+  await until(async () => (await page.locator('tr[data-ru-row][data-ru-scope="in"]').count()) === 50, 'verdicts in');
+  assert.equal(await rows(page).first().locator('[data-ru-copy]').count(), 1);
+  assert.equal(await rows(page).first().locator('[data-ri-scope]').count(), 0);
+  // Without oos the count links do not carry it.
+  assert.doesNotMatch(await page.locator('[data-ri-depth] .ri-stat').filter({hasText: 'URLs'}).first().locator('a[data-ri-urls]').getAttribute('href'), /oos=/);
 }));

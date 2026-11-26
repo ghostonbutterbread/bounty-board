@@ -68,12 +68,24 @@
     if (row.unsafe_chars) return 'Contains control characters.';
     return null;
   }
-  const helpers = {STATUSES, MARK_STATUSES, LANES, LOCATIONS, BULK_MAX, EMPTY, cleanFilters, apiQuery, sameFilters, markBody, markRefusal};
+  // Scope (scope_check.py), same rules as the other Recon lists: out-of-scope rows are
+  // hidden unless oos=1; copy is blocked for out, and for unchecked unless the program
+  // has no scope on file. Marking is never blocked by scope (an operator may dismiss one).
+  const isOut = row => row?.scope?.state === 'out';
+  const shownRows = (rows, showOos) => (rows || []).filter(row => showOos || !isOut(row));
+  function copyBlock(scope, summaryState) {
+    if (!scope) return null;
+    if (scope.state === 'out') return 'out of scope';
+    if (scope.state === 'unchecked' && summaryState !== 'no_scope') return 'scope not checked';
+    return null;
+  }
+  const helpers = {STATUSES, MARK_STATUSES, LANES, LOCATIONS, BULK_MAX, EMPTY, cleanFilters, apiQuery, sameFilters, markBody, markRefusal,
+    isOut, shownRows, copyBlock};
   if (typeof module === 'object' && module.exports) { module.exports = helpers; return; }
 
   // ---- DOM ------------------------------------------------------------------------
   const st = {key: '', opts: null, node: null, page: null, loading: false, error: '', seq: 0,
-    open: new Map(), history: new Map(), selected: new Set(), results: new Map(), bulk: null, prev: []};
+    open: new Map(), history: new Map(), selected: new Set(), results: new Map(), bulk: null, prev: [], scopePolls: 0};
   let ctx = null;
   const esc = v => ctx.esc(v);
   const icon = name => `<i class="fa fa-${name}" aria-hidden="true"></i>`;
@@ -95,6 +107,9 @@
       if (response.status === 503) { st.error = 'Another URL query is running. Retrying.'; setTimeout(() => { if (mine === st.seq) fetchPage(); }, 1200); return; }
       if (!response.ok) { st.error = 'The URL list is unavailable.'; st.page = null; return; }
       st.page = body; st.error = body.error ? errorText(body) : '';
+      // Verdicts for this page are being classified in the background: ask again shortly.
+      if (body.scope_summary?.state === 'pending' && st.scopePolls++ < 20) setTimeout(() => { if (mine === st.seq) fetchPage(); }, 1500);
+      else if (body.scope_summary?.state !== 'pending') st.scopePolls = 0;
     } catch {
       if (mine === st.seq) { st.error = 'The URL list is unavailable.'; }
     } finally {
@@ -144,12 +159,16 @@
     const open = st.open.has(row.id), refusal = markRefusal(row, o.lane, o.canMark), result = st.results.get(row.id);
     const href = !row.unsafe_chars && /^https?:\/\//i.test(row.url) ? row.url : null;
     const select = o.canMark ? `<td class="ru-select">${refusal ? '' : `<input type="checkbox" class="ru-row-select" data-ru-select="${row.id}" aria-label="Select ${esc(row.path)}"${st.selected.has(row.id) ? ' checked' : ''}>`}</td>` : '';
-    return `<tr data-ru-row="${row.id}" class="${open ? 'is-open' : ''}${result?.ok === false ? ' ru-failed' : ''}">${select}
-      <td class="ru-url"><span class="ru-host ri-mono">${esc(row.host || '(no host)')}</span><span class="ru-path ri-mono">${esc(row.path)}</span>${row.unsafe_chars ? '<span class="ri-unsafe">contains control characters</span>' : ''}${result ? `<span class="ru-result ${result.ok ? 'is-ok' : 'is-err'}" role="status">${esc(result.text)}</span>` : ''}</td>
+    const state = st.page?.scope_summary?.state || '';
+    const blocked = row.unsafe_chars ? 'contains control characters' : copyBlock(row.scope, state);
+    const copy = blocked ? `<span class="ri-copy-blocked"><button type="button" class="button sm ghost ri-copy" disabled data-ru-copy-blocked title="${esc(`Not copied: ${blocked}`)}">${icon('ban')}<span>URL</span></button><span class="ri-unsafe">${esc(blocked)}</span></span>`
+      : `<button type="button" class="button sm ghost ri-copy" data-ru-copy="${row.id}" title="Copy URL">${icon('clipboard')}<span>URL</span></button>`;
+    return `<tr data-ru-row="${row.id}" class="${open ? 'is-open' : ''}${result?.ok === false ? ' ru-failed' : ''}${isOut(row) ? ' ri-oos' : ''}"${row.scope ? ` data-ru-scope="${esc(row.scope.state)}"` : ''}>${select}
+      <td class="ru-url"><span class="ru-host ri-mono">${esc(row.host || '(no host)')}</span><span class="ru-path ri-mono">${esc(row.path)}</span>${o.scopePill ? o.scopePill(row.scope, state) : ''}${row.unsafe_chars ? '<span class="ri-unsafe">contains control characters</span>' : ''}${result ? `<span class="ru-result ${result.ok ? 'is-ok' : 'is-err'}" role="status">${esc(result.text)}</span>` : ''}</td>
       <td class="ru-lanes-cell"><div class="ru-lanes">${laneCell(row)}</div></td>
       <td class="num">${row.tests ? esc(row.tests) : '<span class="hint">0</span>'}</td>
       <td class="date">${isoWhen(row.first_seen)}<span class="ru-sub">${row.last_seen && row.last_seen !== row.first_seen ? `last ${isoWhen(row.last_seen)}` : ''}</span></td>
-      <td class="ru-actions"><button type="button" class="button sm ghost" data-ru-history="${row.id}" aria-expanded="${open}" aria-controls="ru-history-${row.id}">${icon(open ? 'angle-up' : 'angle-down')}<span>History</span></button>${o.canMark ? (refusal ? `<span class="hint ru-refusal" title="${esc(refusal)}">${esc(refusal)}</span>` : `<button type="button" class="button sm" data-ru-mark="${row.id}">${icon('check-square-o')}<span>Mark</span></button>`) : ''}${href ? `<a class="row-icon" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open URL in a new tab" data-tip="Open URL in a new tab">${icon('external-link')}</a>` : ''}</td></tr>
+      <td class="ru-actions">${copy}<button type="button" class="button sm ghost" data-ru-history="${row.id}" aria-expanded="${open}" aria-controls="ru-history-${row.id}">${icon(open ? 'angle-up' : 'angle-down')}<span>History</span></button>${o.canMark ? (refusal ? `<span class="hint ru-refusal" title="${esc(refusal)}">${esc(refusal)}</span>` : `<button type="button" class="button sm" data-ru-mark="${row.id}">${icon('check-square-o')}<span>Mark</span></button>`) : ''}${href ? `<a class="row-icon" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open URL in a new tab" data-tip="Open URL in a new tab">${icon('external-link')}</a>` : ''}</td></tr>
       ${open ? `<tr class="ru-history-row" id="ru-history-${row.id}"><td colspan="${o.canMark ? 6 : 5}">${historyHtml(row.id, o)}</td></tr>` : ''}`;
   }
   function evidence(o, path) {
@@ -198,15 +217,18 @@
   }
   function html(o) {
     const p = st.page;
-    const items = p && !p.error ? p.items : [];
+    const all = p && !p.error ? p.items : [];
+    const items = shownRows(all, o.oos);
+    const outCount = all.filter(isOut).length;
+    const oosLine = outCount && o.oosHref ? `<p class="hint ri-oos-line ru-oos-line" data-ru-oos-hidden>${icon(o.oos ? 'eye' : 'eye-slash')} ${outCount} out-of-scope ${outCount === 1 ? 'URL' : 'URLs'} on this page ${o.oos ? 'shown' : 'hidden'} · <a href="${esc(o.oosHref(!o.oos))}" data-ru-oos="${o.oos ? '0' : '1'}">${o.oos ? 'Hide' : 'Show'}</a></p>` : '';
     const allSelectable = items.filter(r => !markRefusal(r, o.lane, o.canMark));
     const head = o.canMark ? `<th class="ru-select">${allSelectable.length ? `<input type="checkbox" data-ru-select-page aria-label="Select all marked-able URLs on this page"${allSelectable.every(r => st.selected.has(r.id)) ? ' checked' : ''}>` : ''}</th>` : '';
     const table = items.length ? `<div class="table-wrap ru-table-wrap"><table class="ri-table ru-table"><thead><tr>${head}<th>URL</th><th>Status by lane</th><th class="num">Tests</th><th class="date">First seen</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${items.map(r => rowHtml(r, o)).join('')}</tbody></table></div>`
-      : `<div class="state">${st.loading ? 'Loading URLs…' : p && !p.error ? (p.done ? 'No URLs match these filters.' : 'No matches in this stretch of ids. Use Next to keep searching.') : ''}</div>`;
+      : `<div class="state">${st.loading ? 'Loading URLs…' : p && !p.error ? (all.length ? 'Every URL on this page is out of scope.' : p.done ? 'No URLs match these filters.' : 'No matches in this stretch of ids. Use Next to keep searching.') : ''}</div>`;
     const off = !o.canMark && o.markOff ? `<p class="hint ru-off">${esc(o.markOff)}</p>` : '';
     return `<div class="panel-head"><div><h2>URLs</h2><p class="hint">From the URL index of this lane. Filters and the page stay in the link.</p>${off}</div><a class="button sm ghost" href="${esc(o.closeHref)}" data-ru-close>${icon('times')}<span>Close</span></a></div>
       <div class="panel-pad ru-controls">${filtersHtml(o)}</div>
-      <p class="hint ru-status" role="status" data-ru-status>${statusLine(o)}</p>${bulkHtml(o)}${table}${pagerHtml(o)}`;
+      <p class="hint ru-status" role="status" data-ru-status>${statusLine(o)}</p>${oosLine ? `<div class="panel-pad ri-oos-pad">${oosLine}</div>` : ''}${bulkHtml(o)}${table}${pagerHtml(o)}`;
   }
   function paint() {
     const node = st.node, o = st.opts;
@@ -330,11 +352,13 @@
   function onClick(event) {
     const t = event.target.closest('button, input[type=checkbox]');
     if (!t || !st.node.contains(t)) return;
-    if (t.dataset.ruHistory) toggleHistory(Number(t.dataset.ruHistory));
+    if (t.dataset.ruCopy) copyUrl(rowById(Number(t.dataset.ruCopy)));
+    else if (t.dataset.ruHistory) toggleHistory(Number(t.dataset.ruHistory));
     else if (t.dataset.ruMark) openMark(t, [Number(t.dataset.ruMark)]);
     else if (t.dataset.ruSelect) { const id = Number(t.dataset.ruSelect); if (t.checked) st.selected.add(id); else st.selected.delete(id); paint(); }
     else if (t.hasAttribute('data-ru-select-page')) {
-      for (const r of (st.page?.items || []).filter(r => !markRefusal(r, st.opts.lane, st.opts.canMark))) { if (t.checked) st.selected.add(r.id); else st.selected.delete(r.id); }
+      // Only the rows on screen: hidden out-of-scope rows are not selected.
+      for (const r of shownRows(st.page?.items, st.opts.oos).filter(r => !markRefusal(r, st.opts.lane, st.opts.canMark))) { if (t.checked) st.selected.add(r.id); else st.selected.delete(r.id); }
       paint();
     }
     else if (t.hasAttribute('data-ru-bulk-mark')) {
@@ -346,6 +370,13 @@
     else if (t.hasAttribute('data-ru-clear-selection')) { st.selected.clear(); paint(); }
     else if (t.hasAttribute('data-ru-stop')) { if (st.bulk) st.bulk.stop = true; }
     else if (t.hasAttribute('data-ru-bulk-close')) { st.bulk = null; paint(); }
+  }
+  // Copy follows the same gate as the button (checked again here, at the moment of copying).
+  async function copyUrl(row) {
+    const blocked = !row ? 'not found' : row.unsafe_chars || UNSAFE.test(String(row.url)) ? 'contains control characters' : copyBlock(row.scope, st.page?.scope_summary?.state || '');
+    if (blocked) { ui().toast(`Not copied: ${blocked}.`, 'warning'); return; }
+    try { await navigator.clipboard.writeText(row.url); ui().toast('Copied to the clipboard.', 'success'); }
+    catch { ui().toast('Copy is unavailable in this browser.', 'warning'); }
   }
   function onLinkClick(event) {
     const page = event.target.closest('[data-ru-page]');

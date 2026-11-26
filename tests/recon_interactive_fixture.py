@@ -16,6 +16,7 @@ import app
 from tests.recon_intel_fixture import make_lane
 from tests.test_ledger_actions import FAKE_WRITER
 from tests.test_recon_urls import FAKE_RECON_WRITER
+from tests import scope_check_fixture as scope_fx
 
 base = Path(sys.argv[1])
 mode = sys.argv[2] if len(sys.argv) > 2 else 'writer'
@@ -42,6 +43,10 @@ db.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, h
 db.commit()
 db.close()
 make_lane(root, 'globex-demo', 'web', findings=False)
+# initech-demo has a scope that excludes static.example.test (acme-demo and globex-demo have
+# none: open scope, so their flows are unchanged).
+make_lane(root, 'initech-demo', 'web', findings=False)
+scope_fx.make_scope(root, 'initech-demo', include=['*.example.test'], exclude=['static.example.test'])
 
 writer = None
 if mode == 'writer':
@@ -49,8 +54,10 @@ if mode == 'writer':
     bin_dir.mkdir()
     (bin_dir / 'ledger-fake').write_text(FAKE_WRITER)
     (bin_dir / 'recon-fake').write_text(FAKE_RECON_WRITER)
+    scope_fake = scope_fx.write_fake_bbh(base / 'scope-bin')
     writer = bin_dir / 'bbh'
-    writer.write_text(f'#!/bin/sh\ncase "$1" in agents/url_ingest.py) exec "{bin_dir}/recon-fake" "$@";; *) exec "{bin_dir}/ledger-fake" "$@";; esac\n')
+    writer.write_text(f'#!/bin/sh\ncase "$1" in agents/url_ingest.py) exec "{bin_dir}/recon-fake" "$@";; '
+                      f'agents/scope_validator.py) exec "{scope_fake}" "$@";; *) exec "{bin_dir}/ledger-fake" "$@";; esac\n')
     for name in ('ledger-fake', 'recon-fake', 'bbh'):
         (bin_dir / name).chmod(0o700)
     os.environ['FAKE_LOG'] = str(base / 'writer.log')

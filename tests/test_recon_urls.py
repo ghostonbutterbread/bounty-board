@@ -473,6 +473,85 @@ class MarkTests(Base):
         self.assertEqual(self.log(), [])
 
 
+class ScopeUrlTests(Base):
+    """Scope in the URL browser (scope_check.py): cache-only verdicts, out-of-scope URLs still markable."""
+    writer = True
+
+    def setUp(self):
+        from tests import scope_check_fixture as scope_fx
+        self.scope_fx = scope_fx
+        super().setUp()
+        scope_fx.make_scope(self.root, 'acme-demo', include=['*.example.test'], exclude=['static.example.test'])
+        # One launcher for both: classify goes to the scope fake, everything else to the recon fake.
+        self.scope_bbh = scope_fx.write_fake_bbh(self.base / 'scope-bin')
+        (self.base / 'recon-fake').write_text(FAKE_RECON_WRITER.replace('PYTHON', sys.executable))
+        (self.base / 'recon-fake').chmod(0o700)
+        launcher = self.base / 'bbh'
+        launcher.write_text(f'#!/bin/sh\ncase "$1" in agents/scope_validator.py) exec "{self.scope_bbh}" "$@";; '
+                            f'*) exec "{self.base / "recon-fake"}" "$@";; esac\n')
+        launcher.chmod(0o700)
+
+    def settled(self, **params):
+        for _ in range(20):
+            status, body = self.urls(**params)
+            self.assertEqual(status, 200)
+            if body.get('scope_summary', {}).get('state') != 'pending':
+                return body
+            self.server.recon.wait_idle(30)
+        self.fail('scope stayed pending')
+
+    def test_requests_only_queue_classify_work(self):
+        root = self.root
+        svc, checker = None, None
+        import scope_check as sc
+        checker = sc.ScopeChecker(lambda: root, self.scope_bbh)
+        svc = ri.ReconIntel(lambda: root, lambda r: app.discover(r, inventory_only=True), app.read_file, app.ledger,
+                            app.coverage, app.map_entries, scope=checker, start=False)
+        self.addCleanup(svc.close)
+        status, body = svc.urls('web_bounty', 'acme-demo', 'web', {'host': 'static.example.test'})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['scope_summary']['state'], 'pending')
+        self.assertTrue(all(i['scope']['state'] == 'unchecked' for i in body['items']))
+        self.assertEqual(self.scope_fx.calls(self.scope_bbh), [])  # the request started no BBH process
+        self.assertIn(('scope', 'acme-demo', 0), svc.queue)
+        svc.thread.start()
+        self.assertTrue(svc.wait_idle(30))
+        status, body = svc.urls('web_bounty', 'acme-demo', 'web', {'host': 'static.example.test'})
+        self.assertEqual(body['scope_summary']['state'], 'checked')
+        self.assertEqual({i['scope']['state'] for i in body['items']}, {'out'})
+        self.assertEqual(len(self.scope_fx.calls(self.scope_bbh)), 1)
+        svc.urls('web_bounty', 'acme-demo', 'web', {'host': 'static.example.test'})
+        self.assertTrue(svc.wait_idle(30))
+        self.assertEqual(len(self.scope_fx.calls(self.scope_bbh)), 1)  # cached: no further call
+
+    def test_items_history_and_marks_carry_scope_and_marking_is_not_gated(self):
+        body = self.settled(host='static.example.test')
+        self.assertEqual(body['scope_summary']['state'], 'checked')
+        out = body['items'][0]
+        self.assertEqual(out['scope'], {'state': 'out', 'rule': 'static.example.test', 'reason': 'excluded by static.example.test'})
+        inside = self.settled(host='app.example.test', limit=3)['items'][0]
+        self.assertEqual(inside['scope']['state'], 'in')
+        status, history = self.request('GET', '/api/recon/url', {'family': 'web_bounty', 'program': 'acme-demo', 'lane': 'web', 'id': out['id']})
+        self.assertEqual((status, history['scope']['state']), (200, 'out'))
+        # An operator may record a review of an out-of-scope URL (for example to dismiss it).
+        status, marked = self.request('POST', '/api/recon/mark', body={
+            'family': 'web_bounty', 'program': 'acme-demo', 'lane': 'web', 'root_instance': self.root_instance(),
+            'url_id': out['id'], 'url': out['url'], 'test_lane': 'recon', 'status': 'dismissed', 'notes': 'out of scope'})
+        self.assertEqual(status, 200, marked)
+        self.assertEqual(marked['item']['scope']['state'], 'out')
+
+    def test_failed_scope_check_does_not_block_marking(self):
+        (self.scope_bbh.parent / 'mode').write_text('fail')
+        body = self.settled(host='static.example.test')
+        self.assertEqual(body['scope_summary']['state'], 'failed')
+        item = body['items'][0]
+        self.assertEqual(item['scope']['state'], 'unchecked')
+        status, marked = self.request('POST', '/api/recon/mark', body={
+            'family': 'web_bounty', 'program': 'acme-demo', 'lane': 'web', 'root_instance': self.root_instance(),
+            'url_id': item['id'], 'url': item['url'], 'test_lane': 'xss', 'status': 'discovered'})
+        self.assertEqual(status, 200, marked)
+
+
 class WriterOffTests(Base):
     def test_capability_disabled_and_mark_refused(self):
         caps = self.request('GET', '/api/data')[1]['capabilities']['ledger_actions']['url_mark']

@@ -57,3 +57,22 @@ test('URL browser state round-trips through the recon hash', () => {
   assert.deepEqual([bad.us, bad.ul, bad.ua], ['', '', 0]);
   assert.equal(ri.buildQuery({...ri.parseQuery(''), ...ri.urlState({host: 'h'})}), '');
 });
+
+test('scope: out-of-scope rows hidden unless oos, copy gated, marking never gated', () => {
+  const rows = [{id: 1, scope: {state: 'in'}}, {id: 2, scope: {state: 'out'}}, {id: 3, scope: {state: 'unchecked'}}, {id: 4, scope: null}];
+  assert.deepEqual(ru.shownRows(rows, false).map(r => r.id), [1, 3, 4]);
+  assert.deepEqual(ru.shownRows(rows, true).map(r => r.id), [1, 2, 3, 4]);
+  assert.equal(ru.copyBlock({state: 'out'}, 'checked'), 'out of scope');
+  assert.equal(ru.copyBlock({state: 'unchecked'}, 'pending'), 'scope not checked');
+  assert.equal(ru.copyBlock({state: 'unchecked'}, 'failed'), 'scope not checked');
+  assert.equal(ru.copyBlock({state: 'unchecked'}, 'unconfigured'), 'scope not checked');
+  assert.equal(ru.copyBlock({state: 'unchecked'}, 'no_scope'), null);   // open scope
+  assert.equal(ru.copyBlock({state: 'in'}, 'checked'), null);
+  assert.equal(ru.copyBlock({state: 'partial'}, 'checked'), null);
+  assert.equal(ru.copyBlock(null, 'checked'), null);
+  for (const scope of [{state: 'out'}, {state: 'unchecked'}]) {
+    const out = {...row, scope};
+    assert.equal(ru.markRefusal(out, 'web', true), null, `mark allowed for ${scope.state}`);
+    assert.ok(ru.markBody({...base, row: out}), `mark body built for ${scope.state}`);
+  }
+});

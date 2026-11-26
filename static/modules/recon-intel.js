@@ -623,7 +623,9 @@
     window.BoardReconUrls.update(node, {ctx, program: s.p, programName: programName(s.p), lane, filters: urlFilters(s), cursor: s.ua,
       hrefWith: (filters, cursor) => href({...s, ...urlState(filters, cursor)}), closeHref: href({...s, ...urlState({}, 0), u: false}),
       onFilters: (filters, cursor) => { go({...urlState(filters, cursor)}, false); paint(); },
-      canMark: !!cap?.enabled, markOff: cap?.enabled ? '' : (window.BoardFindingActions?.OFF_HINT || 'Editing is off: the backend has not enabled the BBH writer.')});
+      canMark: !!cap?.enabled, markOff: cap?.enabled ? '' : (window.BoardFindingActions?.OFF_HINT || 'Editing is off: the backend has not enabled the BBH writer.'),
+      // Scope: same hiding (oos=1 shows), pills and copy gate as the other Recon lists.
+      oos: s.oos, oosHref: show => href({...s, oos: show}), scopePill: (scope, state) => scopePill({scope_summary: {state}}, scope)});
   }
   function mountView(host) {
     const linked = parseQuery(ctx.state.reconQuery || '');

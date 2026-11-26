@@ -2337,6 +2337,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 history = ri.url_history(db, url_id, recon.budget)
                 page = ri.list_urls(db, {}, url_id - 1, 1, recon.budget, 'asc')
                 item = page['items'][0] if page['items'] and page['items'][0]['id'] == url_id else None
+                if item is not None:
+                    recon.annotate_urls(program, [item])  # scope from the cache only; marking is not scope-gated
                 return 200, {'url': history, 'item': item}
             return self.run_writer(argv, verify)
 
