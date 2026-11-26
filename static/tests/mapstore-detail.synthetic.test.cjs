@@ -27,7 +27,7 @@ test('lazy scoped observations render as inert text and pending reads cannot cro
     await page.getByRole('button',{name:'Open observation'}).click();
     await page.getByText(/alpha Capability:/).waitFor();
     assert.equal(await page.locator('#app img').count(),0);
-    assert.equal(await page.locator('#app a:not([data-section])').count(),0); // section tabs are links; observation text must add none
+    assert.equal(await page.locator('#app a:not([data-section]):not([data-scope-badge])').count(),0); // section tabs and the scope badge are links; observation text must add none
     assert.equal(seen.filter(u=>u.includes('evil.invalid')).length,0);
     await page.getByRole('link',{name:'MapStore',exact:true}).click();
     assert.match(await page.locator('#app').innerText(),/not recorded/i);
@@ -75,7 +75,7 @@ test('nonfinite map input leaves the healthy program usable in a real browser', 
     await page.getByRole('button',{name:'Open observation'}).click();
     await page.getByText(/beta Capability:/).waitFor();
     assert.equal(await page.locator('#app img').count(),0);
-    assert.equal(await page.locator('#app a:not([data-section])').count(),0); // section tabs are links; observation text must add none
+    assert.equal(await page.locator('#app a:not([data-section]):not([data-scope-badge])').count(),0); // section tabs and the scope badge are links; observation text must add none
   } finally {
     if(browser)await browser.close();
     child.kill('SIGTERM'); await new Promise(resolve=>child.exitCode!==null||child.signalCode!==null ? resolve() : child.once('exit',resolve));
