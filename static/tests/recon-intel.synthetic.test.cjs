@@ -166,8 +166,13 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     assert.match((await page.locator('[data-ri-scope-urls]').innerText()).replace(/\s+/g, ' '), /^33 In-scope URLs/);
     assert.equal(await page.locator('tr[data-ri-host="shop.example.test"]').count(), 0); // hidden by default
     assert.match(await page.locator('[data-ri-oos-hidden="hosts"]').innerText(), /1 out-of-scope host hidden · Show/);
-    assert.match(await page.locator('[data-ri-oos-hidden="untested_params"]').innerText(), /out-of-scope parameters? hidden/);
-    assert.equal(await page.locator('[data-ri-hunt="param"]').filter({hasText: /^url\b/}).count(), 0);
+    // The parameter stays listed; only its out-of-scope example URL is hidden, and bbh next still copies.
+    assert.match(await page.locator('[data-ri-oos-hidden="untested_params"]').innerText(), /out-of-scope example URLs? hidden/);
+    const hiddenExample = page.locator('[data-ri-hunt="param"]').filter({has: page.locator('[data-ri-example="hidden"]')}).first();
+    await hiddenExample.waitFor();
+    assert.match(await hiddenExample.locator('[data-ri-example="hidden"]').innerText(), /^Example URL out of scope$/);
+    assert.equal(await hiddenExample.locator('a[href^="http"]').count(), 0);
+    assert.deepEqual(await hiddenExample.locator('button[data-ri-copy]').evaluateAll(bs => bs.map(b => b.textContent.trim())), ['bbh next']);
     const cdn = page.locator('tr[data-ri-host="cdn.example.test"]');
     assert.equal(await cdn.locator('[data-ri-scope="partial"]').innerText(), 'Partly in scope');
     assert.match(await cdn.locator('[data-ri-scope="partial"]').getAttribute('title'), /in scope except paths under \/private\/ · rule: \*\.example\.test/);
@@ -183,12 +188,12 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     assert.equal(await shop.locator('button[data-ri-copy-blocked][disabled]').count(), 1);
     assert.match(await shop.innerText(), /out of scope/);
     assert.doesNotMatch(await shop.innerText(), /Under-tested/); // out-of-scope surface is never highlighted
-    const oosParam = page.locator('[data-ri-hunt="param"].ri-oos').first();
+    const oosParam = page.locator('[data-ri-hunt="param"]').filter({has: page.locator('[data-ri-example="out"]')}).first();
     await oosParam.waitFor();
-    assert.equal(await oosParam.locator('[data-ri-copy]').count(), 0);
-    assert.equal(await oosParam.locator('button[data-ri-copy-blocked][disabled]').count(), 3); // URL, curl, bbh next
-    assert.equal(await oosParam.locator('button[data-ri-copy-blocked]').first().getAttribute('title'), 'Not copied: out of scope');
-    assert.match(await oosParam.locator('[data-ri-scope="out"]').getAttribute('title'), /excluded by shop\.example\.test/);
+    assert.equal(await oosParam.locator('[data-ri-copy]').count(), 1); // bbh next
+    assert.equal(await oosParam.locator('button[data-ri-copy-blocked][disabled]').count(), 2); // URL, curl
+    assert.equal(await oosParam.locator('button[data-ri-copy-blocked]').first().getAttribute('title'), 'Not copied: example out of scope');
+    assert.match(await oosParam.locator('[data-ri-example="out"] [data-ri-scope="out"]').getAttribute('title'), /excluded by shop\.example\.test/);
     assert.match(await page.locator('[data-ri-oos-hidden="hosts"]').innerText(), /1 out-of-scope host shown · Hide/);
     // oos=1 survives a reload; an unknown value falls back to hiding.
     await page.reload();

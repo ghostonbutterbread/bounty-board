@@ -117,6 +117,14 @@
     if (scope.state === 'unchecked' && summaryState !== 'no_scope') return 'scope not checked';
     return null;
   };
+  // A hunt-next parameter is a program lead; its scope is the scope of its one example URL.
+  // An out-of-scope example hides only the URL and its URL/curl copies; bbh next stays usable
+  // because BBH applies scope itself.
+  const paramBlocks = (scope, summaryState) => {
+    const example = copyBlockReason(scope, summaryState);
+    return {example: example === 'out of scope' ? 'example out of scope' : example,
+      next: scope?.state === 'out' ? null : example};
+  };
   // In-scope surface when the server knows it (scope checked), else the raw totals.
   const inScopeUrls = row => row.in_scope_urls && metric(row.in_scope_urls) != null ? row.in_scope_urls : row.urls;
   const inScopeJs = row => row.in_scope_js_files && metric(row.in_scope_js_files) != null ? row.in_scope_js_files : row.js_files;
@@ -126,7 +134,7 @@
     return (urls + 20 * js) / (1 + runs);
   };
   const helpers = {parseQuery, buildQuery, sortRows, fmtNum, fmtBytes, shellQuote, isCopySafe, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap,
-    isOut, visible, copyBlockReason, inScopeUrls};
+    isOut, visible, copyBlockReason, paramBlocks, inScopeUrls};
   if (typeof module === 'object' && module.exports) { module.exports = helpers; return; }
   root.BoardReconIntel = helpers;
 
@@ -449,17 +457,23 @@
     const det = res(d, 'url_index')?.detail || {};
     const jsd = res(d, 'js')?.detail || {};
     const s = view.state;
-    const params = visible(det.untested_params, s.oos);
+    const params = det.untested_params || [];  // never hidden: only an out-of-scope example URL is
     const hints = [...new Set(params.flatMap(p => p.untested_lanes || []))].sort();
     const shown = params.filter(p => !s.hint || (p.untested_lanes || []).includes(s.hint));
     const lane = s.hint;
     const paramItems = shown.slice(0, 60).map(p => {
       const target = lane || p.untested_lanes[0];
-      const blocked = blockOf(d, p);
-      return `<li class="ri-hunt-item${oosClass(p)}" data-ri-hunt="param" data-param="${esc(p.param_key)}"><div class="ri-hunt-main"><strong class="ri-mono">${esc(p.param_key)}</strong> ${(p.untested_lanes || []).map(h => badge(h, 'warning')).join(' ')}${scopePill(d, p.scope)}
+      const blocked = paramBlocks(p.scope, scopeOf(d));
+      const exampleOut = isOut(p), showExample = p.example_url && (!exampleOut || s.oos);
+      const example = !p.example_url ? '' : showExample
+        ? `<div class="ri-url${exampleOut ? ' ri-oos' : ''}" data-ri-example${exampleOut ? '="out"' : ''}>${ext(p.example_url, null, p.unsafe_chars)}${scopePill(d, p.scope)}</div>`
+        : `<div class="ri-url muted" data-ri-example="hidden">Example URL out of scope</div>`;
+      const exampleCopies = showExample ? copyBtn(p.example_url, 'URL', '', p.unsafe_chars, blocked.example)
+        + copyBtn(curlCommand(p.example_url), 'curl', 'Copy a curl command for the example URL', p.unsafe_chars, blocked.example) : '';
+      return `<li class="ri-hunt-item" data-ri-hunt="param" data-param="${esc(p.param_key)}"><div class="ri-hunt-main"><strong class="ri-mono">${esc(p.param_key)}</strong> ${(p.untested_lanes || []).map(h => badge(h, 'warning')).join(' ')}${exampleOut ? '' : scopePill(d, p.scope)}
         <span class="hint">${esc(p.location || 'query')}${p.value_shape ? ` · ${esc(p.value_shape)}` : ''} · seen ${esc(p.observations_capped ? '1000+' : p.observations)}×</span>
-        ${p.example_url ? `<div class="ri-url">${ext(p.example_url, null, p.unsafe_chars)}</div>` : ''}</div>
-        <div class="ri-hunt-actions">${p.example_url ? copyBtn(p.example_url, 'URL', '', p.unsafe_chars, blocked) + copyBtn(curlCommand(p.example_url), 'curl', 'Copy a curl command for the example URL', p.unsafe_chars, blocked) : ''}${copyBtn(bbhNext(d.program, target, p.param_key), 'bbh next', `Copy bbh url_ingest next for lane ${target}`, p.unsafe_chars || d.unsafe_chars, blocked)}</div></li>`;
+        ${example}</div>
+        <div class="ri-hunt-actions">${exampleCopies}${copyBtn(bbhNext(d.program, target, p.param_key), 'bbh next', `Copy bbh url_ingest next for lane ${target}`, p.unsafe_chars || d.unsafe_chars, blocked.next)}</div></li>`;
     }).join('');
     const hosts = (d.hosts?.rows || []).filter(r => r.under_tested && !isOut(r)).slice(0, 10).map(r => `<li class="ri-hunt-item" data-ri-hunt="host"><div class="ri-hunt-main"><strong class="ri-mono">${esc(r.host)}</strong>${scopePill(d, r.scope)} <span class="hint">${r.urls != null ? `${r.urls_approximate && !r.urls_exact ? '≈' : ''}${esc(fmtNum(r.urls))} URLs · ` : ''}${esc(r.js_files)} JS files · ${esc(r.test_runs)} test runs</span></div><div class="ri-hunt-actions">${copyBtn(r.host, 'host', '', r.unsafe_chars, blockOf(d, r))}${copyBtn(bbhStatus(d.program, r.host), 'bbh status', '', r.unsafe_chars || d.unsafe_chars, blockOf(d, r))}</div></li>`).join('');
     const openObs = visible(jsd.open_observations, s.oos), openLeads = visible(jsd.leads, s.oos);
@@ -470,7 +484,7 @@
     return `<section class="panel panel-pad ri-section" id="ri-hunt" aria-label="What to hunt next"><div class="blockhead"><h2>What to hunt next</h2></div>
       <p class="hint">Suggestions only: copy a URL or command and run it yourself. Nothing here sends a request.</p>
       <div class="ri-hunt-grid">
-        <div><h3>Hinted parameters without a test in that lane <span class="count">${esc(params.length)}</span></h3>${oosLine(d, det.untested_params, 'parameter', 'untested_params')}${hintBar}
+        <div><h3>Hinted parameters without a test in that lane <span class="count">${esc(params.length)}</span></h3>${oosLine(d, det.untested_params, 'example URL', 'untested_params')}${hintBar}
           ${paramItems ? `<ul class="ri-hunt">${paramItems}</ul>${shown.length > 60 ? `<p class="hint">Showing 60 of ${esc(shown.length)}.</p>` : ''}` : `<p class="hint">${d.sources?.url_index?.state === 'computing' ? 'Computing…' : params.length ? 'No parameters for this lane hint.' : 'No hinted parameters without tests. Parameter hints come from url_ingest.py parameter observations.'}</p>`}</div>
         <div><h3>Surface or JS without tests <span class="count">${esc((d.hosts?.rows || []).filter(r => r.under_tested && !isOut(r)).length)}</span></h3>${hosts ? `<ul class="ri-hunt">${hosts}</ul>` : '<p class="hint">No under-tested hosts.</p>'}
           <h3>Open JS observations and leads <span class="count">${esc(openObs.length + openLeads.length)}</span></h3>${oosLine(d, [...(jsd.open_observations || []), ...(jsd.leads || [])], 'JS item', 'js_open')}${jsOpen || leads ? `<ul class="ri-hunt">${jsOpen}${leads}</ul>` : `<p class="hint">${res(d, 'js') ? 'No JS observations with an open next action.' : 'No JS library for this lane.'}</p>`}</div>

@@ -66,6 +66,11 @@ test('scope: oos hash key, hiding, copy gating and in-scope ranking', () => {
   assert.equal(ri.copyBlockReason({state: 'unchecked', reason: 'no scope on file'}, 'no_scope'), null); // open scope
   assert.equal(ri.copyBlockReason({state: 'partial'}, 'checked'), null);
   assert.equal(ri.copyBlockReason(null, 'checked'), null);
+  // Hunt-next parameters: an out-of-scope example blocks only the example copies; bbh next stays usable.
+  assert.deepEqual(ri.paramBlocks({state: 'out'}, 'checked'), {example: 'example out of scope', next: null});
+  assert.deepEqual(ri.paramBlocks({state: 'in'}, 'checked'), {example: null, next: null});
+  assert.deepEqual(ri.paramBlocks({state: 'unchecked', reason: 'scope check failed: x'}, 'failed'), {example: 'scope not checked', next: 'scope not checked'});
+  assert.deepEqual(ri.paramBlocks({state: 'unchecked', reason: 'no scope on file'}, 'no_scope'), {example: null, next: null});
   // Out-of-scope surface does not count toward the dashboard rank.
   const mostlyOos = {urls: {value: 1000}, in_scope_urls: {value: 10, approximate: true}, js_files: {value: 0}, test_runs: {value: 0}};
   const small = {urls: {value: 200}, js_files: {value: 0}, test_runs: {value: 0}};

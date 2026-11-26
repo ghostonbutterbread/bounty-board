@@ -111,12 +111,36 @@ class ScopeCheckerTests(Base):
         self.assertIsNone(directory)
         self.assertIn('outside', reason)
         self.assertEqual(c.classify('acme-out', HOSTS), 0)
+        # A scope that exists but cannot be read is a failed check (copy disabled), never open scope.
         v, summary, missing = c.lookup('acme-out', HOSTS)
-        self.assertEqual((summary['state'], missing), ('no_scope', []))
+        self.assertEqual((summary['state'], missing), ('failed', []))
         self.assertIn('outside', summary['reason'])
+        self.assertTrue(all(x['state'] == 'unchecked' and x['reason'].startswith('scope check failed:') for x in v.values()))
         self.assertEqual(len(fx.calls(self.bbh)), 1)
         (self.root / 'scopes' / 'broken').symlink_to('nowhere')
-        self.assertEqual(c.lookup('broken', HOSTS)[1]['state'], 'no_scope')
+        self.assertEqual(c.lookup('broken', HOSTS)[1]['state'], 'failed')
+        self.assertIn('broken', c.lookup('broken', HOSTS)[1]['reason'])
+
+    def test_same_size_same_mtime_replacement_reclassifies(self):
+        # Sync tools and atomic renames can keep size and the source mtime; the verdicts must not go stale.
+        directory = self.root / 'scopes' / 'acme'
+        target = directory / 'in-scope.txt'
+        before, dir_before = os.stat(target), os.stat(directory)
+        c = self.checker()
+        c.classify('acme', HOSTS)
+        self.assertEqual(c.lookup('acme', HOSTS)[0]['app.acme.example.test']['state'], 'in')
+        text = target.read_text()
+        replacement = text.replace('acme', 'acmf')
+        self.assertEqual(len(replacement), len(text))
+        tmp = directory / '.replacement'
+        tmp.write_text(replacement)
+        os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(tmp, target)
+        os.utime(directory, ns=(dir_before.st_atime_ns, dir_before.st_mtime_ns))
+        self.assertEqual(os.stat(target).st_size, before.st_size)
+        verdicts, summary, missing = c.lookup('acme', HOSTS)
+        self.assertEqual(summary['state'], 'pending')
+        self.assertIn('app.acme.example.test', missing)
 
     def test_missing_scope_is_no_scope_without_subprocess(self):
         c = self.checker()
@@ -125,7 +149,9 @@ class ScopeCheckerTests(Base):
         self.assertTrue(all(x == {'state': 'unchecked', 'rule': None, 'reason': 'no scope on file'} for x in v.values()))
         self.assertEqual(c.classify('initech', HOSTS), 0)
         self.assertEqual(fx.calls(self.bbh), [])
-        self.assertEqual(c.lookup('../acme', HOSTS)[1]['state'], 'no_scope')
+        # An invalid name is refused (fail closed), never read as open scope.
+        self.assertEqual(c.lookup('../acme', HOSTS)[1]['state'], 'failed')
+        self.assertEqual(fx.calls(self.bbh), [])
 
     def test_empty_scope_dir_is_no_scope(self):
         fx.make_scope(self.root, 'hollow', include=[])
@@ -371,3 +397,17 @@ class ReconScopeTests(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OverviewShareApproximation(unittest.TestCase):
+    def test_host_share_keeps_the_source_approximation(self):
+        summary = {'state': 'checked', 'checked_at': 1, 'reason': ''}
+        url = {'host_list': ['a.example.test'], 'urls': {'value': 1000, 'approximate': True}}
+        js = {'files': {'value': 10, 'approximate': True}}
+        fields = sc.overview_fields(summary, {'a.example.test': {'state': 'in'}}, url, js)
+        self.assertEqual(fields['in_scope_urls']['value'], 1000)
+        self.assertTrue(fields['in_scope_urls']['approximate'])
+        self.assertTrue(fields['in_scope_js_files']['approximate'])
+        exact = sc.overview_fields(summary, {'a.example.test': {'state': 'in'}},
+                                   {'host_list': ['a.example.test'], 'urls': {'value': 1000, 'approximate': False}}, None)
+        self.assertFalse(exact['in_scope_urls']['approximate'])

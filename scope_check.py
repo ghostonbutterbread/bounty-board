@@ -99,15 +99,16 @@ class ScopeChecker:
         if directory is None:
             return ('none', reason)
         sig = [str(directory)]
+        # Inode and ctime catch a same-size replacement that keeps the source mtime (sync tools, atomic rename).
         try:
             info = os.stat(directory)
-            sig.append((info.st_size, info.st_mtime_ns))
+            sig.append((info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
         except OSError:
             sig.append(None)
         for name in SCOPE_FILES:
             try:
                 info = os.stat(directory / name)
-                sig.append((name, info.st_size, info.st_mtime_ns))
+                sig.append((name, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
             except OSError:
                 sig.append((name, None))
         return tuple(sig)
@@ -136,8 +137,12 @@ class ScopeChecker:
         missing: targets a background pass should classify now (empty when nothing is due)."""
         sig = self.signature(program)
         if sig[0] == 'none':
-            verdict = {'state': 'unchecked', 'rule': None, 'reason': sig[1] if sig[1] != NO_SCOPE else NO_SCOPE}
-            return ({t: verdict for t in targets}, {'state': 'no_scope', 'checked_at': None, 'reason': verdict['reason']}, [])
+            if sig[1] == NO_SCOPE:
+                verdict = {'state': 'unchecked', 'rule': None, 'reason': NO_SCOPE}
+                return ({t: verdict for t in targets}, {'state': 'no_scope', 'checked_at': None, 'reason': NO_SCOPE}, [])
+            # A scope that exists but cannot be read (broken or escaping alias) is not open scope.
+            verdict = {'state': 'unchecked', 'rule': None, 'reason': failed(sig[1])}
+            return ({t: verdict for t in targets}, {'state': 'failed', 'checked_at': None, 'reason': verdict['reason']}, [])
         if self.bbh is None:
             verdict = {'state': 'unchecked', 'rule': None, 'reason': failed('no --bbh configured on this Board')}
             return ({t: verdict for t in targets}, {'state': 'unconfigured', 'checked_at': None, 'reason': verdict['reason']}, [])
@@ -344,7 +349,8 @@ def overview_fields(summary, verdicts, url_result, js_result):
         fields['in_scope_urls'] = {'value': sum(h.get('urls') or 0 for h in rows),
                                    'approximate': any(not h.get('urls_exact') for h in rows), 'method': 'host_counts'}
     elif isinstance(total_urls, (int, float)):
-        fields['in_scope_urls'] = {'value': round(total_urls * share), 'approximate': share < 1, 'method': 'host_share'}
+        fields['in_scope_urls'] = {'value': round(total_urls * share), 'method': 'host_share',
+                                   'approximate': share < 1 or bool(((url_result or {}).get('urls') or {}).get('approximate'))}
     js_hosts = ((js_result or {}).get('detail') or {}).get('hosts')
     total_js = ((js_result or {}).get('files') or {}).get('value')
     if js_hosts and all((verdicts.get(h.get('host')) or {}).get('state') in ('in', 'out', 'partial') for h in js_hosts):
@@ -352,5 +358,6 @@ def overview_fields(summary, verdicts, url_result, js_result):
                                                     if (verdicts.get(h.get('host')) or {}).get('state') in SHOWN),
                                        'approximate': False, 'method': 'host_counts'}
     elif isinstance(total_js, (int, float)):
-        fields['in_scope_js_files'] = {'value': round(total_js * share), 'approximate': share < 1, 'method': 'host_share'}
+        fields['in_scope_js_files'] = {'value': round(total_js * share), 'method': 'host_share',
+                                       'approximate': share < 1 or bool(((js_result or {}).get('files') or {}).get('approximate'))}
     return fields
