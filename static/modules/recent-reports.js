@@ -105,6 +105,9 @@
     return `<time datetime="${esc(new Date(seconds * 1000).toISOString())}" title="${esc(ui().absoluteTime(seconds))}">${esc(ui().relativeTime(seconds, nowFor(data)))}</time>`;
   };
   const reportHref = item => ctx.hrefFor(item.target || {program: item.program, lane: item.lane, section: 'reports', report: item.path});
+  // One row per finding packet: when another packet file is newer than the
+  // main report (an agent edited SUBMISSION.md or added a PoC), say which.
+  const updatedHtml = item => item.updated_file ? `<span class="recent-updated">Updated ${esc(item.updated_file)}</span>` : '';
   const programHref = item => ctx.hrefFor({program: item.program, lane: item.lane, section: 'findings'});
   // ---- finding actions on mapped rows ------------------------------------
   const FA = () => window.BoardFindingActions;
@@ -219,7 +222,7 @@
     if (!d) return view.error ? '' : '<div class="state">Loading recent reports…</div>';
     if (!d.items.length) return `<div class="empty">${icon('inbox')}<strong>${d.index_state === 'building' ? 'Indexing reports…' : view.hideNa && d.na_hidden ? 'Every matching report is marked N/A.' : 'No reports match these filters.'}</strong>${view.programs.length || view.lane || view.q || view.window !== DEFAULT_WINDOW ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>`;
     const rows = d.items.map(item => `<tr data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}>
-      <td class="recent-report"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-path">${esc(item.path)}</span></td>
+      <td class="recent-report"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-path">${esc(item.path)}</span>${updatedHtml(item)}</td>
       <td><a class="link-button" href="${esc(programHref(item))}">${esc(item.program_name)}</a><span class="id">${esc(item.family)}</span></td>
       <td>${esc(item.lane)}</td>
       <td class="recent-finding">${findingCell(item)}</td>
@@ -252,7 +255,7 @@
     const fromLink = typeof linked === 'string' && linked !== '' && linked !== queryFor();
     if (fromLink) { applyQuery(linked); view.retry = 0; }
     writeUrl();
-    host.innerHTML = `<section class="panel recent-panel" aria-label="Recent reports list" data-na-scope="recent-view"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">Ordered by file modification time. Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
+    host.innerHTML = `<section class="panel recent-panel" aria-label="Recent reports list" data-na-scope="recent-view"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">Ordered by file modification time; a finding packet shows once, at its newest file. Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
     host.onclick = onViewClick; host.onchange = onViewChange; host.oninput = onViewInput; host.oncontextmenu = onRowMenu; host.onkeydown = onRowKey;
     if (fromLink || !view.data || view.source !== ctx.state.data || Date.now() - view.at > 10000) { view.retry = 0; loadView(); }
   }
@@ -329,7 +332,7 @@
     }
   }
   // The Recent row (reference row design), shared by the dashboard and Recon panels.
-  const dashRow = (item, d) => `<li data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}><span class="recent-dash-main"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}</span></span><span class="frow-sev">${pickHtml(item, 'sev')}</span><span class="frow-subm">${pickHtml(item, 'sub')}</span><span class="recent-when">${timeCell(item.modified, d)}</span><span class="recent-na">${naHtml(item)}</span></li>`;
+  const dashRow = (item, d) => `<li data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}><span class="recent-dash-main"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}${item.updated_file ? ` · <span class="recent-updated">Updated ${esc(item.updated_file)}</span>` : ''}</span></span><span class="frow-sev">${pickHtml(item, 'sev')}</span><span class="frow-subm">${pickHtml(item, 'sub')}</span><span class="recent-when">${timeCell(item.modified, d)}</span><span class="recent-na">${naHtml(item)}</span></li>`;
   function panelHtml() {
     const d = panel.data;
     const row = item => dashRow(item, d);

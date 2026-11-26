@@ -11,6 +11,8 @@
 .recent-report{min-width:0;max-width:520px}
 .recent-link{display:block;font-weight:600;color:var(--text);text-decoration:none;overflow-wrap:anywhere}
 .recent-link:hover{color:var(--accent-text);text-decoration:underline;text-underline-offset:2px}
+.recent-updated{display:block;font-size:var(--text-xs);color:var(--text-3);overflow-wrap:anywhere}
+.recent-where .recent-updated{display:inline}
 .recent-path{display:block;font-family:var(--font-mono);font-size:var(--text-xs);color:var(--text-3);overflow-wrap:anywhere}
 .recent-table .id{display:block}
 .recent-finding{white-space:nowrap}
