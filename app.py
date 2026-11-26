@@ -738,10 +738,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
     search_index = SearchIndex(root_snapshot, FAMILIES, read_file, ledger, _generated_navigation)
     search_slots = threading.BoundedSemaphore(4)
     # Recon intel (recon_intel.py): read-only URL index / JS library summaries, computed in the background.
+    # Scope check (scope_check.py): BBH classify through the --bbh launcher, read-only, on the recon worker.
     from recon_intel import ReconIntel, QUERY_BUDGET
-    recon = ReconIntel(lambda: (root_snapshot() or (None,))[0], lambda r: discover(r, inventory_only=True),
+    from scope_check import ScopeChecker
+    recon_root = lambda: (root_snapshot() or (None,))[0]
+    recon = ReconIntel(recon_root, lambda r: discover(r, inventory_only=True),
                        read_file, ledger, coverage, map_entries, artifact_root=artifact_root,
-                       query_budget=recon_query_budget or QUERY_BUDGET)
+                       query_budget=recon_query_budget or QUERY_BUDGET, scope=ScopeChecker(recon_root, writer))
     collaboration_lock = threading.RLock()
     portfolio_scan = threading.BoundedSemaphore(1)
     lane_reads = threading.BoundedSemaphore(8)

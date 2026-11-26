@@ -38,8 +38,11 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     assert.match(await cardHost.innerText(), /Recon depth/);
     assert.match(await cardHost.innerText(), /URLs in 2 indexes/);
     assert.equal(await cardHost.locator('a', {hasText: 'Open recon intel'}).getAttribute('href'), '#/recon');
-    // Highest surface per test run first: globex (172 URLs, no tests).
-    assert.match(await cardHost.locator('[data-ri-card-row]').first().innerText(), /globex-demo/);
+    // Highest in-scope surface per test run first. Before any program view the overview
+    // scales globex (173 URLs, 3 of 4 hosts in scope, no tests) by its in-scope host share.
+    await page.waitForFunction(() => /in-scope URLs/.test(document.querySelector('#dashboard-recon-host [data-ri-card-row]')?.innerText || ''), null, {timeout: 20000});
+    assert.match(await cardHost.locator('[data-ri-card-row]').first().innerText(), /globex-demo\s+web\s*≈130 in-scope URLs/);
+    assert.match(await cardHost.innerText(), /Most in-scope surface per test run/i);
     await shot('recon-dashboard-card.png', cardHost);
 
     // Sidebar link is a real link with a hash route.
@@ -50,6 +53,9 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     assert.equal(await page.locator('#breadcrumb').innerText(), 'Recon intel');
     const rows = page.locator('.ri-overview tbody tr[data-ri-program]');
     await page.waitForFunction(() => document.querySelectorAll('.ri-overview tbody tr[data-ri-program]').length === 3 && !document.querySelector('[data-ri-status] .ri-computing'), null, {timeout: 20000});
+    // In-scope host column: globex 3 of 4 (shop excluded), acme has no scope on file.
+    assert.match(await page.locator('tr[data-ri-program="web_bounty/globex-demo"] [data-ri-scope-cell]').innerText(), /^3\s*\/\s*4$/);
+    assert.equal(await page.locator('tr[data-ri-program="web_bounty/acme-demo"] [data-ri-scope-cell]').innerText(), 'open');
     const order = async () => (await rows.evaluateAll(trs => trs.map(tr => tr.dataset.riProgram.split('/')[1])));
     assert.deepEqual(await order(), ['globex-demo', 'acme-demo', 'initech-demo']); // URLs desc, unknown last
     await page.locator('[data-ri-sort="js_files"]').click();
@@ -74,6 +80,12 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     const hostRow = page.locator('tr[data-ri-host="static.example.test"]');
     await hostRow.waitFor({timeout: 20000});
     await page.waitForFunction(() => !document.querySelector('[data-ri-status] .ri-computing'), null, {timeout: 20000});
+    // No scope on file: open scope. Rows are shown, copy stays enabled, a muted badge says so.
+    assert.equal(await page.locator('[data-ri-scope-badge]').innerText(), 'No scope on file');
+    assert.equal(await page.locator('[data-ri-scope-badge="no_scope"].outline').count(), 1);
+    assert.equal(await page.locator('[data-ri-oos-hidden]').count(), 0);
+    assert.equal(await page.locator('[data-ri-scope]').count(), 0);
+    assert.equal(await page.locator('#ri-hosts button[data-ri-copy-blocked]').count(), 0);
     for (const name of ['Depth summary', 'Hosts', 'What has been looked for', 'What to hunt next', 'JavaScript'])
       assert.equal(await page.getByRole('heading', {name, exact: true}).count(), 1, name);
     const depth = (await page.locator('[data-ri-depth]').innerText()).replace(/\s+/g, ' ');
@@ -144,8 +156,56 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     assert.equal(await evilHost.locator('button[data-ri-copy-blocked][disabled]').count(), 1);
     const hostileText = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\ufeff]/;
     assert.equal(hostileText.test(await page.locator('#recon-intel-host').evaluate(el => el.innerHTML)), false);
-    // Ordinary items in the same view still copy.
-    assert.ok(await page.locator('[data-ri-hunt="param"] [data-ri-copy]').count() > 0);
+    // Ordinary in-scope items in the same view still copy.
+    assert.ok(await page.locator('#ri-hosts [data-ri-copy]').count() > 0);
+
+    // Scope: shop.example.test is excluded, cdn.example.test is partly in scope.
+    await page.waitForFunction(() => document.querySelector('[data-ri-scope-badge]')?.dataset.riScopeBadge === 'checked', null, {timeout: 20000});
+    assert.match(await page.locator('[data-ri-scope-badge]').innerText(), /^Scope checked/);
+    assert.match((await page.locator('[data-ri-scope-hosts]').innerText()).replace(/\s+/g, ' '), /3 of 4 In-scope hosts 1 partly in scope/);
+    assert.match((await page.locator('[data-ri-scope-urls]').innerText()).replace(/\s+/g, ' '), /^33 In-scope URLs/);
+    assert.equal(await page.locator('tr[data-ri-host="shop.example.test"]').count(), 0); // hidden by default
+    assert.match(await page.locator('[data-ri-oos-hidden="hosts"]').innerText(), /1 out-of-scope host hidden · Show/);
+    // The parameter stays listed; only its out-of-scope example URL is hidden, and bbh next still copies.
+    assert.match(await page.locator('[data-ri-oos-hidden="untested_params"]').innerText(), /out-of-scope example URLs? hidden/);
+    const hiddenExample = page.locator('[data-ri-hunt="param"]').filter({has: page.locator('[data-ri-example="hidden"]')}).first();
+    await hiddenExample.waitFor();
+    assert.match(await hiddenExample.locator('[data-ri-example="hidden"]').innerText(), /^Example URL out of scope$/);
+    assert.equal(await hiddenExample.locator('a[href^="http"]').count(), 0);
+    assert.deepEqual(await hiddenExample.locator('button[data-ri-copy]').evaluateAll(bs => bs.map(b => b.textContent.trim())), ['bbh next']);
+    const cdn = page.locator('tr[data-ri-host="cdn.example.test"]');
+    assert.equal(await cdn.locator('[data-ri-scope="partial"]').innerText(), 'Partly in scope');
+    assert.match(await cdn.locator('[data-ri-scope="partial"]').getAttribute('title'), /in scope except paths under \/private\/ · rule: \*\.example\.test/);
+    assert.equal(await cdn.locator('[data-ri-copy]').count(), 1); // partial hosts stay copyable
+    const show = page.locator('[data-ri-oos-hidden="hosts"] a');
+    assert.match(await show.getAttribute('href'), /^#\/recon\?p=web_bounty%2Fglobex-demo&lane=web&oos=1$/);
+    await show.click();
+    await page.waitForFunction(() => location.hash.endsWith('oos=1'));
+    const shop = page.locator('tr[data-ri-host="shop.example.test"]');
+    assert.match(await shop.getAttribute('class'), /ri-oos/);
+    assert.equal(await shop.locator('[data-ri-scope="out"]').innerText(), 'OOS');
+    assert.equal(await shop.locator('[data-ri-scope="out"]').getAttribute('title'), 'excluded by shop.example.test');
+    assert.equal(await shop.locator('button[data-ri-copy-blocked][disabled]').count(), 1);
+    assert.match(await shop.innerText(), /out of scope/);
+    assert.doesNotMatch(await shop.innerText(), /Under-tested/); // out-of-scope surface is never highlighted
+    const oosParam = page.locator('[data-ri-hunt="param"]').filter({has: page.locator('[data-ri-example="out"]')}).first();
+    await oosParam.waitFor();
+    assert.equal(await oosParam.locator('[data-ri-copy]').count(), 1); // bbh next
+    assert.equal(await oosParam.locator('button[data-ri-copy-blocked][disabled]').count(), 2); // URL, curl
+    assert.equal(await oosParam.locator('button[data-ri-copy-blocked]').first().getAttribute('title'), 'Not copied: example out of scope');
+    assert.match(await oosParam.locator('[data-ri-example="out"] [data-ri-scope="out"]').getAttribute('title'), /excluded by shop\.example\.test/);
+    assert.match(await page.locator('[data-ri-oos-hidden="hosts"]').innerText(), /1 out-of-scope host shown · Hide/);
+    // oos=1 survives a reload; an unknown value falls back to hiding.
+    await page.reload();
+    await shop.waitFor({timeout: 20000});
+    assert.equal(await page.locator('[data-ri-oos-hidden="hosts"] a').innerText(), 'Hide');
+    await shot('scope-program-light.png');
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+    await shot('scope-program-dark.png');
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+    await page.goto(origin + '/#/recon?p=web_bounty%2Fglobex-demo&lane=web&oos=yes');
+    await page.locator('tr[data-ri-host="cdn.example.test"]').waitFor({timeout: 20000});
+    assert.equal(await page.locator('tr[data-ri-host="shop.example.test"]').count(), 0);
 
     // Empty states explain what produces the data.
     await page.locator('#ri-program').selectOption('web_bounty/initech-demo|web');
@@ -167,9 +227,24 @@ test('recon intel view: sidebar link, overview sorting, program sections, hunt n
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     assert.ok(overflow <= 1, `phone layout overflows by ${overflow}px`);
     await shot('recon-program-phone.png');
+    await page.goto(origin + '/#/recon?p=web_bounty%2Fglobex-demo&lane=web&oos=1');
+    await page.locator('tr[data-ri-host="shop.example.test"]').waitFor({timeout: 20000});
+    await page.waitForTimeout(200);
+    const oosOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    assert.ok(oosOverflow <= 1, `phone layout with out-of-scope rows overflows by ${oosOverflow}px`);
+    await shot('scope-program-phone.png');
     await page.goto(origin + '/#/recon');
     await page.locator('.ri-overview').waitFor();
     await shot('recon-overview-phone.png');
+    // Once a program view cached per-host counts, the dashboard ranks by exact in-scope surface:
+    // globex drops to 33 in-scope URLs (shop is excluded), so acme leads.
+    await page.setViewportSize({width: 1360, height: 1000});
+    await page.goto(origin + '/#/dashboard');
+    await page.reload();
+    await cardHost.locator('[data-ri-card-row]').first().waitFor({timeout: 20000});
+    await page.waitForFunction(() => /acme-demo/.test(document.querySelector('#dashboard-recon-host [data-ri-card-row]')?.innerText || ''), null, {timeout: 20000});
+    assert.match(await cardHost.locator('[data-ri-card-row]').filter({hasText: 'globex-demo'}).innerText(), /33 in-scope URLs/);
+    await shot('scope-dashboard-card.png', cardHost);
     assert.deepEqual(errors, []);
     assert.deepEqual(outside, []);
   } finally {

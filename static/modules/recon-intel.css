@@ -118,3 +118,18 @@
 .ri-row-link::after{content:"";position:absolute;inset:0}
 @media (max-width:900px){.recon-findings-grid{grid-template-columns:1fr}}
 .ri-recent td .id{display:block;margin-top:2px}
+/* Scope (scope_check.py): out-of-scope rows are hidden unless oos=1; shown muted with an OOS pill. */
+.ri-scope-pill{margin-left:6px;font-size:var(--text-xs);vertical-align:1px;cursor:help;white-space:nowrap}
+.ri-scope-out{color:var(--text-3);border-style:dashed}
+.ri-scope-partial{color:var(--info);border-color:color-mix(in srgb,var(--info) 45%,var(--border))}
+.ri-oos td,.ri-oos>*,li.ri-oos{color:var(--text-3)}
+.ri-oos td{background:var(--surface-2)}
+.ri-oos .ri-mono,.ri-oos .ri-ext,.ri-oos strong{color:var(--text-3)}
+.ri-oos-line{margin:var(--space-2) 0}
+.ri-oos-line .fa{color:var(--text-3)}
+.ri-oos-line a{color:var(--accent-text)}
+.ri-oos-pad{padding-top:0;padding-bottom:var(--space-2)}
+.ri-of{color:var(--text-3);font-weight:400;font-size:var(--text-sm)}
+.ri-scope-badge{margin-left:var(--space-2);cursor:help;white-space:nowrap}
+.ri-scope-note{margin:var(--space-2) 0 0;color:var(--warning)}
+.ri-scope-open{font-size:var(--text-sm)}
