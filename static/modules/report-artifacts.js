@@ -269,9 +269,12 @@
         item.panel.fresh.set(body.artifact.relative, Date.now());
         done('done', body.renamed ? `Saved as ${body.artifact.name}` : 'Saved');
         load(item.panel, {quiet: true});
-      } else done('error', uploadError(xhr.status, body, item.panel));
+      } else {
+        item.retry = ![413, 404].includes(xhr.status) && !['no_report_folder', 'invalid_name', 'uploads_disabled'].includes(body.error);
+        done('error', uploadError(xhr.status, body, item.panel));
+      }
     };
-    xhr.onerror = () => done('error', 'Upload failed. Check the connection and retry.');
+    xhr.onerror = () => { item.retry = true; done('error', 'Upload failed. Check the connection and retry.'); };
     xhr.ontimeout = xhr.onerror;
     xhr.onabort = () => done('cancelled', 'Cancelled');
     xhr.send(item.file);
@@ -334,7 +337,7 @@
         el('div', {class: `artifact-upload-status${state === 'error' ? ' is-error' : ''}`, role: state === 'error' ? 'alert' : null, text: status})),
       el('div', {class: 'artifact-buttons'},
         active ? el('button', {type: 'button', class: 'button subtle', 'aria-label': label('Cancel'), 'data-upload-cancel': true, onclick: () => cancelUpload(item)}, 'Cancel') : null,
-        state === 'error' && item.message.includes('etry') ? el('button', {type: 'button', class: 'button subtle', 'aria-label': label('Retry'), 'data-upload-retry': true,
+        state === 'error' && item.retry ? el('button', {type: 'button', class: 'button subtle', 'aria-label': label('Retry'), 'data-upload-retry': true,
           onclick: () => { removeUpload(item); enqueue(item.panel, [{file: item.file, name: item.name}]); }}, 'Retry') : null,
         state === 'error' ? el('button', {type: 'button', class: 'button subtle', 'aria-label': `Dismiss upload message for ${item.name}`, 'data-upload-dismiss': true,
           onclick: () => removeUpload(item)}, 'Dismiss') : null));
