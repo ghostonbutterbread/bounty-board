@@ -64,4 +64,56 @@ New:
 - `tests/test_report_packets.py` (26): tier shapes accept/reject (measured names incl. `JUDGE-RECEIPT-<FID>`, `EVIDENCE-<FID>`, `SUBMISSION-<FID>`, dotted stems, wrong FID, sidecar first tokens); named tiers; tier order; tie-breaks (newest, name, `report_path` within tier, old-FID-report ties); `report_path` never overrides the order; fallback (ledger file, only one, newest); `_` folder `report_path` never main (and no top-level candidate means no change); packet file groups and `_meta`; evidence-only packets; two folders sharing an FID; legacy copies (packet by `report_path`, by unique FID, ambiguous, no packet, not in ledger, duplicate FID); cross-host absolute `report_path`; packet time (PNG upload, evidence, `.tmp`, dot names, `_meta` ignored); flat and `_retracted/` reports untouched; `app.reports()` kinds and fields; no content read of packet files in `app.reports()` and in the search index; Recent one row per packet, packet time order, `updated_file`, finding mapping, `within`, navigation toggle; N/A follows the main; search hits and counts; finding links to the main; incremental refresh after adding a vuln-type report (the main switches, the old main becomes a packet file, only the new file is read); a sidecar edit moves the row without adding one; HTTP `/api/data`, `/api/lane-reports`, `/api/recent-reports`, `/api/search` membership and counts; `/api/report` still serves a packet file; both indexes use the shared helper.
 - `static/tests/report-packets.synthetic.test.cjs` (5, in `npm test`; fixture `tests/report_packets_fixture.py` reuses the Python lane): one Recent row per packet with the "Updated ..." subline (view and dashboard panel); Reports list, picker, tab count and summary hold mains only; search report hits and the D16 finding hit; switcher hrefs, current marker, packet-relative names, Evidence link, collapsed Archive/Older, `_meta` excluded, plain click and Ctrl+click; an old packet-file URL (top-level, archived, legacy copy) opens with the note and the main selected; finding-row and drill-row report links go to the main; editing a packet file saves that file with shared drafts plus autosave, and in the live editor.
 
-RESULTS_PLACEHOLDER
+Red on base (only source files swapped to `git show 18089f4:<file>` in a scratch copy of the branch, so the running suites were not disturbed; run, then discarded):
+
+- Python: `app.py`, `search_index.py` swapped: 26 run, 10 failures + 1 error. The 15 that pass are the pure helper tests (`TierTests`, new module `report_packets.py`) and "packet file stays readable" (`/api/report`, existing behaviour that must keep working).
+- Browser: `app.py`, `search_index.py`, `static/app.js`, `static/modules/recent-reports.js`, `static/modules/recent-reports.css`, `static/style.css` swapped: 5 of 5 fail.
+
+Updated existing tests (only where the old duplicate behaviour is what Ryushe asked to remove, or a direct consequence of the required `reports_relative` resolution):
+
+- `tests/test_recent_reports.py` (mapping fixture, `F012-xss/` holds `acme.example-xss-F012.md`, registered `owned.md`, `nav.md`):
+  - `test_mapping_rules`: `F012-xss/acme.example-xss-F012.md` is no longer a row (it has a `.` in the stem, so it is not vuln-type; the registered `owned.md` is the fallback-tier main). All other expected mappings unchanged.
+  - `test_packet_meta_hidden_like_navigation`: navigation adds 3 rows, not 4 (`F012-xss/nav.md` is now a packet file; the two `_meta` files and `index/F012.md` remain).
+  - `test_navigation_never_maps`: asserts on `index/F012.md` instead of `F012-xss/nav.md` (same assertions).
+  - `test_finding_payload`: reads the F012 payload from the `F012/notes.md` row instead of the acme row (same expected payload, `match: packet`).
+- `tests/test_report_index_synthetic.py`: `reports/../reports/unregistered.md` (finding `NOT-EXACT`) now registers `unregistered.md` (`registered_report`, `['NOT-EXACT']`), because ownership uses `reports_relative` like the evidence classifier and search index.
+- `static/tests/sandbox-terminal.synthetic.test.cjs` "legacy reports open their ledger packet": the legacy copy `findings/confirmed/D10 - HIGH - stored xss.md` is now an Older copies packet file of D10's main report, so the test opens it by its link (hash route) instead of the picker, and waits for the packet note. Every terminal assertion is unchanged.
+- `package.json`: `static/tests/report-packets.synthetic.test.cjs` added to `npm test`.
+
+Selectors: grepped `static/tests/` and `static/tests/tools/` for `.recent-where`, `.recent-path`, `.report-link`, `.summary-line`, tab `.count`, `.record-value`; no existing assertion depends on the changed markup.
+
+Runs (box shared and loaded, load average 4 to 14; `TMPDIR=/home/ryushe/.hermes/cache/scratch/bb-packets/tmp`, `NODE_PATH=/home/ryushe/projects/bounty-board-initial/node_modules`, `CHROME_BIN=/opt/google/chrome/chrome`):
+
+- `ls tests/test_*.py | sed 's#/#.#;s#\.py$##' | xargs -P4 -n1 python3 -m unittest`: 48 modules, 702 tests, 0 failures, 0 errors (13 skipped: Docker and opt-in tests).
+- `npm test`: 236 tests, 235 pass, 1 fail: sandbox-terminal "legacy reports open their ledger packet" (picker no longer lists the legacy copy, see above). After the update that file alone: 8/8.
+- Broad browser suite (`node --test --test-concurrency=1 --test-skip-pattern='^browser metadata update reaches backend with a disposable synthetic writer$'` over `static/tests/*.test.cjs` minus `collaboration.synthetic` and `collaboration-combined.synthetic`, 51 files, including the sandbox fix): 313 tests, 312 pass, 1 fail: `report-save-ui` "backend editability disables collaborative editor and source writes only for denied reports" (6 s wait for "Markdown file saved"). Reruns of `report-save-ui` alone at load 12 to 14: one test alone 1/1; whole file 10 of 12 pass (a different pair failing each run). The same file on the base sources at the same load: also 10 of 12 (yet another pair). Its fixture has no finding packets; recorded as a load flake, not a regression.
+
+## Screenshots
+
+Synthetic fixture, `PACKETS_SCREENSHOT_DIR=/home/ryushe/.hermes/cache/scratch/bb-packets/tmp/shots`:
+
+- `recent-light.png`, `recent-dark.png`: Recent view, one row per packet, "Updated poc/request.txt" and "Updated REPORT-D21.md" sublines.
+- `dashboard-recent-light.png`: dashboard Recent panel.
+- `switcher-main-light.png`, `switcher-main-dark.png`: main report with the switcher (Files, Evidence, collapsed Archive).
+- `switcher-packet-file-light.png`, `switcher-packet-file-dark.png`: an archived packet file opened from its old URL (Archive group open, current marker).
+- `switcher-live-light.png`: a packet file in the live editor.
+
+## Gaps
+
+- Lane report items carry no title, so the packet-file note names the main by file name (`api-target-io-ssrf-D15.md`), not its heading.
+- Packet files are not read for the lane list, so a packet file that is a BBH navigation page would be listed `editable` until opened (`/api/report` reports the real policy, and the editor follows it). No packet navigation pages are known.
+- A packet whose only Markdown files are nested (no top-level candidate) keeps today's behaviour: those files stay listed as reports. Measured: 50 packets hold only evidence; nested-only packets were not measured separately.
+- Until the selected lane's report index arrives (progressive load), a finding-row report link is still derived from `report_path` and may point at a packet file; it opens that file with the main-report note, and switches to the main once the index loads.
+- N/A marks on files that are now packet files stay in the private store and are ignored. Clear them if wanted.
+- `_meta/` files still appear in the Reports list (unchanged, as asked); Recent and search keep hiding them.
+- The coverage drilldown's evidence refs still link the exact file they name (a packet file opens with its note), not the main.
+
+## Decisions for Ryushe
+
+- `SUBMISSION-<FID>.md` is its own tier after `SUBMISSION.md`, so a ledger `report_path` on `SUBMISSION-<FID>.md` never beats `SUBMISSION.md`. The four old FID report names share one tier (`report_path`, then newest).
+- Group `archive` is any path under an `_` folder inside the packet; `older` is only legacy `findings/<bucket>/<FID> - <title>.md` copies. Superseded `SUBMISSION.md` / `REPORT.md` files are under Files, uncollapsed, so an agent's latest SUBMISSION edit is one click away.
+- A collapsed group opens when it holds the file being viewed.
+- The main report's `owner_fids` include every finding whose `report_path` lies in the packet, so a main the ledger does not name is still "Registered" and links its finding.
+- Ownership in both indexes now uses `reports_relative`, so normalized relative paths and other-host absolute `report_path`s register their file (previously only the evidence rule used it).
+- Hidden files (`.name.md`) at the packet top level are never main.
+- The switcher sits above the report (below the picker and lane list) in the artifacts panel's card style rather than inside the side column, so it is above the report in every layout (plain, read-only and live).
