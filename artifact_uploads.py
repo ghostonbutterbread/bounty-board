@@ -25,6 +25,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import threading
 import unicodedata
 from pathlib import PurePosixPath
@@ -76,12 +77,16 @@ class Uploads:
 
 
 def upload_state(uploads, found):
-    """The ``upload`` block of the artifact list response."""
+    """The ``upload`` block of the artifact list response.
+
+    ``delete`` is true when the panel may offer Delete on some rows (the same
+    opt-in flag covers upload and delete); each entry's ``deletable`` says
+    which (see ``mark_deletable``)."""
     if uploads is None:
-        return {'enabled': False, 'reason': 'disabled', 'max_bytes': None}
+        return {'enabled': False, 'reason': 'disabled', 'max_bytes': None, 'delete': False}
     if not found.get('folder'):
-        return {'enabled': False, 'reason': 'no_report_folder', 'max_bytes': uploads.max_bytes}
-    return {'enabled': True, 'reason': None, 'max_bytes': uploads.max_bytes}
+        return {'enabled': False, 'reason': 'no_report_folder', 'max_bytes': uploads.max_bytes, 'delete': False}
+    return {'enabled': True, 'reason': None, 'max_bytes': uploads.max_bytes, 'delete': True}
 
 
 def free_bytes(dir_fd):
@@ -395,6 +400,7 @@ def handle_upload(handler, uploads, root, root_snapshot, families):
             return handler.reply(500, {'error': 'upload_failed'}, {'Connection': 'close'})
         relative = f'{folder}/{final}'
         entry = _entry(lane_fd, family, program, lane, path, relative)
+        entry['deletable'] = delete_refusal(uploads, found, entry) is None
         return handler.reply(201, {'artifact': entry, 'renamed': final != name, 'requested_name': name})
     finally:
         try:
@@ -451,3 +457,180 @@ def _entry(lane_fd, family, program, lane, path, relative):
             'size': size, 'modified': modified, 'category': ra.category(name), 'sensitive': is_sensitive,
             'preview': ra.preview_kind(name, is_sensitive), 'source_reason': 'report_folder',
             'reasons': [{'reason': 'report_folder', 'detail': 'uploaded'}], 'listed': False}
+
+
+# --------------------------------------------------------------- artifact delete
+# ``POST /api/report-artifact-delete`` (feat/board-artifact-delete). Same opt-in
+# flag as uploads. Only regular, non-Markdown files that the report's dedicated
+# folder rule lists can be removed, one at a time, and only while their size and
+# modified time still match what the panel showed. Contract:
+# docs/integrations/artifact-uploads.md ("Delete").
+MAX_DELETE_BODY = 4096
+MARKDOWN = ('.md', '.markdown')
+
+
+def delete_refusal(uploads, found, item):
+    """Why ``item`` (a list entry of ``found``) cannot be deleted, or None.
+
+    ``(404, 'artifact_not_found_or_unavailable')`` when it is not inside the
+    report's dedicated folder (or there is none); ``(409, 'not_deletable')`` for
+    Markdown (reports, evidence, drafts), dot names (staged uploads) and files
+    inside the folder that the folder rule itself does not list."""
+    if uploads is None:
+        return 404, 'uploads_disabled'
+    folder = found.get('folder')
+    relative = item.get('relative') or ''
+    if not folder or not relative.startswith(folder + '/'):
+        return 404, 'artifact_not_found_or_unavailable'
+    name = relative.rsplit('/', 1)[-1]
+    if (relative == found.get('report') or name.lower().endswith(MARKDOWN) or name.startswith('.') or
+            not any(r.get('reason') == 'report_folder' for r in item.get('reasons') or [])):
+        return 409, 'not_deletable'
+    return None
+
+
+def mark_deletable(uploads, found):
+    """Add ``deletable`` to every entry of an ``associate()`` result (in place)."""
+    for item in found.get('artifacts', []):
+        item['deletable'] = delete_refusal(uploads, found, item) is None
+    return found
+
+
+def _delete_gate(handler):
+    headers = handler.headers
+    lengths = headers.get_all('Content-Length', [])
+    types = headers.get_all('Content-Type', [])
+    if (not handler.trusted_request(require_origin=True) or
+            headers.get_all('X-Requested-With', []) != ['Bounty-Board'] or
+            len(types) != 1 or types[0].strip().lower() != 'application/json' or
+            headers.get_all('Transfer-Encoding') or
+            len(lengths) != 1 or not re.fullmatch(r'[0-9]{1,4}', lengths[0].strip()) or
+            int(lengths[0].strip()) > MAX_DELETE_BODY):
+        return None
+    return int(lengths[0].strip())
+
+
+def _delete_selector(handler, families):
+    try:
+        params = parse_qs(urlsplit(handler.path).query, keep_blank_values=True, max_num_fields=8)
+    except ValueError as error:  # too many fields
+        raise ra.ArtifactError('invalid selector') from error
+    bound = 'root_instance' in params
+    needed = {'family', 'program', 'lane', 'path', 'artifact'} | ({'root_instance'} if bound else set())
+    if set(params) != needed or any(len(v) != 1 for v in params.values()):
+        raise ra.ArtifactError('invalid selector')
+    family, program, lane, path, artifact = (params[k][0] for k in ('family', 'program', 'lane', 'path', 'artifact'))
+    if (family not in families or lane not in families[family] or not program or program.startswith('_') or
+            program in ('.', '..') or '/' in program or '\0' in program):
+        raise ra.ArtifactError('invalid selector')
+    ra._clean_parts(path)
+    ra._clean_parts(artifact)
+    return family, program, lane, path, artifact, (params['root_instance'][0] if bound else None)
+
+
+def _expected(raw):
+    """The ``{size, modified}`` body as two non-negative ints, or None."""
+    import json
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(body, dict) or set(body) != {'size', 'modified'}:
+        return None
+    values = (body['size'], body['modified'])
+    if any(type(v) is not int or v < 0 for v in values):
+        return None
+    return values
+
+
+def remove(uploads, lane_fd, folder, relative, size, modified):
+    """Unlink ``relative`` (inside ``folder``) if it is still the file the panel saw.
+
+    The parent is reached by an ``O_NOFOLLOW`` descriptor walk, the name is
+    checked with ``lstat`` relative to it, and the check and unlink run under
+    ``place_lock`` so an upload cannot pick the name in between. Raises
+    ``UploadError``."""
+    if not relative.startswith(folder + '/'):
+        raise UploadError(404, 'artifact_not_found_or_unavailable')
+    parts = relative.split('/')
+    with uploads.place_lock:
+        try:
+            parent = ra._open_dir(lane_fd, parts[:-1])
+        except OSError:
+            raise UploadError(404, 'artifact_not_found_or_unavailable') from None
+        try:
+            try:
+                info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                raise UploadError(404, 'artifact_not_found_or_unavailable') from None
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size or int(info.st_mtime) != modified:
+                raise UploadError(409, 'changed')
+            try:
+                os.unlink(parts[-1], dir_fd=parent)
+            except FileNotFoundError:
+                raise UploadError(404, 'artifact_not_found_or_unavailable') from None
+            except IsADirectoryError:  # swapped for a directory after the check
+                raise UploadError(409, 'changed') from None
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+
+
+def handle_delete(handler, uploads, root, root_snapshot, families):
+    """``POST /api/report-artifact-delete``. ``handler`` is the Board request handler."""
+    if uploads is None:
+        handler.close_connection = True
+        return handler.reply(404, {'error': 'uploads_disabled'}, {'Connection': 'close'})
+    length = _delete_gate(handler)
+    if length is None:
+        handler.close_connection = True
+        return handler.reply(403, {'error': 'untrusted_origin'}, {'Connection': 'close'})
+    timeout = handler.connection.gettimeout()
+    try:
+        handler.connection.settimeout(10)
+        raw = handler.rfile.read(length)
+    except OSError:
+        raw = b''
+    finally:
+        try:
+            handler.connection.settimeout(timeout)
+        except OSError:
+            pass
+    if len(raw) != length:
+        handler.close_connection = True
+        return handler.reply(400, {'error': 'incomplete_body'}, {'Connection': 'close'})
+    try:
+        family, program, lane, path, artifact, root_instance = _delete_selector(handler, families)
+    except ra.ArtifactError:
+        return handler.reply(404, {'error': 'artifact_not_found_or_unavailable'})
+    expected = _expected(raw)
+    if expected is None:
+        return handler.reply(400, {'error': 'invalid_body'})
+    before = root_snapshot() if root_instance is not None else None
+    if root_instance is not None and (not before or root_instance != before[2]):
+        return handler.reply(409, {'error': 'root_changed'})
+    lane_fd = None
+    try:
+        try:
+            lane_fd = ra.open_lane(before[0] if before else root, family, program, lane)
+            found = ra.associate(lane_fd, family, program, lane, path)
+        except (OSError, ValueError, UnicodeError, ra.ArtifactError):
+            if before and root_snapshot() != before:
+                return handler.reply(409, {'error': 'root_changed'})
+            return handler.reply(404, {'error': 'artifact_not_found_or_unavailable'})
+        item = next((a for a in found['artifacts'] if a['relative'] == artifact), None)
+        if item is None:
+            return handler.reply(404, {'error': 'artifact_not_found_or_unavailable'})
+        refusal = delete_refusal(uploads, found, item)
+        if refusal:
+            return handler.reply(refusal[0], {'error': refusal[1]})
+        try:
+            remove(uploads, lane_fd, found['folder'], artifact, *expected)
+        except UploadError as error:
+            return handler.reply(error.status, {'error': error.code})
+        except OSError:
+            return handler.reply(500, {'error': 'delete_failed'})
+        return handler.reply(200, {'deleted': artifact})
+    finally:
+        if lane_fd is not None:
+            os.close(lane_fd)

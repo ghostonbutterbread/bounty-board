@@ -5,7 +5,9 @@
  * is inserted with textContent; nothing from an artifact is parsed as HTML.
  * Uploads (feat/board-artifact-uploads, opt-in --artifact-uploads): an Upload
  * files button, drag and drop and image paste send files one at a time into
- * the report's own folder; see docs/integrations/artifact-uploads.md. */
+ * the report's own folder; see docs/integrations/artifact-uploads.md.
+ * Delete (feat/board-artifact-delete, same flag): rows the server marks
+ * deletable get a Delete button with a confirmation dialog. */
 (() => {
   const TEXT_PREVIEW_BYTES = 64 * 1024;
   const KEEP_PANELS = 12;
@@ -72,6 +74,7 @@
     if (!panel) {
       panel = {key, selector, node: el('section', {class: 'artifacts', 'aria-label': 'Report artifacts', 'data-artifacts-key': key}), open: new Set(), fresh: new Map()};
       setupUploads(panel);
+      setupDeletes(panel);
       panels.set(key, panel);
       // Evict the oldest panels, but never one with a queued or running upload:
       // its rows (progress, Cancel, Retry) must still be there when the report
@@ -94,7 +97,7 @@
   async function load(panel, {quiet = false} = {}) {
     const generation = (panel.generation || 0) + 1;
     panel.generation = generation;
-    if (!quiet) { panel.status = 'loading'; draw(panel); }
+    if (!quiet) { panel.status = 'loading'; panel.deleteNotes.replaceChildren(); draw(panel); }
     try {
       const response = await fetch(`/api/report-artifacts?${query(panel.selector)}`, {headers: {Accept: 'application/json'}, cache: 'no-store'});
       const body = await response.json().catch(() => null);
@@ -167,7 +170,7 @@
       else if (upload === 'no_folder') body.push(el('p', {class: 'hint artifacts-upload-hint', id: `${panel.uploadId}-why`, text: NO_FOLDER_TEXT}));
       if (zippable.length < items.length) body.push(el('p', {class: 'hint', text: 'Download all leaves out files marked sensitive. Download them one at a time.'}));
       if (tooBig) body.push(el('p', {class: 'hint', text: `Too large to download as one zip (over ${size(data.max_zip_bytes)}). Download files one at a time.`}));
-      body.push(panel.dropHint, panel.uploadList);
+      body.push(panel.dropHint, panel.uploadList, panel.deleteNotes);
       if (!items.length) body.push(el('div', {class: 'state', text: 'No artifacts found for this report.'}));
       for (const [category, label, glyph] of GROUPS) {
         const group = items.filter(a => (GROUPS.some(g => g[0] === a.category) ? a.category : 'other') === category);
@@ -180,7 +183,7 @@
     node.setAttribute('aria-busy', panel.status === 'loading' ? 'true' : 'false');
     // The input and the upload rows are persistent nodes: re-rendering moves
     // them instead of recreating them, so progress survives Board renders.
-    if (!body.includes(panel.uploadList)) body.push(panel.dropHint, panel.uploadList);
+    if (!body.includes(panel.uploadList)) body.push(panel.dropHint, panel.uploadList, panel.deleteNotes);
     node.replaceChildren(head, panel.uploadInput, ...body);
   }
 
@@ -365,6 +368,7 @@
     if (!panel.ids.has(item.relative)) panel.ids.set(item.relative, `artifact-preview-${++previewCounter}`);
     const previewId = panel.ids.get(item.relative);
     const open = panel.open.has(item.relative);
+    const busy = panel.deleting.has(item.relative);
     const folder = panel.data?.folder;
     const outside = folder && !item.relative.startsWith(folder + '/');
     const reasons = (item.reasons || [{reason: item.source_reason, detail: ''}])
@@ -373,7 +377,7 @@
     const freshAt = panel.fresh.get(item.relative);
     const fresh = freshAt && Date.now() - freshAt < NEW_HIGHLIGHT_MS;
     if (freshAt && !fresh) panel.fresh.delete(item.relative);
-    const toggle = item.preview ? el('button', {type: 'button', class: 'button subtle', 'aria-expanded': String(open), 'aria-controls': previewId,
+    const toggle = item.preview ? el('button', {type: 'button', class: 'button subtle', 'aria-expanded': String(open), 'aria-controls': previewId, disabled: busy,
       'data-artifact-preview': item.relative,
       onclick: () => {
         const next = !panel.open.has(item.relative);
@@ -386,7 +390,7 @@
       }}, icon('fa-eye'), document.createTextNode(open ? ' Hide preview' : ' Preview')) : null;
     if (open) fillPreview(preview, item, params);
     if (fresh) setTimeout(() => { panel.fresh.delete(item.relative); panel.node.querySelector(`[data-artifact="${CSS.escape(item.relative)}"]`)?.classList.remove('artifact-new'); }, NEW_HIGHLIGHT_MS - (Date.now() - freshAt));
-    return el('li', {class: `artifact-row${fresh ? ' artifact-new' : ''}`, 'data-artifact': item.relative},
+    return el('li', {class: `artifact-row${fresh ? ' artifact-new' : ''}${busy ? ' is-deleting' : ''}`, 'data-artifact': item.relative, 'aria-busy': busy ? 'true' : null},
       el('div', {class: 'artifact-main'},
         el('span', {class: 'artifact-icon'}, icon(glyph)),
         el('div', {class: 'artifact-text'},
@@ -397,8 +401,145 @@
           el('div', {class: 'artifact-reason hint', text: reasons})),
         el('div', {class: 'artifact-buttons'}, toggle,
           el('a', {class: 'button', href: `/api/report-artifact?${params}`, download: item.name, 'data-artifact-download': item.relative,
-            'aria-label': `Download ${item.name}`}, icon('fa-download'), ' Download'))),
+            'aria-label': `Download ${item.name}`, 'aria-disabled': busy ? 'true' : null, tabindex: busy ? '-1' : null}, icon('fa-download'), ' Download'),
+          deleteButton(panel, item, busy))),
       preview);
+  }
+
+  // -------------------------------------------------------------- delete
+  // One file at a time, confirmed in a dialog. The request carries the size
+  // and modified time the row showed; the server refuses (409 changed) if the
+  // file was edited or replaced since. A successful delete removes the row in
+  // place, so open previews of other rows and the upload queue are untouched.
+  const NOTE_MS = 4000;
+  const CHANGED_TEXT = 'This file changed since the list loaded. Check it and try again.';
+
+  function setupDeletes(panel) {
+    panel.deleting = new Set();
+    panel.deleteNotes = el('ul', {class: 'artifact-delete-notes', 'aria-label': 'Delete results', 'aria-live': 'polite'});
+  }
+
+  function deleteButton(panel, item, busy) {
+    if (item.deletable !== true) return null;
+    return el('button', {type: 'button', class: 'button subtle danger-ghost artifact-delete', 'data-artifact-delete': item.relative,
+      'aria-label': `Delete ${item.name}`, title: 'Delete from the report folder', disabled: busy,
+      onclick: () => askDelete(panel, item)}, icon('fa-trash'), ' Delete');
+  }
+
+  // Reuses the ledger dialog helper when that module is loaded; otherwise a
+  // native <dialog> with the same classes. Cancel has focus; Escape cancels.
+  function confirmDelete(item) {
+    return new Promise(resolve => {
+      const title = `Delete ${item.name}?`;
+      const textId = 'artifact-delete-confirm-text';
+      let node;
+      if (typeof window.BoardLedgerActions?.dialog === 'function') node = window.BoardLedgerActions.dialog(title, textId);
+      else {
+        document.querySelector('dialog.artifact-delete-dialog')?.remove();
+        node = el('dialog', {class: 'ledger-dialog panel artifact-delete-fallback', 'aria-labelledby': 'artifact-delete-title', 'aria-describedby': textId},
+          el('h2', {id: 'artifact-delete-title', text: title}));
+        node.addEventListener('close', () => node.remove());
+        document.body.append(node);
+      }
+      node.classList.add('artifact-delete-dialog');
+      node.setAttribute('data-artifact-delete-dialog', item.relative);
+      let answer = false;
+      const yes = el('button', {type: 'button', class: 'button danger-button', 'data-artifact-delete-confirm': true, text: 'Delete'});
+      const no = el('button', {type: 'button', class: 'button subtle', 'data-artifact-delete-cancel': true, text: 'Cancel'});
+      node.append(el('p', {class: 'hint', id: textId,
+        text: `This removes ${item.display_path || item.name} from the report folder. Synced devices remove it too. This cannot be undone.`}),
+        el('div', {class: 'ledger-dialog-actions'}, yes, no));
+      yes.addEventListener('click', () => { answer = true; node.close(); });
+      no.addEventListener('click', () => node.close());
+      node.addEventListener('close', () => resolve(answer), {once: true});
+      node.showModal();
+      no.focus();
+    });
+  }
+
+  const rowNode = (panel, relative) => panel.node.querySelector(`.artifact-row[data-artifact="${CSS.escape(relative)}"]`);
+
+  // Redraw one row (busy state) without touching the others. Focus that was
+  // in the row moves to the panel, never outside it.
+  function redrawRow(panel, item) {
+    const old = rowNode(panel, item.relative);
+    if (!old) return;
+    const hadFocus = old.contains(document.activeElement);
+    const glyph = (GROUPS.find(g => g[0] === item.category) || GROUPS[GROUPS.length - 1])[2];
+    old.replaceWith(row(panel, item, glyph));
+    if (hadFocus) panel.node.focus({preventScroll: true});
+  }
+
+  async function askDelete(panel, item) {
+    if (panel.deleting.has(item.relative)) return;
+    if (!await confirmDelete(item)) return;
+    panel.deleting.add(item.relative);
+    redrawRow(panel, item);
+    let status = 0, body = {};
+    try {
+      const response = await fetch(`/api/report-artifact-delete?${query(panel.selector, {artifact: item.relative})}`, {
+        method: 'POST', cache: 'no-store', body: JSON.stringify({size: item.size, modified: item.modified}),
+        headers: {'X-Requested-With': 'Bounty-Board', 'Content-Type': 'application/json', Accept: 'application/json'}});
+      status = response.status;
+      body = (await response.json().catch(() => null)) || {};
+    } catch { /* network error: status stays 0 */ }
+    panel.deleting.delete(item.relative);
+    if (status === 200) {
+      removeRow(panel, item.relative);
+      deleteNote(panel, 'done', `Deleted ${item.name}`);
+    } else {
+      redrawRow(panel, item);
+      deleteNote(panel, 'error', deleteError(status, body));
+    }
+    load(panel, {quiet: true});
+  }
+
+  function deleteError(status, body) {
+    const code = body?.error;
+    if (code === 'changed') return CHANGED_TEXT;
+    if (status === 404 && code === 'artifact_not_found_or_unavailable') return 'This file is no longer in the report folder. The list was reloaded.';
+    if (code === 'not_deletable') return 'This file cannot be deleted from here.';
+    if (code === 'uploads_disabled') return 'Deleting is turned off on the server.';
+    if (code === 'root_changed') return 'The data root changed. Reload the page and try again.';
+    if (!status) return 'Delete failed. Check the connection and try again.';
+    return 'Delete failed. Try again.';
+  }
+
+  // Remove the row in place and update the counts, so the next quiet reload
+  // finds nothing changed and other rows (and their previews) stay as they are.
+  function removeRow(panel, relative) {
+    const node = rowNode(panel, relative);
+    const hadFocus = node?.contains(document.activeElement);
+    node?.querySelectorAll('video,audio').forEach(media => media.pause());
+    panel.open.delete(relative);
+    panel.fresh.delete(relative);
+    if (!panel.data) return;
+    panel.data = {...panel.data, artifacts: panel.data.artifacts.filter(a => a.relative !== relative)};
+    panel.signature = signature(panel.data);
+    const items = panel.data.artifacts;
+    if (!items.length) { draw(panel); panel.node.focus({preventScroll: true}); return; }
+    const group = node?.closest('.artifact-group');
+    node?.remove();
+    if (group) {
+      const left = group.querySelectorAll('.artifact-row').length;
+      const label = (GROUPS.find(g => g[0] === group.dataset.category) || [])[1];
+      if (!left) group.remove();
+      else if (label) group.querySelector('h4').textContent = `${label} (${left})`;
+    }
+    const title = panel.node.querySelector('.artifacts-head h3');
+    if (title?.lastChild?.nodeType === Node.TEXT_NODE) title.lastChild.textContent = ` Artifacts (${items.length})`;
+    if (!items.some(a => !a.sensitive)) panel.node.querySelector('[data-artifacts-zip]')?.remove();
+    if (hadFocus) panel.node.focus({preventScroll: true});
+  }
+
+  function deleteNote(panel, kind, text) {
+    const note = el('li', {class: `artifact-delete-note is-${kind}`, 'data-delete-note': kind},
+      el('span', {class: 'artifact-icon'}, icon(kind === 'done' ? 'fa-check' : 'fa-exclamation-triangle')),
+      el('div', {class: 'artifact-text'}, el('div', {class: 'artifact-delete-text', role: kind === 'error' ? 'alert' : null, text})),
+      kind === 'error' ? el('div', {class: 'artifact-buttons'}, el('button', {type: 'button', class: 'button subtle', 'data-delete-note-dismiss': true,
+        'aria-label': 'Dismiss delete message', onclick: () => { note.remove(); panel.node.focus({preventScroll: true}); }}, 'Dismiss')) : null);
+    panel.deleteNotes.append(note);
+    if (kind === 'done') setTimeout(() => { note.classList.add('is-fading'); setTimeout(() => note.remove(), 400); }, NOTE_MS);
   }
 
   async function fillPreview(box, item, params) {

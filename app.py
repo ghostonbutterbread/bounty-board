@@ -1330,7 +1330,9 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 found = ra.associate(lane_fd, family, program, lane, path)
                 if view == 'list':
                     # 'upload' (feat/board-artifact-uploads): whether the panel may upload here.
-                    from artifact_uploads import upload_state
+                    # 'deletable' per entry (feat/board-artifact-delete): whether the panel may offer Delete.
+                    from artifact_uploads import upload_state, mark_deletable
+                    mark_deletable(self.server.artifact_uploads, found)
                     return self.reply(200, {**found, 'max_zip_bytes': ra.MAX_ZIP_BYTES,
                                             'upload': upload_state(self.server.artifact_uploads, found)})
                 if view == 'zip':
@@ -1364,6 +1366,13 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         def artifact_upload(self):
             from artifact_uploads import handle_upload
             return handle_upload(self, self.server.artifact_uploads, root, root_snapshot, FAMILIES)
+
+        # --- Artifact delete (feat/board-artifact-delete) ----------------------
+        # Same opt-in flag; removes one listed, non-Markdown file from the
+        # report's dedicated folder. Logic in artifact_uploads.handle_delete.
+        def artifact_delete(self):
+            from artifact_uploads import handle_delete
+            return handle_delete(self, self.server.artifact_uploads, root, root_snapshot, FAMILIES)
 
         def artifact_headers(self, content_type, disposition):
             self.send_header('Content-Type', content_type)
@@ -1780,6 +1789,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         def do_POST(self):
             if urlsplit(self.path).path == '/api/report-artifact-upload':  # feat/board-artifact-uploads
                 return self.artifact_upload()
+            if urlsplit(self.path).path == '/api/report-artifact-delete':  # feat/board-artifact-delete
+                return self.artifact_delete()
             if urlsplit(self.path).path.startswith('/api/live/'):
                 if live is None:
                     return self.reply(404, {'error': 'live_edit_disabled'})
@@ -2513,8 +2524,9 @@ def parse_config(argv=None):
     parser.add_argument('--retention-min-free-bytes', type=int, default=DEFAULT_MIN_FREE_BYTES,
                         help='free-space floor in bytes (default 1073741824)')
     parser.add_argument('--artifact-uploads', action='store_true',
-                        help='opt in to uploading files from the artifacts panel into report folders under the data root '
-                        '(Syncthing distributes them); see docs/integrations/artifact-uploads.md')
+                        help='opt in to uploading files from the artifacts panel into report folders under the data root, '
+                        'and deleting non-Markdown files there (Syncthing distributes both); '
+                        'see docs/integrations/artifact-uploads.md')
     parser.add_argument('--artifact-root', type=Path,
                         help='bulk artifact tier holding JS libraries (default: /mnt/bounty when it is a mount point)')
     parser.add_argument('--recon-query-budget', type=float, default=None,
