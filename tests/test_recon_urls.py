@@ -206,10 +206,10 @@ class UrlListTests(Base):
         db = sqlite3.connect(self.db)
         db.execute("INSERT INTO urls (canonical_url, url_hash, route_hash, param_hash, host, path, param_keys, source, first_seen, last_seen) "
                    "VALUES (?, 'hx', 'r', 'p', ?, '/', ?, 's', 'a', 'b')",
-                   ('https://evil‮.example.test/?\x1b[201~=1', 'evil‮.example.test', json.dumps(['\x1b[201~'])))
+                   ('https://evil\u202e.example.test/?\x1b[201~=1', 'evil\u202e.example.test', json.dumps(['\x1b[201~'])))
         db.commit()
         db.close()
-        item = self.urls(host='evil‮.example.test')[1]['items'][0]
+        item = self.urls(host='evil\u202e.example.test')[1]['items'][0]
         self.assertTrue(item['unsafe_chars'])
         self.assertEqual(item['host'], 'evil\\u202e.example.test')
         self.assertEqual(item['params'], ['\\x1b[201~'])

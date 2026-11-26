@@ -920,6 +920,7 @@ def board_summary(lane, read_file, ledger_fn, coverage_fn, map_fn):
     warnings = []
     findings = ledger_fn(lane, warnings)
     hosts = Counter()
+    host_fids = {}
     if findings is None:
         out['errors']['findings'] = {'code': 'missing' if 'ledger_missing' in warnings else 'invalid'}
     else:
@@ -931,6 +932,9 @@ def board_summary(lane, read_file, ledger_fn, coverage_fn, map_fn):
                 host = next((h for h in (host_of(entry.get(k)) for k in ('asset', 'url', 'endpoint')) if h), None)
                 if host:
                     hosts[text(host)] += 1
+                    fid = entry.get('fid')
+                    if isinstance(fid, str) and len(host_fids.setdefault(text(host), [])) < LIST_LIMIT:
+                        host_fids[text(host)].append(text(fid, 40))
         except (OSError, ValueError, UnicodeError, RecursionError):
             pass
         live = [f for f in findings if str(f.get('status') or '').lower() not in ('archive', 'archived')]
@@ -941,6 +945,7 @@ def board_summary(lane, read_file, ledger_fn, coverage_fn, map_fn):
         out['findings'] = {'total': len(live), 'archived': len(findings) - len(live),
                            'by_severity': dict(sev), 'by_class': dict(cls.most_common(30)), 'by_category': dict(cat.most_common(30)),
                            'by_status': dict(status), 'by_host': dict(hosts.most_common(HOST_LIMIT)),
+                           'by_host_fids': {h: host_fids.get(h, []) for h, _ in hosts.most_common(HOST_LIMIT)},
                            'last_seen': max((e for e in (to_epoch(f.get('last_seen')) for f in findings) if e), default=None)}
     warnings = []
     cov = coverage_fn(lane, warnings)
@@ -1535,6 +1540,7 @@ def host_rows(sources):
     js_hosts = {h['host']: h for h in (_val(sources.get('js', {}), 'detail', 'hosts') or [])}
     unsafe = set(_val(sources.get('url_index', {}), 'detail', 'unsafe_hosts') or [])
     findings = _val(sources.get('board', {}), 'findings', 'by_host') or {}
+    finding_ids = _val(sources.get('board', {}), 'findings', 'by_host_fids') or {}
     coverage = _val(sources.get('board', {}), 'coverage', 'by_host') or {}
     rows = {}
     for h in url_hosts:
@@ -1547,6 +1553,7 @@ def host_rows(sources):
         row['js_files'] = js.get('files', 0)
         row['js_bytes'] = js.get('bytes', 0)
         row['findings'] = findings.get(name, 0)
+        row['finding_ids'] = finding_ids.get(name, [])  # non-archived findings whose asset/url/endpoint names this host
         row['coverage_questions'] = coverage.get(name, {}).get('questions', 0)
         row['coverage_reviewed'] = coverage.get(name, {}).get('reviewed', 0)
         row['urls_approximate'] = approximate_urls
