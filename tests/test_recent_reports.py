@@ -98,10 +98,11 @@ class IndexTests(Base):
                          {'fid': 'AC-1', 'severity': 'HIGH', 'title': 'Stored XSS in profile bio', 'status': 'confirmed',
                           'match': 'report_path', 'submission': None, 'submission_status': None})
         self.assertRegex(finding['metadata_revision'], r'^[0-9a-f]{64}$')
-        self.assertEqual(items['raw/redirect-evidence.md']['finding']['match'], 'evidence_path')
         self.assertEqual(items['confirmed/xss-profile.md']['report_kind'], 'registered_report')
-        self.assertEqual(items['raw/redirect-evidence.md']['finding']['fid'], 'AC-3')
-        self.assertEqual(items['raw/redirect-evidence.md']['report_kind'], 'generated_evidence')
+        # AC-3's evidence file is an artifact: never a Recent item, so it cannot read as a second finding.
+        self.assertNotIn('raw/redirect/EVIDENCE.md', items)
+        self.assertIsNone(items['raw/redirect-evidence.md']['finding'])
+        self.assertEqual(items['raw/redirect-evidence.md']['report_kind'], 'unregistered')
         self.assertIsNone(items['raw/unowned.md']['finding'])
         self.assertEqual(items['sqli.md']['finding']['severity'], 'EXCEPTIONAL')
 
@@ -348,13 +349,13 @@ class MappingTests(unittest.TestCase):
         return {p: (i['finding']['fid'], i['finding']['match']) if i['finding'] else None for p, i in self.items(**kw).items()}
 
     def test_mapping_rules(self):
+        # Evidence files (F012-xss/EVIDENCE.md by name, ev/e.md by evidence_path)
+        # are artifacts and never Recent items; the dict equality proves absence.
         self.assertEqual(self.mapped(), {
-            'F012-xss/EVIDENCE.md': ('F012', 'packet'),
             'F012-xss/acme.example-xss-F012.md': ('F012', 'packet'),
             'F012/notes.md': ('F012', 'packet'),
             'F012-xss/owned.md': ('F060', 'report_path'),
             'reg/report.md': ('F020', 'report_path'),
-            'ev/e.md': ('F030', 'evidence_path'),
             'findings/high/F040 - Legacy title.md': ('F040', 'legacy'),
             'F050-dup/a.md': None,
             'F099-missing/a.md': None,
@@ -387,7 +388,7 @@ class MappingTests(unittest.TestCase):
 
     def test_finding_payload(self):
         items = self.items()
-        self.assertEqual({k: v for k, v in items['F012-xss/EVIDENCE.md']['finding'].items() if k != 'metadata_revision'},
+        self.assertEqual({k: v for k, v in items['F012-xss/acme.example-xss-F012.md']['finding'].items() if k != 'metadata_revision'},
                          {'fid': 'F012', 'title': 'Packet XSS', 'severity': 'HIGH', 'status': 'confirmed',
                           'submission': {'state': 'submitted', 'result': 'valid'}, 'submission_status': 'submitted', 'match': 'packet'})
         self.assertIsNone(items['findings/high/F040 - Legacy title.md']['finding']['submission'])

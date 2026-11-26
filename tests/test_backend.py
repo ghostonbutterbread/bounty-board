@@ -359,8 +359,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(by_path['findings/one/final.md']['kind'], 'registered_report')
         self.assertEqual(by_path['findings/one/final.md']['owner_fids'], ['F01'])
         self.assertEqual(by_path['findings/two/final.md']['kind'], 'unregistered')
-        self.assertEqual(by_path['findings/one/EVIDENCE.md']['kind'], 'generated_evidence')
-        self.assertEqual(by_path['findings/one/EVIDENCE.md']['owner_fids'], ['F01'])
+        self.assertNotIn('findings/one/EVIDENCE.md', by_path, 'evidence is an artifact, not a report')
         self.assertEqual(by_path['raw/index.md']['kind'], 'generated_navigation')
         self.assertTrue(all(x['editable'] is False for x in items))
 

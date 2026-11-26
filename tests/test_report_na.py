@@ -166,7 +166,7 @@ class EndpointTests(unittest.TestCase):
         self.root = self.base / 'root'
         self.state = self.base / 'state'
         self.lane = write_lane(self.root, 'web_bounty', 'acme', 'web', [], {
-            'F012-xss/EVIDENCE.md': '# Evidence\n', 'notes.md': '# Notes\n', 'plain.txt.md': '# x\n'})
+            'F012-xss/submission.md': '# Evidence\n', 'notes.md': '# Notes\n', 'plain.txt.md': '# x\n'})
         (self.lane / 'reports/notes.txt').write_text('not markdown')
         (self.lane / 'reports/dir.md').mkdir()
         (self.lane / 'outside.md').write_text('# Outside reports\n')
@@ -211,12 +211,12 @@ class EndpointTests(unittest.TestCase):
     def test_mark_and_unmark_with_writer_off(self):
         self.start()
         self.assertFalse(self.server.writer_enabled)
-        status, body = self.mark('F012-xss/EVIDENCE.md')
+        status, body = self.mark('F012-xss/submission.md')
         self.assertEqual(status, 200, body)
-        self.assertEqual((body['path'], body['na']), ('F012-xss/EVIDENCE.md', True))
+        self.assertEqual((body['path'], body['na']), ('F012-xss/submission.md', True))
         self.assertRegex(body['marked_at'], r'Z$')
-        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/EVIDENCE.md'})
-        self.assertEqual(self.mark('F012-xss/EVIDENCE.md', False), (200, {'path': 'F012-xss/EVIDENCE.md', 'na': False, 'marked_at': None}))
+        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/submission.md'})
+        self.assertEqual(self.mark('F012-xss/submission.md', False), (200, {'path': 'F012-xss/submission.md', 'na': False, 'marked_at': None}))
         self.assertEqual(self.server.report_na.keys(), set())
         self.assertFalse(any('report-na' in p.name for p in self.root.rglob('*')), 'never under the data root')
 
@@ -241,22 +241,22 @@ class EndpointTests(unittest.TestCase):
 
     def test_listing_drops_marks_of_moved_or_deleted_reports(self):
         self.start()
-        for path in ('notes.md', 'F012-xss/EVIDENCE.md', 'plain.txt.md'):
+        for path in ('notes.md', 'F012-xss/submission.md', 'plain.txt.md'):
             self.assertEqual(self.mark(path)[0], 200)
         (self.lane / 'reports/notes.md').unlink()
         (self.lane / 'reports/plain.txt.md').rename(self.lane / 'reports/renamed.md')
         _, summary = self.request('GET', '/api/data')
-        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/EVIDENCE.md'}, '/api/data listing pruned')
+        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/submission.md'}, '/api/data listing pruned')
         self.assertEqual(self.mark('plain.txt.md', False)[0], 200)
         (self.lane / 'reports/renamed.md').rename(self.lane / 'reports/plain.txt.md')
         self.assertEqual(self.mark('plain.txt.md')[0], 200)
         (self.lane / 'reports/plain.txt.md').rename(self.lane / 'reports/renamed.md')
         status, body = self.request('GET', f"/api/lane-reports?root_instance={self.request('GET', '/api/data?phase=identity')[1]['root_instance']}&family=web_bounty&program=acme&lane=web")
         self.assertEqual(status, 200, body)
-        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/EVIDENCE.md'}, 'lane listing pruned')
-        self.assertEqual([r['path'] for r in body['reports'] if r['na']], ['F012-xss/EVIDENCE.md'])
+        self.assertEqual(self.server.report_na.keys(), {'web_bounty/acme/web/F012-xss/submission.md'}, 'lane listing pruned')
+        self.assertEqual([r['path'] for r in body['reports'] if r['na']], ['F012-xss/submission.md'])
         self.assertFalse(next(r for r in body['reports'] if r['path'] == 'renamed.md')['na'], 'a renamed report loses its mark')
-        (self.lane / 'reports/F012-xss/EVIDENCE.md').unlink()
+        (self.lane / 'reports/F012-xss/submission.md').unlink()
         self.request('GET', '/api/data')
         self.assertEqual(self.server.report_na.keys(), set())
 
@@ -362,7 +362,8 @@ class WriterTouchTests(test_ledger_actions.LedgerActionTests):
 
     def test_patch_is_visible_in_recent_immediately(self):
         (self.root / 'web_bounty/fictional/web/reports/D01').mkdir()
-        (self.root / 'web_bounty/fictional/web/reports/D01/EVIDENCE.md').write_text('# Evidence\n')
+        # D01's submission report (packet folder mapping); its EVIDENCE.md is an artifact, not a Recent item.
+        (self.root / 'web_bounty/fictional/web/reports/D01/fictional-xss-D01.md').write_text('# Submission\n')
         self.start()
         self.server.search_index.interval = 3600
         def recent():

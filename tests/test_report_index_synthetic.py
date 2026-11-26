@@ -31,7 +31,8 @@ class ReportIndexTests(unittest.TestCase):
             ]
             items = {item['path']: item for item in app.reports(lane, [], findings)}
             self.assertEqual((items['owned.md']['kind'], items['owned.md']['owner_fids']), ('registered_report', ['A', 'B']))
-            self.assertEqual((items['evidence.md']['kind'], items['evidence.md']['owner_fids']), ('generated_evidence', ['D']))
+            # evidence.md is evidence (named by D's evidence_path only): an artifact, not a report.
+            self.assertNotIn('evidence.md', items)
             self.assertEqual((items['unregistered.md']['kind'], items['unregistered.md']['owner_fids']), ('unregistered', []))
             self.assertEqual(findings[0]['extra'], {'keep': 1})
 

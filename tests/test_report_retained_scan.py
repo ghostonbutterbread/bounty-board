@@ -138,6 +138,10 @@ class ScanTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(response.status, 200, path)
             self.assertEqual(body['editable'], allowed, path)
+            if path == 'EVIDENCE.md':
+                # Evidence is an artifact, not a report: served by /api/report, never listed.
+                self.assertNotIn(path, entries)
+                continue
             self.assertEqual(entries[path]['editable'], allowed, path)
 
     def test_publisher_rejects_navigation_even_when_called_directly(self):
