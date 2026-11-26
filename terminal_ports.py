@@ -70,6 +70,7 @@ ACTIVITY_EVERY = 5        # seconds between activity reports while bytes flow
 TAILSCALE_REFRESH = 60
 DEFAULT_RANGE = (9100, 9199)
 PROXY_PORT = 3128
+MODEL_RELAY_PORT = 3129  # report agent's model relay listener in the sandbox: never a preview
 LOCAL_HOST = '127.0.0.1'
 CGNAT = ipaddress.ip_network('100.64.0.0/10')
 ID_RE = re.compile(r'[0-9a-f]{32}')
@@ -609,7 +610,7 @@ class SessionPorts:
             raise _Bad('bad ports')
         if any(type(p) is not int or not 1 <= p <= 65535 for p in ports) or len(set(ports)) != len(ports):
             raise _Bad('bad ports')
-        return [p for p in ports if p != PROXY_PORT]
+        return [p for p in ports if p not in (PROXY_PORT, MODEL_RELAY_PORT)]
 
     def _update(self, ctl, reported):
         with self.hub.lock:
