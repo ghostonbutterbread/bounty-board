@@ -25,6 +25,15 @@
   // different refresh. Existing drafts from them remain copy-only afterward.
   const rationaleKey = (program,lane,id) => JSON.stringify([/^[a-f0-9]{64}$/.test(state.data?.root_instance || '') ? ['instance',state.data.root_instance] : ['unidentified',state.unidentifiedRoot],program,lane,String(id)]);
   const reportById = id => (rows('reports') || []).find(r => String(r.id) === String(id));
+  // ---- Finding packets (feat/board-one-report-per-packet) ----
+  // The backend (report_packets.py) lists one main report per finding packet;
+  // the packet's other Markdown files come as kind 'packet_file' with
+  // packet_main and packet_group. They stay in lane.reports so reportById,
+  // drafts and both editors keep working, but no list, picker or count shows them.
+  const isPacketFile = report => report?.kind==='packet_file';
+  const listedReports = reports => Array.isArray(reports) ? reports.filter(r=>!isPacketFile(r)) : null;
+  // The listed report a route stands for: a packet file's main report, else itself.
+  const listedIdFor = id => {const r=reportById(id);return isPacketFile(r) && r.packet_main!=null ? String(r.packet_main) : String(id ?? '');};
   // Module navigation seam (ctx.navigate, used by search and other modules).
   // Validates the target, then goes through the one app navigate() so the URL
   // hash, back/forward, laneGeneration, filter reset and highlight all apply.
@@ -747,6 +756,8 @@
       lookup={owner:new Map(),path:new Map()};
       reports.forEach((r,i)=>{
         if(r.id==null)return;
+        // A packet file is never a finding's report: owner lookups skip it and
+        // a path lookup that lands on it resolves to its main report (reportFor).
         if(r.kind==='registered_report' && Array.isArray(r.owner_fids))for(const fid of r.owner_fids)if(!lookup.owner.has(String(fid)))lookup.owner.set(String(fid),i);
         if(r.path!=null && !lookup.path.has(r.path))lookup.path.set(r.path,i);
       });
@@ -756,10 +767,12 @@
   };
   const reportFor = (lane, finding) => {
     const reports=list(lane?.reports);if(!reports || finding?.id==null)return null;
-    const id=String(finding.id), path=typeof finding.report_path==='string' ? finding.report_path.replace(/^reports\//,'') : null;
+    const id=String(finding.id), path=typeof finding.report_path==='string' && finding.report_path.startsWith('reports/') ? normalizeParts(finding.report_path.slice(8)) : typeof finding.report_path==='string' ? finding.report_path : null;
     const lookup=reportLookup(reports), a=lookup.owner.get(id), b=path ? lookup.path.get(path) : undefined;
     const index=a===undefined ? b : b===undefined ? a : Math.min(a,b);
-    return index===undefined ? null : reports[index];
+    const report=index===undefined ? null : reports[index];
+    if(isPacketFile(report)){const main=lookup.path.get(String(report.packet_main));return main===undefined ? null : reports[main];}
+    return report;
   };
   // Report id (its path) for a finding: from the loaded report index, else
   // derived from a relative reports/... report_path while the index is not
@@ -921,7 +934,7 @@
       return `<tr data-program-row data-search="${esc(search)}"><td><a class="link-button" href="${esc(hrefFor({program:p.id,lane:(pl||[])[0]?.name ?? '',section:'findings'}))}" data-open-program="${esc(p.id)}">${esc(p.name||p.id)}</a><span class="id" style="display:block">${esc(p.family||'Family not provided')}</span></td><td class="num">${pl?pl.length:'Unavailable'}</td><td class="num">${known?fs.length:'Unknown'}</td><td class="num">${known?fs.filter(isNotSubmitted).length:'Unknown'}</td><td>${top!=null && top!==''?sevBadge(top):'<span class="hint">None</span>'}</td></tr>`;
     }).join('');
     return `${title('Dashboard','A portfolio view of the records currently loaded.',controls)}
-      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}${openOnly?' Finding counts include not-submitted work only.':''}</p></div><div class="open-workspace"><button class="button primary" data-go-program ${target?'':'disabled'}>${icon('arrow-right')}<span>Open workspace</span></button><button type="button" class="button" data-program-picker ${options.length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>${target?`<p class="target-note">Opens <strong>${esc(programLabel(target.program))}</strong>${target.lane?` / ${esc(target.lane)}`:''}<span class="badge outline">${esc(target.why)}</span></p>`:''}</div></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records',openOnly?' (not submitted)':'')}${stat(state.data?.portfolio_unloaded ? 'Unknown' : state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+l.reports.length,0):'Unknown','Report records')}</div></section>
+      <div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Portfolio overview</h2><p class="hint">Counts are records across loaded program lanes${!discovered?'; discovery is incomplete, so portfolio totals are unknown.':complete?'.':'; some finding collections are unavailable.'}${openOnly?' Finding counts include not-submitted work only.':''}</p></div><div class="open-workspace"><button class="button primary" data-go-program ${target?'':'disabled'}>${icon('arrow-right')}<span>Open workspace</span></button><button type="button" class="button" data-program-picker ${options.length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>${target?`<p class="target-note">Opens <strong>${esc(programLabel(target.program))}</strong>${target.lane?` / ${esc(target.lane)}`:''}<span class="badge outline">${esc(target.why)}</span></p>`:''}</div></div><div class="stats">${stat(discovered?ps.length:'Unknown','Programs loaded')}${stat(discovered && ps.every(p=>Array.isArray(p.lanes))?lanes.length:'Unknown','Lanes loaded')}${stat(complete?all.length:'Unknown','Finding records',openOnly?' (not submitted)':'')}${stat(state.data?.portfolio_unloaded ? 'Unknown' : state.data?.reports_loading ? 'Loading' : reportsComplete?lanes.reduce((n,l)=>n+listedReports(l.reports).length,0):'Unknown','Report records')}</div></section>
       ${availability(ps)}<div class="dashboard-grid"><div id="dashboard-recent-host" class="wide"></div><section class="panel panel-pad" aria-label="Severity breakdown"><h2>Severity breakdown</h2><p class="hint">${complete?`Counts from all loaded ${scope}.`:`Incomplete data: counts include loaded ${scope} only, not portfolio totals.`} Select a row to list matching findings by program.</p>${sevGroups.length?breakdown('sev',sevGroups):'<div class="state">No severity records available.</div>'}</section><section class="panel panel-pad" aria-label="Finding classes"><div class="blockhead"><h2>Finding classes</h2>${catGroups.length?`<div class="segmented" role="group" aria-label="Group classes"><button type="button" data-class-group="class" aria-pressed="${!byCategory}">By class</button><button type="button" data-class-group="category" aria-pressed="${byCategory}">By category</button></div>`:''}</div><p class="hint">${byCategory?`Raw classes grouped by display-time category rules on loaded ${scope}. Raw classes stay unchanged; Unclassified keeps the raw label.`:`Classification on loaded ${scope}; not coverage.`} Select a row to list matches.</p>${byCategory?breakdown('cat',catGroups):clsGroups.length?breakdown('class',clsGroups):'<div class="state">No classified findings available.</div>'}</section><section class="panel wide"><div class="panel-head"><div><h2>Programs</h2><p class="hint">Choose a program to inspect its lanes.</p></div></div>${ps.length?`<div class="program-search"><div class="input-icon">${icon('search')}<input id="program-search" type="search" aria-label="Search programs" placeholder="Search programs" value="${esc(state.programQuery||'')}" autocomplete="off"></div><span class="hint num" id="program-search-count"></span></div><div class="table-wrap"><table class="program-table"><thead><tr><th>Program</th><th>Lanes</th><th>Findings</th><th>Not submitted</th><th>Highest severity</th></tr></thead><tbody>${programRows}</tbody></table><div class="state" id="program-search-empty" hidden>No programs match this search.</div></div>`:discovered?'<div class="state">No programs returned by the backend.</div>':'<div class="state">Program discovery is unavailable or incomplete.</div>'}</section><section class="panel panel-pad wide" aria-label="Submission records"><h2>Submission records</h2><p class="hint">Recorded submission state and outcome are separate from finding status. Values shown for all loaded findings.</p><div class="report-layout"><div><h3>Submission state</h3>${submissionValues('state')}</div><div><h3>Platform result</h3>${submissionValues('result')}</div></div></section></div></div>`;
   }
   function applyProgramSearch() {
@@ -938,10 +951,10 @@
     const picker=`<button type="button" class="button" data-program-picker ${programs().length?'':'disabled'}>${icon('search')}<span>Switch program</span></button>`;
     if (!p || !lane) return `${title(p?.name || 'Programs',p?'No lanes are available for this program.':'No programs are available.',`<div class="switcher">${selectors()}${picker}</div>`)}<div class="stack">${rootWarning()}${availability([])}<div class="panel state">${p?'This program has no lane data.':'Configure the program root in the backend and refresh.'}</div></div>`;
     // Gadgets and MapStore tabs are drop targets for modules that move findings.
-    const nav=sections.map(([key,label])=>`<a href="${esc(hrefFor({section:key,report:key==='reports' && state.report ? state.report : undefined,query:key==='scope' ? state.scopeQuery : undefined}))}" data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}${key==='map'||key==='gadgets'?' drop-target':''}" ${key==='map'||key==='gadgets'?`data-drop-target="${key}"`:''} ${state.section===key?'aria-current="page"':''}>${icon(SECTION_ICONS[key])}<span>${esc(label)}</span>${key==='scope' ? '' : `<span class="count">${key==='reports' && reportsIncomplete(lane) ? '–' : rows(key)?.length ?? '–'}</span>`}</a>`).join('');
+    const nav=sections.map(([key,label])=>`<a href="${esc(hrefFor({section:key,report:key==='reports' && state.report ? state.report : undefined,query:key==='scope' ? state.scopeQuery : undefined}))}" data-section="${key}" aria-label="${esc(label)}" class="${state.section===key?'active':''}${key==='map'||key==='gadgets'?' drop-target':''}" ${key==='map'||key==='gadgets'?`data-drop-target="${key}"`:''} ${state.section===key?'aria-current="page"':''}>${icon(SECTION_ICONS[key])}<span>${esc(label)}</span>${key==='scope' ? '' : `<span class="count">${key==='reports' && reportsIncomplete(lane) ? '–' : (key==='reports' ? listedReports(rows(key)) : rows(key))?.length ?? '–'}</span>`}</a>`).join('');
     const origin=state.programOrigin==='default' && programs().length>1 ? `<p class="context-note">${icon('info-circle')}<span>Showing the first program because none was chosen yet. Use Switch program or the Program menu to choose another.</span></p>` : '';
     const header=`<div class="titlebar"><div><p class="eyebrow">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(p.family||'Program workspace')} / ${esc(lane.name)}</span></p><h1>${esc(p.name||p.id)}</h1>${origin}</div><div class="switcher">${selectors()}${picker}</div></div>`;
-    return `${header}<div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : rows('reports')?.length ?? 'Unknown'}</strong><span>Reports</span></div><div><strong>${rows('findings') ? rows('findings').filter(isNotSubmitted).length : 'Unknown'}</strong><span>Not submitted</span></div></div></section>${availability([{...p,lanes:[lane]}])}<div class="layout"><div class="stack"><nav class="tabs workspace-nav" aria-label="Workspace sections">${nav}</nav>${sectionContent()}</div></div></div>`;
+    return `${header}<div class="stack">${rootWarning()}<section class="panel panel-pad"><div class="blockhead"><div><h2>Surface coverage</h2><p class="hint">Recorded surface boundaries, not a measure of complete testing.</p></div><button class="link-button" data-section="coverage">Explore coverage</button></div><div class="summary-line"><div><strong>${rows('coverage')?.length ?? 'Unknown'}</strong><span>Assessment questions</span></div><div><strong>${rows('findings')?.length ?? 'Unknown'}</strong><span>Finding records</span></div><div><strong>${reportsIncomplete(lane) ? 'Unknown' : listedReports(rows('reports'))?.length ?? 'Unknown'}</strong><span>Reports</span></div><div><strong>${rows('findings') ? rows('findings').filter(isNotSubmitted).length : 'Unknown'}</strong><span>Not submitted</span></div></div></section>${availability([{...p,lanes:[lane]}])}<div class="layout"><div class="stack"><nav class="tabs workspace-nav" aria-label="Workspace sections">${nav}</nav>${sectionContent()}</div></div></div>`;
   }
   const FILTERS=[['severity','Severity','severities'],['class','Class','classes'],['status','Status','statuses'],['submission','Submission','submission states'],['age','First seen','first seen dates']];
   const emptyFilters = () => ({severity:[],class:[],status:[],submission:[],age:[],query:'',reports:''});
@@ -1169,12 +1182,42 @@
       : entry.status==='error' ? '<div class="message warning" role="status" data-evidence-error>Evidence could not be loaded. It may have been moved or deleted. Refresh the workspace to retry.</div>'
       : '<div class="state">Loading evidence…</div>';
     const all=rows('reports');
-    return `<section class="panel panel-pad report-panel evidence-view" data-evidence-view data-evidence-path="${esc(path)}"><div class="blockhead"><div><h2>${icon('paperclip')} ${heading}</h2><p class="hint">${esc(hint)}</p></div></div><p class="hint record-value evidence-path"><span class="badge outline">Evidence</span> <span>Path: <code>${esc(path)}</code></span></p>${ownerRows?`<ul class="evidence-owners" aria-label="Finding">${ownerRows}</ul>`:''}<div class="report-workspace"><div class="report-main">${body}</div><aside class="report-side" aria-label="Evidence folder files">${artifactsHost({path,id:path})}</aside></div>${Array.isArray(all) && all.length?reportBrowser(all):''}</section>`;
+    return `<section class="panel panel-pad report-panel evidence-view" data-evidence-view data-evidence-path="${esc(path)}"><div class="blockhead"><div><h2>${icon('paperclip')} ${heading}</h2><p class="hint">${esc(hint)}</p></div></div><p class="hint record-value evidence-path"><span class="badge outline">Evidence</span> <span>Path: <code>${esc(path)}</code></span></p>${ownerRows?`<ul class="evidence-owners" aria-label="Finding">${ownerRows}</ul>`:''}<div class="report-workspace"><div class="report-main">${body}</div><aside class="report-side" aria-label="Evidence folder files">${artifactsHost({path,id:path})}</aside></div>${Array.isArray(all) && all.length?reportBrowser(listedReports(all)):''}</section>`;
   }
   function reports() {
     const evidence=evidenceView();if(evidence)return evidence;
     const partial=reportsIncomplete(currentLane()) && Array.isArray(rows('reports'));
     return savedSharedRecovery()+(partial ? '<div class="message warning">Report list is incomplete; some reports may be unavailable.</div>' : '')+reportEditor();
+  }
+  // "Packet files" switcher above a packet's main report or one of its packet
+  // files: the main report first, then Files, an Evidence link (evidence view),
+  // and collapsed Archive and Older copies groups. Every entry is a real
+  // <a href> route; the open file is marked current.
+  const PACKET_GROUPS=[['files','Files','file-o'],['archive','Archive','archive'],['older','Older copies','history']];
+  function packetSwitcher(report, all) {
+    const program=currentProgram();if(!program || !report || report.id==null)return '';
+    const mainId=listedIdFor(report.id), main=all.find(r=>String(r.id)===mainId);
+    if(!main || main.packet==null)return '';
+    const files=all.filter(r=>isPacketFile(r) && String(r.packet_main)===mainId && r.id!=null).sort((a,b)=>String(a.path).split('/').length-String(b.path).split('/').length || String(a.path).localeCompare(String(b.path)));
+    const evidence=(Array.isArray(main.packet_evidence) ? main.packet_evidence : []).filter(p=>typeof p==='string');
+    if(!files.length && !evidence.length)return '';
+    const current=String(report.id), folder=String(main.packet)+'/';
+    const label=path=>{path=String(path);return path.startsWith(folder) ? path.slice(folder.length) : path;};
+    const href=id=>esc(hrefFor({program:program.id,lane:state.lane,section:'reports',report:id}));
+    const link=(r,iconName,extra='')=>{const here=String(r.id)===current;return `<li><a class="packet-link${here?' is-current':''}" href="${href(r.id)}" data-packet-file="${esc(r.id)}"${here?' aria-current="page"':''} title="${esc(r.path)}">${icon(iconName)}<span class="packet-link-name">${esc(label(r.path))}</span>${extra}</a></li>`;};
+    const mainEntry=link(main,'file-text-o','<span class="badge outline">Main report</span>');
+    const group=([key,title,iconName])=>{
+      const items=files.filter(r=>(r.packet_group||'files')===key);if(!items.length)return '';
+      const listHtml=`<ul class="packet-list">${items.map(r=>link(r,iconName)).join('')}</ul>`;
+      if(key==='files')return `<div class="packet-group" data-packet-group="files"><h4>${esc(title)}</h4>${listHtml}</div>`;
+      // Collapsed by default; open when it holds the file being viewed.
+      const open=items.some(r=>String(r.id)===current);
+      return `<details class="packet-group" data-packet-group="${key}"${open?' open':''}><summary>${esc(title)} <span class="count">${items.length}</span></summary>${listHtml}</details>`;
+    };
+    const [filesGroup,...collapsed]=PACKET_GROUPS.map(group);
+    const evidenceHtml=evidence.length ? `<div class="packet-group" data-packet-group="evidence"><h4>Evidence</h4><ul class="packet-list">${evidence.map(p=>`<li><a class="packet-link" href="${href(p)}" data-packet-evidence="${esc(p)}" title="${esc(p)}">${icon('paperclip')}<span class="packet-link-name">${esc(label(p))}</span></a></li>`).join('')}</ul></div>` : '';
+    const note=isPacketFile(report) ? `<p class="packet-note" data-packet-note>${icon('level-up')}<span>Packet file of <a href="${href(main.id)}" data-packet-main>${esc(main.title || main.name || main.id)}</a>, the main report for this finding.</span></p>` : '';
+    return `<nav class="packet-switcher" aria-label="Packet files" data-packet-switcher>${note}<div class="packet-head"><h3>Packet files</h3><span class="hint"><code>${esc(main.packet)}</code></span></div><ul class="packet-list packet-main">${mainEntry}</ul>${filesGroup}${evidenceHtml}${collapsed.join('')}</nav>`;
   }
   // Browsable list of the lane's reports as real links, newest first.
   // Generated navigation is hidden unless asked for; the filter hides rows
@@ -1191,7 +1234,7 @@
     const rowsHtml=items.map(r=>{
       const name=String(r.title || r.name || r.id), path=String(r.path ?? ''), owners=Array.isArray(r.owner_fids) ? r.owner_fids.map(String) : [];
       const when=relativeTime(r.modified);
-      return `<li data-report-row${r.na===true?' class="is-na"':''} data-search="${esc([name,path,...owners].join(' ').toLowerCase())}"><a class="report-link" href="${esc(hrefFor({program:program.id,lane:state.lane,section:'reports',report:r.id}))}"${String(r.id)===state.report?' aria-current="page"':''}><span class="report-link-title na-title">${esc(name)}</span>${path && path!==name?`<span class="report-link-path">${esc(path)}</span>`:''}</a><span class="report-link-meta">${owners.length?`<span class="id">${esc(owners[0])}</span>`:''}${kinds[r.kind]?`<span class="badge outline">${esc(kinds[r.kind])}</span>`:''}${when?`<time datetime="${esc(new Date(r.modified*1000).toISOString())}" title="${esc(absoluteTime(r.modified))}">${esc(when)}</time>`:''}${naModule && path?naModule.toggleHtml({program:program.id,lane:state.lane,path,na:r.na===true,label:name}):''}</span></li>`;
+      return `<li data-report-row${r.na===true?' class="is-na"':''} data-search="${esc([name,path,...owners].join(' ').toLowerCase())}"><a class="report-link" href="${esc(hrefFor({program:program.id,lane:state.lane,section:'reports',report:r.id}))}"${String(r.id)===listedIdFor(state.report)?' aria-current="page"':''}><span class="report-link-title na-title">${esc(name)}</span>${path && path!==name?`<span class="report-link-path">${esc(path)}</span>`:''}${r.updated_file?`<span class="report-link-updated">Updated ${esc(r.updated_file)}</span>`:''}</a><span class="report-link-meta">${owners.length?`<span class="id">${esc(owners[0])}</span>`:''}${kinds[r.kind]?`<span class="badge outline">${esc(kinds[r.kind])}</span>`:''}${when?`<time datetime="${esc(new Date(r.modified*1000).toISOString())}" title="${esc(absoluteTime(r.modified))}">${esc(when)}</time>`:''}${naModule && path?naModule.toggleHtml({program:program.id,lane:state.lane,path,na:r.na===true,label:name}):''}</span></li>`;
     }).join('');
     return `<details class="report-browser" data-report-browser data-na-scope="report-list"${open?' open':''}><summary>Reports in this lane <span class="count">${items.length}</span></summary><div class="report-browser-tools"><div class="input-icon">${icon('search')}<input id="report-filter" type="search" aria-label="Filter report list by name, path or finding" placeholder="Filter by name, path or finding" value="${esc(state.filters.reports||'')}" autocomplete="off"></div>${navCount?`<label class="report-nav-toggle"><input type="checkbox" id="report-nav-toggle"${showNav?' checked':''}> Show generated navigation (${navCount})</label>`:''}${naModule?`<label class="na-hide-toggle"><input type="checkbox" id="report-hide-na"${hideNa?' checked':''}> Hide N/A</label>${hideNa && naCount?`<span class="na-hidden-note">${naCount} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-report-show-na>Show</button></span>`:''}`:''}<span class="hint num" id="report-filter-count"></span></div>${items.length?`<ul class="report-links" aria-label="Report links">${rowsHtml}</ul>`:''}<p class="state" id="report-filter-empty"${items.length?' hidden':''}>${items.length?'No reports match this filter.':hideNa && naCount?'Every report here is marked N/A.':'Only generated navigation in this lane.'}</p><p class="hint">Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></details>`;
   }
@@ -1210,14 +1253,18 @@
     if(!all.length)return `<section class="panel panel-pad"><h2>Reports</h2><div class="state">${reportsIncomplete(currentLane())?'No reports loaded.':'No reports in this lane.'}</div></section>`;
     // A report opened from a link or route that is not in this lane gets a
     // clear message (with the lane's list) instead of another report.
-    if(state.report && state.report===state.linkedReport && !all.some(r=>String(r.id)===state.report))return `<section class="panel panel-pad"><h2>Reports</h2><div class="message warning" role="alert" data-report-missing>Report not found in this lane: <code>${esc(state.report)}</code>. It may have been moved, renamed or deleted, or the link is out of date. Choose a report below.</div>${reportBrowser(all)}</section>`;
+    const listed=listedReports(all);
+    if(state.report && state.report===state.linkedReport && !all.some(r=>String(r.id)===state.report))return `<section class="panel panel-pad"><h2>Reports</h2><div class="message warning" role="alert" data-report-missing>Report not found in this lane: <code>${esc(state.report)}</code>. It may have been moved, renamed or deleted, or the link is out of date. Choose a report below.</div>${reportBrowser(listed)}</section>`;
     state.linkedReport='';
-    if(!all.some(r=>String(r.id)===state.report)) state.report=String(all[0].id??'');
+    // A packet file is opened only by its own route; the default is a listed report.
+    if(!all.some(r=>String(r.id)===state.report)) state.report=String((listed[0]||all[0]).id??'');
     const report=reportById(state.report); if(!report || report.id==null)return '<section class="panel panel-pad"><h2>Reports</h2><div class="state">Reports need stable IDs before they can be opened.</div></section>';
-    const kindNames={registered_report:'Registered report',generated_report:'Generated report',generated_navigation:'Generated navigation',unregistered:'Unregistered artifact',unknown:'Ownership unknown'};
+    const kindNames={registered_report:'Registered report',generated_report:'Generated report',generated_navigation:'Generated navigation',unregistered:'Unregistered artifact',unknown:'Ownership unknown',packet_file:'Packet file'};
     const kind=report.kind == null ? 'Ownership not provided' : (kindNames[report.kind] || String(report.kind));
     const owner=Array.isArray(report.owner_fids) && report.owner_fids.length ? `Finding owner IDs: ${report.owner_fids.map(display).join(', ')}` : '';
-    const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${all.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===state.report)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>${reportBrowser(all)}`;
+    // The picker lists main reports only; on a packet file its main report is selected.
+    const selected=listedIdFor(report.id);
+    const picker=`<label class="hint" for="report-select">Report</label><br><select id="report-select" class="report-picker">${listed.filter(r=>r.id!=null).map(r=>opt(r.id,r.path || r.title || r.id,String(r.id)===selected)).join('')}</select><p class="hint record-value">${esc(kind)}${owner ? ` | ${esc(owner)}` : ''}${report.path ? ` | Path: ${esc(report.path)}` : ''}</p>${reportBrowser(listed)}${packetSwitcher(report,all)}`;
     if(state.data?.capabilities?.live_edit){
       // The live editor module owns this host; it persists across renders.
       const program=currentProgram();
