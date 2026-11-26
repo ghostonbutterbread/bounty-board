@@ -60,6 +60,16 @@ Threat model additions:
 - Forwarded traffic keeps a sandbox from pausing and a connection unpauses it; removal still counts 4 h from the last terminal viewer.
 - Availability (review round 1): 16 forwarded connections per client IP across sessions, fair-share eviction at the global cap, idle connections closed under pressure. Switching Tailscale off closes its listeners before saving (fails closed). `auto` binds only an address on a `tailscale*` interface.
 
+## Report agent, model relay and agent connect (opt-in, `--report-agent`, `--agent-connect`)
+
+Full design, contract and threat model: [`report-agent.md`](report-agent.md). Short version: a coding CLI (Claude Code) runs as a second PTY (`docker exec -it`) in a report's sandbox, started by `POST /api/agent/start` and shared over the WebSocket with `kind=agent`; it reaches the model API only through a host-owned `model.sock` (0600, same read-only `/run/bbterm` directory) and a host relay that adds the login, so the login never enters the container. Agent connect attaches the Board to an agent already running in Herdr on the host (no sandbox; host access, off by default).
+
+Changes to the rules above, only while `--report-agent` is on:
+- **Mounts:** exactly `/report` (rw), `/run/bbterm` (ro), `/opt/report-agent/claude` (ro, the resolved host binary) and `/opt/report-agent/skills/<name>` (ro, one per configured skill). The mount identity checks for `/report` are unchanged. Without the flag the mounts stay exactly the first two.
+- **Memory:** raised to 2 GiB (`docker update`) when an agent starts, after the `--min-free-memory` check.
+- **Lifecycle:** Agent tab viewers count as viewers; no pause while the agent printed output in the last 120 s; removal (4 h idle), reset and stop end the agent.
+- **Threat model additions:** any process in the sandbox can spend the login's quota through the relay while that report's agent runs (two API paths, nothing else), but cannot read the login; report text can steer the agent (prompt injection), within this same one-folder, filtered-internet model. Agent connect is host access through the agent's TUI for anyone who can sign in to the terminal.
+
 ## Access control (terminal service only)
 
 - Allowed without password: request came through Serve (Host is the configured Board authority from `--allowed-origin`) **and** carries exactly one `Tailscale-User-Login` in the `--allow-tailnet-user` list (case-insensitive). The header is trusted only because the service binds to 127.0.0.1 (hard-coded) and Serve sets/replaces that header; a request straight to 127.0.0.1:9011 has a different Host and is not trusted by header. **Assumption:** local processes on Hoster are trusted, as for the Board itself (any local process could forge the headers).
@@ -133,7 +143,8 @@ Not changed (accepted by the reviewer): the host-address list refreshes every 60
 | `POST /api/evidence` `{selector}` | yes + Origin + CSRF | `{relative, name}`; 409 no session / read-only root / unsafe folder |
 | `GET /api/settings` / `POST /api/settings` `{ports_tailscale}` | yes (POST + Origin + CSRF) | preview-ports settings; see sandbox-ports.md |
 | `GET /api/ports?…` | yes | `{ports, preview_ports, ports_tailscale}`; see sandbox-ports.md |
-| `GET /ws?…` (WebSocket) | yes + Origin | client text `{"t":"in","d":…}`, `{"t":"resize","cols","rows"}`; server binary = terminal output, text = `hello{session}`, `viewers{count}`, `reset`, `exit`, `error{code,message}`, `closed{message}` |
+| `GET/POST /api/agent/*`, `GET /api/agents/active` | yes (POST + Origin + CSRF) | report agent and agent connect; see report-agent.md |
+| `GET /ws?…` (WebSocket) | yes + Origin | `kind=agent` / `kind=connect` attach the report agent or a Herdr agent (report-agent.md); client text `{"t":"in","d":…}`, `{"t":"resize","cols","rows"}`; server binary = terminal output, text = `hello{session}`, `viewers{count}`, `reset`, `exit`, `error{code,message}`, `closed{message}` |
 
 Session info: `{id, created, pause_after, remove_after, idle_timeout, folder, workdir, mount_reason, mount_rule, fid, viewers, notes, running, paused, ports}` (`ports` is `[]` unless `--preview-ports`; the WebSocket also sends `{"type":"ports","ports":[…]}` on change). The WebSocket `hello` carries `event`: `started`, `attached`, `resumed`, `recreated_idle`, `recreated_vanished` or `reset`. Errors on attach include `low_memory` and `too_many_sessions`.
 

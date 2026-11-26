@@ -207,11 +207,20 @@ class RelayTests(unittest.TestCase):
         self.relay.open_session(other_path, self.gate)
         held = [request(self.sock_path), request(self.sock_path)]
         for sock in held:
-            self.assertIn(b'message_start', sock.recv(65536) + sock.recv(65536))
+            data = b''
+            while b'message_start' not in data:  # the upstream holds the rest of the stream
+                chunk = sock.recv(65536)
+                self.assertTrue(chunk)
+                data += chunk
         third = read_all(request(self.sock_path))
         self.assertTrue(third.startswith(b'HTTP/1.1 503'), third[:60])  # per-session cap
         held.append(request(other_path))
-        self.assertIn(b'HTTP/1.1 200', held[-1].recv(65536))
+        data = b''
+        while b'message_start' not in data:
+            chunk = held[-1].recv(65536)
+            self.assertTrue(chunk)
+            data += chunk
+        self.assertIn(b'HTTP/1.1 200', data)
         fourth = read_all(request(other_path))
         self.assertTrue(fourth.startswith(b'HTTP/1.1 503'))  # total cap
         hold.set()

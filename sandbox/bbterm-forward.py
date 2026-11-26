@@ -73,7 +73,7 @@ def load_agent(path, sock, exclude):
     loader = importlib.machinery.SourceFileLoader('bbterm_ports', path)
     module = importlib.util.module_from_spec(importlib.util.spec_from_loader('bbterm_ports', loader))
     loader.exec_module(module)
-    module.SOCKET, module.EXCLUDE = sock, {exclude, MODEL_PORT}  # never offer the relay port as a preview
+    module.SOCKET, module.EXCLUDE = sock, {exclude}
     return module
 
 
@@ -82,6 +82,7 @@ def supervise_agent(path, sock, exclude, delay=1):
     while True:
         try:
             agent = load_agent(path, sock, exclude)
+            agent.EXCLUDE = agent.EXCLUDE | {MODEL_PORT}  # never offer the model relay port as a preview
             worker = threading.Thread(target=agent.main, name='bbterm-ports-agent', daemon=True)
             worker.start()
             worker.join()
