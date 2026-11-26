@@ -32,6 +32,11 @@
   const view = {window: DEFAULT_WINDOW, programs: [], lane: '', q: '', order: 'newest', nav: false, hideNa: true, offset: 0,
     data: null, at: 0, source: null, loading: false, error: '', seq: 0, controller: null, retry: 0, timer: 0, qTimer: 0};
   const panel = {data: null, at: 0, source: null, loading: false, error: '', seq: 0, waitTimer: 0, waited: 0, retry: 0, showNa: false};
+  // #recon-reports-host (Recon program page): the same rows, one program and lane.
+  const scoped = {data: null, at: 0, key: '', loading: false, error: '', seq: 0, retry: 0, showNa: false};
+  const SCOPED_LIMIT = 20;
+  // Which list a row or button belongs to: the dashboard panel, the Recon reports panel or the view.
+  const scopeOf = node => node.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : node.closest('#recon-reports-host') ? '#recon-reports-host' : '#recent-reports-host';
   const PANEL_NA = 'bounty-board-recent-panel-show-na'; // per browser, like the view's filters
   try { panel.showNa = localStorage.getItem(PANEL_NA) === '1'; } catch {}
   // Rows for mapped findings that are not in the loaded workspace data yet
@@ -323,9 +328,11 @@
       if (mine === panel.seq) { panel.loading = false; paintPanel(); }
     }
   }
+  // The Recent row (reference row design), shared by the dashboard and Recon panels.
+  const dashRow = (item, d) => `<li data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}><span class="recent-dash-main"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}</span></span><span class="frow-sev">${pickHtml(item, 'sev')}</span><span class="frow-subm">${pickHtml(item, 'sub')}</span><span class="recent-when">${timeCell(item.modified, d)}</span><span class="recent-na">${naHtml(item)}</span></li>`;
   function panelHtml() {
     const d = panel.data;
-    const row = item => `<li data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}><span class="recent-dash-main"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}</span></span><span class="frow-sev">${pickHtml(item, 'sev')}</span><span class="frow-subm">${pickHtml(item, 'sub')}</span><span class="recent-when">${timeCell(item.modified, d)}</span><span class="recent-na">${naHtml(item)}</span></li>`;
+    const row = item => dashRow(item, d);
     const body = !d ? `<div class="state">${panel.error ? esc(panel.error) : 'Loading recent reports…'}</div>`
       : !d.items.length ? `<div class="state">${d.index_state === 'building' ? 'Indexing reports…' : d.na_hidden ? 'Every recent report is marked N/A.' : 'No reports found.'}</div>`
         : `<ul class="recent-dash-list">${d.items.map(row).join('')}</ul>`;
@@ -334,6 +341,45 @@
     return `<section class="panel recent-dash" aria-label="Recently updated reports" data-na-scope="recent-panel"><div class="panel-head"><div><h2>Recently updated reports</h2><p class="hint">Newest first across all programs${d?.index_state === 'building' ? '; the report index is still building' : ''}.${hidden ? ' ' : ''}${hidden}</p></div><a class="button sm" href="${esc(ctx.hrefFor({view: 'recent', query: `within=${DEFAULT_WINDOW}&order=newest`}))}">${icon('clock-o')}<span>View all</span></a></div>${body}</section>`;
   }
   function paintPanel() { const host = ctx.app.querySelector('#dashboard-recent-host'); if (host) keepFocus(host, () => { host.innerHTML = panelHtml(); }); }
+
+  // ---- Recon program page: reports of one program and lane -------------------
+  async function loadScoped(program, lane) {
+    const mine = ++scoped.seq;
+    scoped.loading = true;
+    try {
+      const body = await fetchRecent(new URLSearchParams({limit: String(SCOPED_LIMIT), order: 'newest', program, lane, ...(scoped.showNa ? {} : {hide_na: '1'})}));
+      if (mine !== scoped.seq) return;
+      scoped.data = body; scoped.at = Date.now(); scoped.error = ''; scoped.key = `${program}|${lane}`;
+      if (body.index_state === 'building' && scoped.retry++ < 120) setTimeout(() => { if (mine === scoped.seq) loadScoped(program, lane); }, 1000);
+      else if (body.index_state !== 'building') scoped.retry = 0;
+    } catch (error) {
+      if (mine !== scoped.seq) return;
+      if (error.status === 503 && scoped.retry++ < 10) setTimeout(() => { if (mine === scoped.seq) loadScoped(program, lane); }, 1000);
+      else scoped.error = 'Reports are unavailable.';
+    } finally {
+      if (mine === scoped.seq) { scoped.loading = false; paintScoped(); }
+    }
+  }
+  function scopedHtml(host) {
+    const {program, lane} = host.dataset;
+    const d = scoped.key === `${program}|${lane}` ? scoped.data : null;
+    const all = ctx.hrefFor({program, lane, section: 'reports'});
+    const body = !d ? `<div class="state">${scoped.error ? esc(scoped.error) : 'Loading reports…'}</div>`
+      : !d.items.length ? `<div class="state">${d.index_state === 'building' ? 'Indexing reports…' : d.na_hidden ? 'Every report here is marked N/A.' : 'No reports in this lane yet.'}</div>`
+        : `<ul class="recent-dash-list">${d.items.map(item => dashRow(item, d)).join('')}</ul>`;
+    const hidden = !d ? '' : scoped.showNa ? '<span class="na-hidden-note"><button type="button" class="link-button" data-recent-scoped-na="hide">Hide N/A</button></span>'
+      : d.na_hidden_page > 0 || (!d.items.length && d.na_hidden > 0) ? `<span class="na-hidden-note">${d.na_hidden_page || d.na_hidden} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-recent-scoped-na="show">show</button></span>` : '';
+    const count = d ? (d.total > d.items.length ? `Newest ${d.items.length} of ${d.total}` : `${d.total} ${d.total === 1 ? 'report' : 'reports'}`) : 'Reports';
+    return `<section class="panel recent-dash" aria-label="Reports in this lane" data-na-scope="recon-reports"><div class="panel-head"><div><h2>Reports</h2><p class="hint">${esc(count)}, newest first.${hidden ? ' ' : ''}${hidden}</p></div><a class="button sm" href="${esc(all)}">${icon('file-text-o')}<span>All reports</span></a></div>${body}</section>`;
+  }
+  function paintScoped() { const host = ctx.app.querySelector('#recon-reports-host'); if (host) keepFocus(host, () => { host.innerHTML = scopedHtml(host); }); }
+  function mountScoped(host) {
+    host.innerHTML = scopedHtml(host);
+    host.onclick = onPanelClick; host.oncontextmenu = onRowMenu; host.onkeydown = onRowKey;
+    const key = `${host.dataset.program}|${host.dataset.lane}`;
+    if ((scoped.key === key && Date.now() - scoped.at < 30000) || scoped.loading) return;
+    scoped.retry = 0; loadScoped(host.dataset.program, host.dataset.lane);
+  }
   // The panel never delays the dashboard's first paint: it renders from cache
   // and fetches afterwards, once the workspace's own report load has settled
   // (or after 4 s at most).
@@ -356,6 +402,12 @@
   function onPanelClick(event) {
     const t = event.target.closest('button'); if (!t) return;
     if (t.dataset.recentPick) return openPick(t);
+    if (t.dataset.recentScopedNa) {
+      const host = t.closest('#recon-reports-host');
+      scoped.showNa = t.dataset.recentScopedNa === 'show'; scoped.retry = 0;
+      loadScoped(host.dataset.program, host.dataset.lane).then(() => ctx.app.querySelector('#recon-reports-host [data-recent-scoped-na]')?.focus());
+      return;
+    }
     if (t.dataset.recentPanelNa) {
       panel.showNa = t.dataset.recentPanelNa === 'show'; panel.retry = 0;
       try { localStorage.setItem(PANEL_NA, panel.showNa ? '1' : '0'); } catch {}
@@ -365,7 +417,8 @@
   // The item behind a row: the same report may be in the view and the panel.
   function itemFor(node) {
     const row = node?.closest?.('[data-recent-row]'); if (!row) return null;
-    const list = row.closest('#dashboard-recent-host') ? panel.data?.items : view.data?.items;
+    const where = scopeOf(row);
+    const list = where === '#dashboard-recent-host' ? panel.data?.items : where === '#recon-reports-host' ? scoped.data?.items : view.data?.items;
     return (list || []).find(i => i.path === row.dataset.path && String(i.program) === row.dataset.program && String(i.lane) === row.dataset.lane) || null;
   }
   function refocus(selector) { return () => requestAnimationFrame(() => ctx.app.querySelector(selector)?.focus()); }
@@ -373,7 +426,7 @@
   function openPick(button) {
     const item = itemFor(button), entry = item && entryFor(item);
     if (!entry || !FA() || button.disabled || !WRITABLE_FID.test(String(entry.row.id))) return;
-    const scope = button.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : '#recent-reports-host';
+    const scope = scopeOf(button);
     const kind = button.dataset.recentPick;
     FA()[kind === 'sev' ? 'severityPills' : 'submissionPills'](button, [entry], refocus(pickSelector(item, kind, scope)));
   }
@@ -388,7 +441,7 @@
   function openRowMenu(node, x, y) {
     const item = itemFor(node); if (!item) return;
     const entry = entryFor(item), fa = FA();
-    const scope = node.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : '#recent-reports-host';
+    const scope = scopeOf(node);
     const focusBack = () => node.isConnected ? node.querySelector('a.recent-link')?.focus() : null;
     const at = () => pointAnchor(x, y);
     const openTab = href => window.open(new URL(href, location.href).href, '_blank', 'noopener');
@@ -405,7 +458,7 @@
       if (!fa?.canEdit('severity')) items.splice(1, 0, {heading: fa?.OFF_HINT || ''});
     }
     items.push({separator: true}, {label: item.na ? 'Unmark N/A' : 'Mark N/A', icon: 'check', disabled: naOff,
-      onSelect: () => NA().set(item.program, item.lane, item.path, !item.na, {focusKey: scope === '#dashboard-recent-host' ? 'recent-panel' : 'recent-view'})});
+      onSelect: () => NA().set(item.program, item.lane, item.path, !item.na, {focusKey: scope === '#dashboard-recent-host' ? 'recent-panel' : scope === '#recon-reports-host' ? 'recon-reports' : 'recent-view'})});
     const anchor = pointAnchor(x, y);
     ui().openMenu(anchor, items, {label: `Actions for ${item.title || item.name}`, reanchor: () => null, onClose: () => { anchor.remove(); focusBack(); }});
     document.querySelector('.menu-popover')?.classList.add('context-menu');
@@ -431,7 +484,7 @@
   // totals and paging match the server.
   window.addEventListener('board-report-na', event => {
     const {program, lane, path, na} = event.detail || {};
-    for (const [d, hide] of [[view.data, view.hideNa], [panel.data, !panel.showNa]]) {
+    for (const [d, hide] of [[view.data, view.hideNa], [panel.data, !panel.showNa], [scoped.data, !scoped.showNa]]) {
       if (!d) continue;
       const index = d.items.findIndex(i => i.path === path && String(i.program) === program && String(i.lane) === lane);
       if (index < 0) continue;
@@ -441,6 +494,8 @@
     if (!ctx) return;
     if (ctx.app.querySelector('#recent-reports-host')) { paintView(); loadView({quiet: true}); }
     if (ctx.app.querySelector('#dashboard-recent-host')) { paintPanel(); loadPanel(); }
+    const reconHost = ctx.app.querySelector('#recon-reports-host');
+    if (reconHost) { paintScoped(); loadScoped(reconHost.dataset.program, reconHost.dataset.lane); }
   });
 
   // Keep an open view or panel current while the tab is visible.
@@ -459,6 +514,8 @@
       if (host) mountView(host);
       const dash = ctx.app.querySelector('#dashboard-recent-host');
       if (dash) mountPanel(dash);
+      const recon = ctx.app.querySelector('#recon-reports-host');
+      if (recon) mountScoped(recon);
     },
   });
 })();
