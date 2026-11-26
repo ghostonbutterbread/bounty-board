@@ -22,7 +22,7 @@ schema; anything else closes that one connection):
 The agent is untrusted: any process in the sandbox can kill it and speak the
 protocol. Limits: 8 forwarded ports and 32 forwarded connections per session,
 128 in total, 16 opens waiting for an answer, 5 s to answer an open (the
-browser's connection is closed otherwise), 16 per browser IP across sessions,
+browser's connection is closed otherwise), 48 per browser IP across sessions,
 5 s for the first line, 8
 connections that have not identified themselves, 10 control connections a
 minute. Ids are random per open and valid once. Forwarded bytes are never
@@ -55,7 +55,8 @@ MAX_PORTS = 8             # forwarded sandbox ports per session
 MAX_REPORTED = 64         # ports in one report line (more is malformed)
 MAX_SESSION_CONNS = 32    # forwarded connections per session (waiting ones included)
 MAX_TOTAL_CONNS = 128     # forwarded connections for the whole service
-MAX_CLIENT_CONNS = 16     # forwarded connections from one client IP, across sessions
+MAX_CLIENT_CONNS = 48     # forwarded connections from one client IP, across sessions (one browser, many tabs)
+REFUSAL_LOG_EVERY = 60    # at most one stderr line per refused-cap kind per minute (after the first)
 IDLE_CLOSE = 600          # a forwarded connection idle this long (no bytes either way) is closed ...
 IDLE_PRESSURE = 0.75      # ... while more than this share of MAX_TOTAL_CONNS is in use
 IDLE_CHECK = 30           # seconds between idle checks
@@ -703,10 +704,16 @@ class SessionPorts:
             client.close()
             return
         with hub.lock:
-            if (self.closed or fwd.listeners.get(via) is None or len(self.conns) >= MAX_SESSION_CONNS
-                    or hub.client_conns.get(peer, 0) >= MAX_CLIENT_CONNS or len(self.pending) >= MAX_PENDING
-                    or (hub.total_conns >= MAX_TOTAL_CONNS and not hub._make_room(self))):
+            if self.closed or fwd.listeners.get(via) is None:
                 client.close()
+                return
+            cap = ('session' if len(self.conns) >= MAX_SESSION_CONNS else
+                   'client' if hub.client_conns.get(peer, 0) >= MAX_CLIENT_CONNS else
+                   'pending' if len(self.pending) >= MAX_PENDING else
+                   'total' if hub.total_conns >= MAX_TOTAL_CONNS else None)
+            if cap is not None:
+                client.close()
+                hub._refused(cap, peer)
                 return
             record = _Conn(self, client, via, peer)
             self.conns.add(record)
@@ -836,6 +843,7 @@ class PortsHub:
         self.sessions = set()
         self.total_conns = 0
         self.client_conns = {}  # client IP -> forwarded connections, across sessions
+        self._refusals = {}     # cap kind -> (last log time, refusals since)
         self._bound = {}  # (ip, port) -> socket bound by _allocate, taken by _activate
         self.ts_ip = None
         self.closed = False
@@ -868,21 +876,21 @@ class PortsHub:
         else:
             self.client_conns.pop(record.peer, None)
 
-    def _make_room(self, sp):
-        """The global cap is full. A session below its fair share closes the longest-idle
-        connection of the session holding the most, so one client cannot starve other
-        sessions' previews. Returns True when a slot was freed."""
-        busy = [other for other in self.sessions if other.conns]
-        share = MAX_TOTAL_CONNS // max(1, len(set(busy) | {sp}))
-        if len(sp.conns) >= share:
-            return False
-        hog = max(busy, key=lambda other: len(other.conns), default=None)
-        if hog is None or hog is sp or len(hog.conns) <= share:
-            return False
-        victim = min(hog.conns, key=lambda record: record.last)
-        victim.kill()
-        self._release(victim)
-        return True
+    def _refused(self, cap, peer):
+        """One stderr line per cap kind: the first refusal, then at most one a minute with a count."""
+        limits = {'session': MAX_SESSION_CONNS, 'client': MAX_CLIENT_CONNS, 'pending': MAX_PENDING,
+                  'total': MAX_TOTAL_CONNS}
+        now = time.monotonic()
+        last, count = self._refusals.get(cap, (None, 0))
+        count += 1
+        if last is None or now - last >= REFUSAL_LOG_EVERY:
+            self._refusals[cap] = (now, 0)
+            label = {'session': 'per-session', 'client': 'per-client-IP', 'pending': 'pending-open',
+                     'total': 'total'}[cap]
+            self.log(f'preview port connection from {peer} refused: {label} cap of {limits[cap]} reached'
+                     + (f' ({count} refused since the last report)' if count > 1 else ''))
+        else:
+            self._refusals[cap] = (last, count)
 
     def reap_idle_conns(self, now=None):
         """Close connections idle for IDLE_CLOSE while the global cap is under pressure. Returns how many."""
