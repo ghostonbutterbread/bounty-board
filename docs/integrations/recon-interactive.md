@@ -97,7 +97,14 @@ Each of these is a real `<a href>` whose hash carries the filters (`u=1&uh=<host
   - writer off, with light, dark, dusk, wide and phone layouts and no sideways scroll at 390 px.
 - Screenshots (synthetic data) in `$TMPDIR/screens`: `recon-program-{light,dark,dusk,wide,phone}.png`, `recon-urls-light.png`, `recon-mark-form.png`, `recon-findings-light.png`, `recon-reports-light.png`.
 
-Suite results (2026-11-25, load average 15 to 21):
+Review 10 round (2026-11-25, after 9c3e59d, load average 11 to 16):
+- `python3 -m unittest tests.test_recon_urls tests.test_recon_intel tests.test_ledger_actions`: 80 OK.
+- Recon node and browser files plus the finding-actions, ledger-actions, recent-actions, report-links-recent and dashboard-coverage browser files: 51/51.
+- `python3 tests/safe_suite.py`: 580 tests, 1 failure, 13 skipped. The failure was `test_collaboration_process` "server did not start" within 10 s; the module alone passed 3/3.
+- `npm test -- --test-concurrency=1`: 214 tests, 212 pass. The two failures were the live-editor Syncthing test and the ui-redesign multi-select test, both timeouts; each file alone passed (live-editor green, ui-redesign 7/7). All three are recorded in `BUGFIXES.md`.
+- Screenshots regenerated: `recon-urls-light.png`, `recon-urls-history-dark.png`, `recon-urls-history-phone.png` (390 px, no page overflow) and the program views.
+
+Earlier suite results (2026-11-25, load average 15 to 21):
 - `python3 -m unittest tests.test_recon_urls`: 18 OK. `tests.test_recon_intel` plus `tests.test_ledger_actions`: 58 OK.
 - `python3 tests/safe_suite.py`: 576 tests OK, 13 skipped. The skips are 12 opt-in Docker terminal tests and 1 Python-version fixture. The real-BBH mark test ran and passed.
 - Recon node and browser files: 14/14. The finding-actions, ledger-actions, recent-actions, report-links-recent and dashboard-coverage browser files: 37/37.
