@@ -808,10 +808,12 @@
     }
     return cached;
   };
+  // EVIDENCE.md, or EVIDENCE-<n>.md (artifact uploads' collision name), any case.
+  const EVIDENCE_NAME=/^evidence(?:-[0-9]+)?\.md$/i;
   const isEvidencePath = (program, lane, path) => {
     if(typeof path!=='string' || !path.toLowerCase().endsWith('.md'))return false;
     const sets=recordedSets(program,lane);
-    return !sets.reports.has(path) && (path.split('/').pop().toLowerCase()==='evidence.md' || sets.evidence.has(path));
+    return !sets.reports.has(path) && (EVIDENCE_NAME.test(path.split('/').pop()) || sets.evidence.has(path));
   };
   // Evidence path (relative to reports/) for a finding row's evidence icon, or null.
   const evidenceIdFor = (program, lane, finding) => {
@@ -1125,7 +1127,7 @@
   function evidenceView() {
     const program=currentProgram(), lane=currentLane(), path=state.report;
     if(state.section!=='reports' || !program || !lane || !path)return '';
-    const byName=path.split('/').pop().toLowerCase()==='evidence.md';
+    const byName=EVIDENCE_NAME.test(path.split('/').pop());
     if(!Array.isArray(lane.findings) && lane.unscanned && !lane._failed)
       return byName ? '<section class="panel panel-pad evidence-view" data-evidence-view><h2>Evidence</h2><div class="state">Loading evidence…</div></section>' : '';
     if(!isEvidencePath(program,lane,path))return '';

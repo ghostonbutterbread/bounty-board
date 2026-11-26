@@ -81,6 +81,13 @@ Screenshots (synthetic fixture, `EVIDENCE_SCREENSHOT_DIR=/home/ryushe/.hermes/ca
 - EV-2 (minor, fixed): the frontend matched absolute paths by the lane segment on the raw string while the backend normalized first, so `<root>/x/../reports/...` disagreed. Both now normalize, then search the segment on the normalized path. Regression: fixture finding F09 (`/srv/elsewhere/.../web/x/../reports/proof/F09-notes.md`) in the Python classifier, Recent/search and finding-link tests and in the browser finding-row test; classifier cases for `x/../` and `..` above the root.
 - Red on the reviewed SHA (only `static/app.js` and `report_evidence.py` swapped to `37c6d6f`): Python 6 of 11 fail, browser 3 of 4 fail. Green on the fix: Python 11/11, browser 4/4. The reviewer's repros (`EV-1/stale-loading`, `EV-1/control-300`, `EV-2/divergence`) pass against the fixed tree.
 
+## Integration with uploads, delete and tab titles
+
+- Integrated on `integrate/evidence-artifacts` with beta's artifact uploads, tab title (`cc48d46`) and artifact delete / interactive Recon / scope check (`6eaaca5`); only `package.json` test lists conflicted.
+- Integration review (same reviewer, resumed): ACCEPT. Uploads from the evidence view land in the packet folder `associate()` computes (refused with `no_report_folder` when there is none) and never replace `EVIDENCE.md`; nothing in the upload path needs an indexed report anchor.
+- INT-1 (minor, fixed): an uploaded `EVIDENCE.md` lands as `EVIDENCE-2.md` (collision suffix), which the name rule missed, so it showed as an Unregistered report. The classifier (Python, `static/app.js`, coverage drilldown refs) now also treats `EVIDENCE-<n>.md` as evidence. Regressions: classifier cases (`EVIDENCE-2.md`, `evidence-12.MD`; `EVIDENCE-2a.md`, `EVIDENCE 2.md`, `MY-EVIDENCE.md` are not evidence; a `report_path` named `EVIDENCE-2.md` stays a report), fixture file `F01-xss/EVIDENCE-2.md` through every list/Recent/search test, a real `artifact_uploads.store` of `EVIDENCE.md` into a packet, and a coverage ref case. Red on the previous sources: Python 7 of 12, browser 2 of 12.
+- Tab title: the evidence view reads `Evidence for <FID> · Reports · <program> · Bounty Board`.
+
 ## Gaps
 
 - Existing N/A marks on evidence files stay in the private store (the files still exist, so pruning keeps them) and are rechecked on listings within the existing `MAX_PRUNE` bound. They are invisible now. Harmless; clear them if wanted.

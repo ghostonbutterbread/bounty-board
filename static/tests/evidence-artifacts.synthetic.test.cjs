@@ -11,7 +11,7 @@ const repo=path.resolve(__dirname,'../..');
 const shots=process.env.EVIDENCE_SCREENSHOT_DIR;
 const PROGRAM='web_bounty/demo';
 const route=(section,tail='')=>`#/programs/${encodeURIComponent(PROGRAM)}/web/${section}${tail?'/'+encodeURIComponent(tail):''}`;
-const EVIDENCE=['F01-xss/EVIDENCE.md','F02-idor/EVIDENCE.md','F03-loose/evidence.md','F03-loose/notes/deep/EVIDENCE.md','proof/F04-capture.md','proof/F07-trace.md','proof/F09-notes.md'];
+const EVIDENCE=['F01-xss/EVIDENCE.md','F01-xss/EVIDENCE-2.md','F02-idor/EVIDENCE.md','F03-loose/evidence.md','F03-loose/notes/deep/EVIDENCE.md','proof/F04-capture.md','proof/F07-trace.md','proof/F09-notes.md'];
 const REPORTS=['F01-xss/demo-xss-F01.md','F05/EVIDENCE.md','notes.md'];
 
 async function withBoard(mode,fn){

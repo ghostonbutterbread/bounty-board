@@ -61,6 +61,8 @@ test('evidence refs link only to reports present in the lane', () => {
   // Evidence files are not reports; a reports/.../EVIDENCE.md ref maps to the evidence view path.
   assert.equal(cd.evidenceForRef('reports/F1-xss/EVIDENCE.md'), 'F1-xss/EVIDENCE.md');
   assert.equal(cd.evidenceForRef('./reports/F1/evidence.md'), 'F1/evidence.md');
+  assert.equal(cd.evidenceForRef('reports/F1/EVIDENCE-2.md'), 'F1/EVIDENCE-2.md');
+  assert.equal(cd.evidenceForRef('reports/F1/EVIDENCE-2a.md'), null);
   assert.equal(cd.evidenceForRef('reports/../x/EVIDENCE.md'), null);
   assert.equal(cd.evidenceForRef('reports/F1/notes.md'), null);
   assert.equal(cd.evidenceForRef('evidence/F1/EVIDENCE.md'), null);

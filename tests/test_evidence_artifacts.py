@@ -47,6 +47,8 @@ REPORTS = {
     'F01-xss/demo-xss-F01.md': '# Submission F01\n\nStored xss in the bio.\n',
     'F01-xss/EVIDENCE.md': '# Evidence F01\n\nRequest and response, word zebra.\n',
     'F01-xss/poc/request.txt': 'GET / HTTP/1.1\n',
+    # A second EVIDENCE.md uploaded from the Board lands as EVIDENCE-2.md (artifact_uploads collision name).
+    'F01-xss/EVIDENCE-2.md': '# Evidence F01 again\n\nzebra upload.\n',
     'F02-idor/EVIDENCE.md': '# Evidence F02\n\nzebra invoice ids.\n',
     'F03-loose/evidence.md': '# lower-case name, no owner\n\nzebra\n',
     'F03-loose/notes/deep/EVIDENCE.md': '# nested, no owner\n\nzebra\n',
@@ -56,7 +58,7 @@ REPORTS = {
     'F05/EVIDENCE.md': '# Registered F05\n\nzebra but a real report.\n',
     'notes.md': '# Notes\n\nzebra notes.\n',
 }
-EVIDENCE = {'F01-xss/EVIDENCE.md', 'F02-idor/EVIDENCE.md', 'F03-loose/evidence.md',
+EVIDENCE = {'F01-xss/EVIDENCE.md', 'F01-xss/EVIDENCE-2.md', 'F02-idor/EVIDENCE.md', 'F03-loose/evidence.md',
             'F03-loose/notes/deep/EVIDENCE.md', 'proof/F04-capture.md', 'proof/F07-trace.md', 'proof/F09-notes.md'}
 REPORT_FILES = {'F01-xss/demo-xss-F01.md', 'F05/EVIDENCE.md', 'notes.md'}
 
@@ -96,11 +98,12 @@ class ClassifierTests(unittest.TestCase):
     def test_is_evidence_rules(self):
         reports, evidence = recorded_paths([
             {'fid': 'A', 'report_path': 'reports/A/EVIDENCE.md'},
+            {'fid': 'A2', 'report_path': 'reports/A2/EVIDENCE-2.md'},
             {'fid': 'B', 'evidence_path': 'reports/B/capture.md'},
             {'fid': 'C', 'report_path': 'reports/C/report.md', 'evidence_path': 'reports/C/report.md'},
             'not a finding',
         ], self.lane)
-        self.assertEqual(reports, {'A/EVIDENCE.md', 'C/report.md'})
+        self.assertEqual(reports, {'A/EVIDENCE.md', 'A2/EVIDENCE-2.md', 'C/report.md'})
         self.assertEqual(evidence, {'B/capture.md', 'C/report.md'})
         check = lambda path: is_evidence(path, reports, evidence)
         self.assertTrue(check('X/EVIDENCE.md'), 'unowned EVIDENCE.md')
@@ -109,7 +112,12 @@ class ClassifierTests(unittest.TestCase):
         self.assertTrue(check('X/deep/nested/EVIDENCE.md'), 'nested folder')
         self.assertTrue(check('EVIDENCE.md'), 'reports root')
         self.assertTrue(check('B/capture.md'), 'evidence_path only, another name')
+        self.assertTrue(check('X/EVIDENCE-2.md'), 'upload collision name')
+        self.assertTrue(check('X/evidence-12.MD'))
+        for name in ('X/EVIDENCE-.md', 'X/EVIDENCE-2a.md', 'X/EVIDENCE 2.md', 'X/EVIDENCE-2.md.md', 'X/MY-EVIDENCE.md'):
+            self.assertFalse(check(name), name)
         self.assertFalse(check('A/EVIDENCE.md'), 'a report_path named EVIDENCE.md stays a report')
+        self.assertFalse(check('A2/EVIDENCE-2.md'), 'and so does one named EVIDENCE-2.md')
         self.assertFalse(check('C/report.md'), 'report_path wins over evidence_path')
         self.assertFalse(check('X/EVIDENCE.md.bak.md'))
         self.assertFalse(check('X/notes.md'))
@@ -134,6 +142,29 @@ class LaneReportsTests(Base):
                          ('registered_report', ['F05']))
         self.assertEqual(by_path['F01-xss/demo-xss-F01.md']['kind'], 'registered_report')
         self.assertFalse(any(item['kind'] == 'generated_evidence' for item in items))
+
+    def test_an_uploaded_second_evidence_md_stays_evidence(self):
+        # Uploading EVIDENCE.md into a packet that has one lands as EVIDENCE-2.md
+        # (artifact_uploads never replaces); it must not become a report.
+        import io
+        import os
+        import artifact_uploads
+        import report_artifacts
+        lane_fd = report_artifacts.open_lane(self.root, FAMILY, PROGRAM, LANE)
+        try:
+            folder = report_artifacts.associate(lane_fd, FAMILY, PROGRAM, LANE, 'F02-idor/EVIDENCE.md')['folder']
+            self.assertEqual(folder, 'reports/F02-idor')
+            dir_fd = report_artifacts._open_dir(lane_fd, folder.split('/'))
+            try:
+                name = artifact_uploads.store(artifact_uploads.Uploads(free_floor=0), dir_fd,
+                                              artifact_uploads.sanitize_name('EVIDENCE.md'), 3, io.BytesIO(b'new'))
+            finally:
+                os.close(dir_fd)
+        finally:
+            os.close(lane_fd)
+        self.assertEqual(name, 'EVIDENCE-2.md')
+        paths = {item['path'] for item in app.reports(self.lane, [], app.ledger(self.lane, [])) or []}
+        self.assertEqual(paths, REPORT_FILES)
 
     def test_without_a_ledger_evidence_is_still_skipped_by_name(self):
         items = app.reports(self.lane, [], None)
@@ -244,7 +275,8 @@ class EndpointTests(Base):
                                    path='F01-xss/EVIDENCE.md')
         self.assertEqual(status, 200, listing)
         listed = {a['relative'] for a in listing['artifacts']}
-        self.assertEqual(listed, {'reports/F01-xss/demo-xss-F01.md', 'reports/F01-xss/poc/request.txt'})
+        self.assertEqual(listed, {'reports/F01-xss/demo-xss-F01.md', 'reports/F01-xss/poc/request.txt',
+                                  'reports/F01-xss/EVIDENCE-2.md'})
 
 
 class ModuleTests(unittest.TestCase):

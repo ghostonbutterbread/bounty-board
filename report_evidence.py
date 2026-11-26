@@ -7,16 +7,21 @@ is shared for navigation pages.
 
 A ``.md`` file under a lane's ``reports/`` is *evidence* when no finding's
 ``report_path`` names it and either its basename is ``EVIDENCE.md``
-(case-insensitive) or some finding's ``evidence_path`` names it. A file that a
+(case-insensitive; also ``EVIDENCE-<n>.md``, the upload collision name) or some
+finding's ``evidence_path`` names it. A file that a
 ``report_path`` names stays a report even when it is called ``EVIDENCE.md``.
 
 The decision needs only the path and the ledger, never the file content, so
 callers skip evidence before reading it.
 """
 import posixpath
+import re
 from pathlib import Path
 
 EVIDENCE_NAME = 'evidence.md'
+# EVIDENCE.md, or EVIDENCE-<n>.md: the name artifact uploads give an uploaded
+# EVIDENCE.md when the folder already has one (artifact_uploads.candidates).
+EVIDENCE_NAME_RE = re.compile(r'evidence(?:-[0-9]+)?\.md', re.IGNORECASE)
 
 
 def reports_relative(recorded, lane):
@@ -72,4 +77,4 @@ def is_evidence(relative, report_paths, evidence_paths):
     """True when ``reports/<relative>`` is a finding's evidence artifact, not a report."""
     if relative in report_paths:
         return False
-    return posixpath.basename(relative).lower() == EVIDENCE_NAME or relative in evidence_paths
+    return bool(EVIDENCE_NAME_RE.fullmatch(posixpath.basename(relative))) or relative in evidence_paths

@@ -116,7 +116,7 @@
   function evidenceForRef(ref) {
     if (typeof ref !== 'string') return null;
     const clean = ref.trim().replace(/^\.\//, '');
-    if (!clean.startsWith('reports/') || !/(^|\/)evidence\.md$/i.test(clean)) return null;
+    if (!clean.startsWith('reports/') || !/(^|\/)evidence(-[0-9]+)?\.md$/i.test(clean)) return null;
     const rest = clean.slice(8);
     return rest.split('/').some(part => !part || part === '.' || part === '..') ? null : rest;
   }
