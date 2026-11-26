@@ -70,3 +70,10 @@ Screenshots (synthetic) under `$TMPDIR/screens`: `scope-panel-light.png`, `scope
 4. Stale threshold is 7 days, matching `--if-older-than 7`. Adjust?
 
 ## Final test runs
+
+2026-11-26, dev machine, load average 6 to 7.
+
+- `python3 -m unittest tests.test_scope_inventory`: 23 OK. `python3 -m unittest tests.test_scope_check`: 23 OK.
+- `python3 tests/safe_suite.py` was too slow on this box (about 100 tests in 10 min), so it was stopped and every `tests/test_*.py` module ran 4 at a time (`ls tests/test_*.py | xargs -P4`, real-BBH fixture test excluded as in `safe_suite.py`): 47 modules, 686 tests, 0 failures, 13 skipped. Three report modules use `multiprocessing` and error under that ad hoc runner (the children re-import the runner script); with `python3 -m unittest` alone, `test_report_retained_poll` 4 OK and `test_report_autosave` 12 OK; `test_report_retention_capacity` failed once and then passed twice (12 OK), and it has no scope code.
+- `NODE_PATH=… CHROME_BIN=/opt/google/chrome/chrome node --test --test-concurrency=1 static/tests/scope-panel.test.cjs static/tests/scope-panel.synthetic.test.cjs`: 4/4 pass.
+- `npm test -- --test-concurrency=1` (now includes both scope panel files): 231 tests, 228 pass, 3 fail. Two were caused by this branch: `mapstore-detail` asserted no non-tab links in `#app`, and the scope badge is a link. The assertion now excludes `[data-scope-badge]`, and the file passes alone (2/2). The third is `artifact-uploads` "upload button … cancel, precheck": a staged temp file was still present 1.5 s after a cancel. It failed again when its file ran alone, then passed by name. It is unrelated to this branch and is recorded in `BUGFIXES.md`.
