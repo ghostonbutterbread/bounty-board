@@ -265,7 +265,7 @@ def simple_response(status, code):
     body = ('{"type": "error", "error": {"type": "relay_error", "message": "%s"}}' % code).encode()
     reason = {400: 'Bad Request', 403: 'Forbidden', 408: 'Request Timeout', 411: 'Length Required',
               413: 'Payload Too Large', 431: 'Request Header Fields Too Large', 502: 'Bad Gateway',
-              503: 'Service Unavailable'}.get(status, 'Error')
+              503: 'Service Unavailable', 504: 'Gateway Timeout'}.get(status, 'Error')
     return (f'HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n'
             f'Connection: close\r\n\r\n').encode() + body
 
@@ -545,6 +545,7 @@ class ModelRelay:
         while b'\r\n\r\n' not in buf:
             if len(buf) > 64 * 1024:
                 raise BadRequest(502, 'upstream_bad_response')
+            self._budget(upstream, start, 'upstream_timeout')
             chunk = upstream.recv(16384)
             if not chunk:
                 raise BadRequest(502, 'upstream_closed')
@@ -560,9 +561,22 @@ class ModelRelay:
                 kept.append(line)
         kept.append(b'Connection: close')
         conn.sendall(b'\r\n'.join(kept) + b'\r\n\r\n' + body)
-        while time.monotonic() - start < self.max_lifetime:
+        while True:
+            try:
+                self._budget(upstream, start, 'lifetime')
+            except BadRequest:
+                return  # the answer has started: just end the connection
+            conn.settimeout(min(self.client_idle, max(0.01, start + self.max_lifetime - time.monotonic())))
             chunk = upstream.recv(65536)
             if not chunk:
                 return
             conn.sendall(chunk)  # unbuffered: each SSE event goes out as soon as it arrives
+
+    def _budget(self, sock, start, code):
+        """Before every read: the timeout is the idle limit or what is left of the request's
+        lifetime, whichever is shorter; a spent lifetime ends the request (review r1 R2)."""
+        remaining = start + self.max_lifetime - time.monotonic()
+        if remaining <= 0:
+            raise BadRequest(504, code)
+        sock.settimeout(min(self.upstream_idle, remaining))
 

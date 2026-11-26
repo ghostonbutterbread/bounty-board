@@ -168,12 +168,7 @@ class CliRegistryTests(unittest.TestCase):
         self.assertTrue(state['projects']['/report']['hasTrustDialogAccepted'])
         self.assertEqual(state['lastOnboardingVersion'], '2.1.332')
         settings = json.loads(files['.claude/settings.json'])
-        perms = settings['permissions']
-        self.assertEqual(perms['defaultMode'], 'acceptEdits')
-        self.assertEqual((perms['disableAutoMode'], perms['disableBypassPermissionsMode']), ('disable', 'disable'))
-        for rule in perms['allow']:
-            self.assertTrue(rule.startswith(('Read(//home/sandbox/.report-agent/', 'Bash(python3 -m py_compile', 'Bash(python3 poc.py --help',
-                                             'Bash(python3 ./poc.py --help', 'Bash(node --check', 'Bash(bash -n', 'Bash(sh -n')), rule)
+        self.assertEqual(set(settings), {'env'})  # the policy is in the read-only managed file (test_review_r1_*)
         self.assertEqual(settings['env']['DISABLE_AUTOUPDATER'], '1')
         self.assertEqual(settings['env']['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], '1')
         self.assertEqual(links, {'.claude/skills/poc-tooling-policy': '/opt/report-agent/skills/poc-tooling-policy'})
@@ -181,7 +176,7 @@ class CliRegistryTests(unittest.TestCase):
         self.assertEqual(env['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:3129')
         self.assertEqual(env['CLAUDE_CODE_OAUTH_TOKEN'], cli.DUMMY_OAUTH_TOKEN)
         self.assertEqual(cli.ClaudeAdapter().argv('/opt/report-agent/claude', 'default'),
-                         ['/opt/report-agent/claude', cli.INITIAL_PROMPT])
+                         ['/opt/report-agent/claude', *cli.CLAUDE_FIXED_ARGS, '--', cli.INITIAL_PROMPT])
         self.assertEqual(cli.ClaudeAdapter().argv('/b', 'opus')[1:3], ['--model', 'opus'])
 
     def test_home_archive(self):
@@ -278,14 +273,14 @@ class DockerExecTests(unittest.TestCase):
         self.assertIn('bbterm-abc123def456', argv)
         tail = argv[argv.index('bbterm-abc123def456') + 1:]
         self.assertEqual(tail, ['/bin/sh', '-c', ra.WRAPPER, 'report-agent', '/opt/report-agent/claude', '--model', 'opus',
-                                cli.INITIAL_PROMPT])
+                                *cli.CLAUDE_FIXED_ARGS, '--', cli.INITIAL_PROMPT])
         self.assertNotIn(FAKE_TOKEN, ' '.join(argv))
         executor.raise_memory(session)
         self.assertEqual(backend.calls[-1], ('update', '--memory', '2g', '--memory-swap', '2g', 'bbterm-abc123def456'))
-        executor.signal_agent(session, __import__('signal').SIGTERM)
+        executor.signal_agent(session, __import__('signal').SIGTERM, 4242)
         call = backend.calls[-1]
         self.assertEqual(call[:4], ('exec', 'bbterm-abc123def456', '/bin/sh', '-c'))
-        self.assertEqual(call[-1], 'TERM')
+        self.assertEqual(call[-2:], ('TERM', '4242'))  # the pid recorded at start, as an argument
 
     def test_run_args_extra_mounts_read_only(self):
         base = fx.tmp_base('agentmounts')
@@ -302,12 +297,14 @@ class DockerExecTests(unittest.TestCase):
             try:
                 session = type('S', (), {})()
                 args = hub.run_args_extra(session)
+                copy = hub.skill_copy('poc-tooling-policy', str(skill))
                 self.assertEqual(args, ['--mount', f'type=bind,source={real},target=/opt/report-agent/claude,readonly',
-                                        '--mount', f'type=bind,source={skill},target=/opt/report-agent/skills/poc-tooling-policy,readonly'])
+                                        '--mount', f'type=bind,source={hub.managed_dir.absolute()},target=/etc/claude-code,readonly',
+                                        '--mount', f'type=bind,source={copy},target=/opt/report-agent/skills/poc-tooling-policy,readonly'])
                 self.assertEqual(session.agent_mounts, {'clis': {'claude': str(real)}, 'skills': ['poc-tooling-policy']})
                 skill.rmdir()
                 skill.symlink_to(base)  # swapped for a symlink after start: refused at docker run
-                self.assertEqual(hub.run_args_extra(session)[2:], [])
+                self.assertEqual(hub.run_args_extra(session)[4:], [])
             finally:
                 hub.close()
         finally:
@@ -448,7 +445,8 @@ class AgentServiceTests(unittest.TestCase):
             hello = [c for c in client.controls if c.get('type') == 'hello'][0]
             self.assertEqual((hello['kind'], hello['agent']['cli']), ('agent', 'claude'))
             out = bytes(client.output).decode('utf-8', 'replace')
-            self.assertIn('ARGV ["Read /home/sandbox/.report-agent/task.md and follow it."]', out)
+            self.assertIn('ARGV ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", "{\\"mcpServers\\":{}}", "--", '
+                          '"Read /home/sandbox/.report-agent/task.md and follow it."]', out)
             self.assertIn('CWD ' + str(self.root / fx.FAMILY / fx.PROGRAM / fx.LANE / 'reports/D1-sqli-login'), out)
             self.assertIn('The main report is `example-com-sqli-D1.md`', out)
             self.assertIn('curl -s https://example.test/login', out)

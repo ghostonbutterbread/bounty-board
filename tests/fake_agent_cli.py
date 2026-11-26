@@ -6,7 +6,8 @@ model request through the relay (127.0.0.1:3129 in a sandbox, or the
 ``BBTERM_TEST_MODEL_SOCK`` Unix socket with the local test backend) with
 credentials the relay must drop, then echoes input lines. Input ``spam``
 prints a line every 0.2 s for 3 s; ``child`` starts ``sleep 300`` and prints
-its pid; ``quit`` exits with code 7.
+its pid; ``nohup`` makes it ignore SIGHUP and the end of input; ``quit`` exits
+with code 7.
 """
 import json
 import os
@@ -64,8 +65,15 @@ def main():
         except OSError as error:
             print('MODEL-ERROR ' + type(error).__name__, flush=True)
     print('READY', flush=True)
+    stubborn = False
     for line in sys.stdin:
         line = line.strip()
+        if line == 'nohup':  # like a CLI that survives losing its terminal
+            import signal
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            stubborn = True
+            print('NOHUP-SET', flush=True)
+            continue
         if line == 'quit':
             print('BYE', flush=True)
             sys.exit(7)
@@ -80,6 +88,8 @@ def main():
                 time.sleep(0.2)
             continue
         print('ECHO ' + line, flush=True)
+    while stubborn:  # stdin is gone; keep running until killed
+        time.sleep(1)
 
 
 if __name__ == '__main__':

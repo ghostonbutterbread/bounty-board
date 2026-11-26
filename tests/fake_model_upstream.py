@@ -50,6 +50,25 @@ def sse_events(model='claude-test', text='FAKE-REPLY-OK'):
     return [f'event: {name}\ndata: {json.dumps(data)}\n\n'.encode() for name, data in events]
 
 
+def tool_events(model, tool_id, name, tool_input):
+    """One assistant turn that asks to run a tool (what a scripted model returns)."""
+    events = [
+        ('message_start', {'type': 'message_start', 'message': {'id': f'msg_{tool_id}', 'type': 'message', 'role': 'assistant',
+                                                                'model': model, 'content': [], 'stop_reason': None,
+                                                                'stop_sequence': None,
+                                                                'usage': {'input_tokens': 10, 'output_tokens': 1}}}),
+        ('content_block_start', {'type': 'content_block_start', 'index': 0,
+                                 'content_block': {'type': 'tool_use', 'id': f'toolu_{tool_id}', 'name': name, 'input': {}}}),
+        ('content_block_delta', {'type': 'content_block_delta', 'index': 0,
+                                 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(tool_input)}}),
+        ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
+        ('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use', 'stop_sequence': None},
+                           'usage': {'output_tokens': 5}}),
+        ('message_stop', {'type': 'message_stop'}),
+    ]
+    return [f'event: {n}\ndata: {json.dumps(d)}\n\n'.encode() for n, d in events]
+
+
 class FakeUpstream:
     def __init__(self, cert, key, *, hold=None):
         """``hold``: a threading.Event; streaming answers pause after the first event until it is set."""
@@ -61,6 +80,7 @@ class FakeUpstream:
         self.port = self.sock.getsockname()[1]
         self.requests = []
         self.hold = hold
+        self.script = []  # [(tool name, input)]: streaming turns that offer tools return these in order
         self.lock = threading.Lock()
         self.closed = False
         threading.Thread(target=self._loop, daemon=True).start()
@@ -115,7 +135,12 @@ class FakeUpstream:
             except ValueError:
                 payload = {}
             if payload.get('stream'):
-                events = sse_events(payload.get('model', 'claude-test'))
+                with self.lock:
+                    step = self.script.pop(0) if self.script and payload.get('tools') else None
+                if step is not None:
+                    events = tool_events(payload.get('model', 'claude-test'), len(self.requests), *step)
+                else:
+                    events = sse_events(payload.get('model', 'claude-test'))
                 conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n'
                              b'Set-Cookie: upstream=1\r\nTransfer-Encoding: chunked\r\n\r\n')
                 for index, event in enumerate(events):

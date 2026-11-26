@@ -980,7 +980,8 @@ class SessionManager:
                 # Preview-port traffic keeps a sandbox running, but removal still
                 # counts from when the last terminal viewer left.
                 quiet = now - max(session.left_at, session.active_at if session.active_at is not None else session.left_at)
-                if idle >= self.remove_after:
+                working = self.agent_hub is not None and self.agent_hub.pause_held(session, now)
+                if idle >= self.remove_after and not working:  # never remove a sandbox whose agent is at work
                     session.closed = True
                     with self.lock:
                         if self.sessions.get(session.key) is session:
@@ -990,8 +991,7 @@ class SessionManager:
                             self.removed_idle.popitem(last=False)
                     session._destroy()
                     removed.append(session)
-                elif (quiet >= self.pause_after and not session.paused and session.started
-                      and not (self.agent_hub is not None and self.agent_hub.pause_held(session, now))):
+                elif quiet >= self.pause_after and not session.paused and session.started and not working:
                     try:
                         self.backend.pause(session)
                     except SandboxVanished:

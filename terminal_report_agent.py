@@ -21,10 +21,13 @@ Lifecycle hooks (called by ``terminal_sandbox``):
   the last 120 s;
 - ``viewer_count``: Agent tab viewers count as viewers for pause and removal.
 """
+import hashlib
 import io
 import json
 import os
 import re
+import secrets
+import shutil
 import signal
 import subprocess
 import tarfile
@@ -150,7 +153,9 @@ def home_archive(files, links, task_text):
             info = tarfile.TarInfo(name)
             info.type, info.mode, info.mtime = tarfile.DIRTYPE, 0o700, now
             archive.addfile(info)
-        for name, data in sorted({**files, '.report-agent/task.md': task_text.encode('utf-8')}.items()):
+        # agent.pid is emptied so the host never reads a pid left by an earlier agent (read_pid waits for the new one).
+        for name, data in sorted({**files, '.report-agent/task.md': task_text.encode('utf-8'),
+                                  '.report-agent/agent.pid': b''}.items()):
             info = tarfile.TarInfo(name)
             info.size, info.mode, info.mtime = len(data), 0o600, now
             archive.addfile(info, io.BytesIO(data))
@@ -202,19 +207,40 @@ class DockerExec:
     def pty_cwd(self, session):
         return None
 
-    def signal_agent(self, session, sig):
-        """Signal the agent inside the container (a killed ``docker exec`` client
-        does not end the process it started). The pid file is written by the
-        fixed wrapper; only digits are accepted."""
-        # The group first (commands the CLI started, such as a hanging poc.py), then the CLI itself.
-        script = ('p=$(cat "$HOME/.report-agent/agent.pid" 2>/dev/null); case "$p" in ""|*[!0-9]*) exit 1;; esac; '
-                  'kill -s "$1" -- "-$p" 2>/dev/null; kill -s "$1" "$p"')
+    def read_pid(self, session, agent, wait=10.0):
+        """The agent's pid inside the container, read once right after start from the file the
+        fixed wrapper writes (digits only). Kept on the host, so stop works even when the
+        ``docker exec`` client is gone (a killed client does not end the process it started)."""
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            try:
+                result = self.backend.run('exec', self.backend.name(session), 'cat', cli.PID_FILE, check=False, timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                result = None
+            text = result.stdout.decode('ascii', 'replace').strip() if result is not None and result.returncode == 0 else ''
+            if re.fullmatch(r'[1-9][0-9]{0,9}', text):
+                return int(text)
+            time.sleep(0.2)
+        return None
+
+    def alive(self, session, agent, pid):
         try:
-            self.backend.run('exec', self.backend.name(session), '/bin/sh', '-c', script, 'report-agent',
-                             {signal.SIGHUP: 'HUP', signal.SIGTERM: 'TERM', signal.SIGKILL: 'KILL'}[sig],
+            result = self.backend.run('exec', self.backend.name(session), '/bin/sh', '-c', 'kill -0 "$1" 2>/dev/null',
+                                      'report-agent', str(pid), check=False, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    def signal_agent(self, session, sig, pid):
+        """Signal the agent's process group (commands it started, such as a hanging poc.py),
+        then the agent itself, inside the container."""
+        try:
+            self.backend.run('exec', self.backend.name(session), '/bin/sh', '-c',
+                             'kill -s "$1" -- "-$2" 2>/dev/null; kill -s "$1" "$2"', 'report-agent',
+                             {signal.SIGHUP: 'HUP', signal.SIGTERM: 'TERM', signal.SIGKILL: 'KILL'}[sig], str(pid),
                              check=False, timeout=15)
         except (OSError, subprocess.TimeoutExpired):
-            pass  # the client is stopped next either way
+            pass
 
 
 class LocalExec:
@@ -252,13 +278,17 @@ class LocalExec:
     def pty_cwd(self, session):
         return session.mount.path
 
-    def signal_agent(self, session, sig):
-        agent = session.agent
-        if agent is not None and agent.pty is not None and agent.pty.proc is not None:
-            try:
-                os.killpg(agent.pty.proc.pid, sig)
-            except OSError:
-                pass
+    def read_pid(self, session, agent, wait=0):
+        return agent.pty.proc.pid if agent.pty is not None and agent.pty.proc is not None else None
+
+    def alive(self, session, agent, pid):
+        return agent.pty is not None and agent.pty.proc is not None and agent.pty.proc.poll() is None
+
+    def signal_agent(self, session, sig, pid):
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            pass
 
 
 # -- one agent ---------------------------------------------------------------------
@@ -272,6 +302,7 @@ class ReportAgent:
         self.state = 'starting'
         self.pty = None
         self.exit_code = None
+        self.container_pid = None  # read once after start (see DockerExec.read_pid)
 
     def live(self):
         return self.state in ('starting', 'running')
@@ -325,7 +356,10 @@ class ReportAgentHub:
         self.template = template if template is not None else PROMPT_TEMPLATE.read_text(encoding='utf-8')
         self.relay = None
         self.relay_paths = {}
+        self.agent_root = Path(state_dir) / 'report-agent'
+        self.skill_copies = {}  # name -> (source signature, copy path)
         if self.enabled:
+            self._prepare_agent_root()
             self.relay = terminal_relay.ModelRelay(self.token, upstream=relay_upstream, ssl_context=relay_ssl_context,
                                                    log=self.log, **(relay_limits or {}))
         self.lock = threading.Lock()
@@ -333,6 +367,56 @@ class ReportAgentHub:
     def close(self):
         if self.relay is not None:
             self.relay.close()
+
+    # -- host-generated, read-only policy and skills ------------------------------------
+    def _prepare_agent_root(self):
+        """``<state>/report-agent/managed/managed-settings.json`` (the permission policy, mounted
+        read-only at /etc/claude-code) and an empty ``skills/`` for stripped copies."""
+        if re.search(r'[,"\x00-\x1f]', str(self.agent_root.absolute())):
+            raise ValueError('the state dir path cannot contain a comma, quote or control character (Docker --mount)')
+        managed = self.agent_root / 'managed'
+        managed.mkdir(parents=True, exist_ok=True)
+        for folder in (self.agent_root, managed):
+            os.chmod(folder, 0o755)
+        data = json.dumps(cli.REGISTRY['claude'].adapter.managed_settings(), indent=2, sort_keys=True).encode() + b'\n'
+        tmp = managed / f'.managed-settings.{os.getpid()}.tmp'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, managed / 'managed-settings.json')
+        skills = self.agent_root / 'skills'
+        shutil.rmtree(skills, ignore_errors=True)  # copies from an earlier run; their containers were reaped
+        skills.mkdir(mode=0o755)
+        os.chmod(skills, 0o755)
+
+    @property
+    def managed_dir(self):
+        return self.agent_root / 'managed'
+
+    def skill_copy(self, name, source):
+        """Path of a read-only copy of the skill with permission-widening frontmatter stripped,
+        made again whenever the source changes. Raises cli.CliError (symlinked source, too large)."""
+        cli.check_skill_dir(source)
+        signature = cli.skill_signature(source)
+        with self.lock:
+            cached = self.skill_copies.get(name)
+            if cached is not None and cached[0] == signature and os.path.isdir(cached[1]):
+                return cached[1]
+            digest = hashlib.sha256(signature.encode()).hexdigest()[:12]
+            target = self.agent_root / 'skills' / f'{name}-{digest}'
+            if not target.is_dir():
+                tmp = self.agent_root / 'skills' / f'.{name}-{secrets.token_hex(4)}'
+                try:
+                    cli.copy_skill(source, tmp)
+                    os.replace(tmp, target)
+                except BaseException:
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    raise
+            self.skill_copies[name] = (signature, str(target))
+            return str(target)
 
     # -- settings / config ---------------------------------------------------------
     def selected(self):
@@ -395,15 +479,17 @@ class ReportAgentHub:
                 continue
             mounted[cli_id] = real
             args += ['--mount', f'type=bind,source={real},target={cli.BIN_DIR}/{cli_id},readonly']
+        # The permission policy: host-generated, read-only, where Claude Code reads managed settings.
+        args += ['--mount', f'type=bind,source={self.managed_dir.absolute()},target={cli.MANAGED_DIR},readonly']
         skills = []
         for name, path in sorted(self.skills.items()):
             try:
-                cli.check_skill_dir(path)
-            except cli.CliError as error:
+                copy = self.skill_copy(name, path)
+            except (cli.CliError, OSError) as error:
                 self.log(f'skill {name} not mounted: {error}')
                 continue
             skills.append(name)
-            args += ['--mount', f'type=bind,source={path},target={cli.SKILLS_DIR}/{name},readonly']
+            args += ['--mount', f'type=bind,source={copy},target={cli.SKILLS_DIR}/{name},readonly']
         session.agent_mounts = {'clis': mounted, 'skills': skills}
         return args
 
@@ -538,6 +624,7 @@ class ReportAgentHub:
             exit_note=lambda code: f'\r\n[The agent exited ({code}). Start it again from the report.]\r\n'.encode())
         agent.pty.start()
         agent.state = 'running'
+        agent.container_pid = executor.read_pid(session, agent)
 
     # -- routes (auth, Origin and CSRF are checked by the service first) ---------------
     def handle_get(self, manager, path, selector):
@@ -578,19 +665,20 @@ class ReportAgentHub:
             agent = session.agent
             if agent is None or session.closed:
                 return none_info()
-            if agent.live():
+            executor = self.executor(manager)
+            pid = agent.container_pid
+            if pid is not None or agent.live():
                 if session.paused:
                     manager._resume_locked(session)
-                executor = self.executor(manager)
-                proc = agent.pty.proc if agent.pty is not None else None
+                # By the pid recorded at start, also when the docker exec client is already gone
+                # (the agent then reads as exited, but may still run in the container).
                 for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
-                    if proc is None or proc.poll() is not None:
+                    if pid is None or not executor.alive(session, agent, pid):
                         break
-                    executor.signal_agent(session, sig)  # inside the container: a killed client would not end it
-                    try:
-                        proc.wait(timeout=self.stop_grace)
-                    except subprocess.TimeoutExpired:
-                        continue
+                    executor.signal_agent(session, sig, pid)
+                    deadline = time.monotonic() + self.stop_grace
+                    while time.monotonic() < deadline and executor.alive(session, agent, pid):
+                        time.sleep(0.25)
                 if agent.pty is not None:
                     agent.pty.stop(grace=1.0)  # the client, if it is still there
                 if session.relay is not None and self.relay is not None:
