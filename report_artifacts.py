@@ -296,6 +296,8 @@ def associate(lane_fd, family, program, lane, report_path):
         ledger = json.loads(_read_small(lane_fd, 'ledgers/ledger.json'))
         if isinstance(ledger, dict) and isinstance(ledger.get('findings'), list):
             findings = [f for f in ledger['findings'] if isinstance(f, dict)]
+        else:
+            ledger_unreadable = True  # parses, but not a ledger: claims unknown
     except (ArtifactError, ValueError, UnicodeError):
         # A ledger that exists but cannot be read (mid-sync, too large) hides
         # other findings' claims; callers that delete must refuse meanwhile.

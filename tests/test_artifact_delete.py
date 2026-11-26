@@ -380,6 +380,18 @@ class ReviewFixTests(DeleteFixture):
         self.assertEqual((status, payload), (400, {'error': 'invalid_body'}))
         self.assertTrue((self.folder / 'v.txt').exists())
 
+    def test_ledger_with_wrong_shape_turns_delete_off(self):
+        # Re-review N3: valid JSON that is not a ledger hides other findings' claims too.
+        (self.folder / 'keep.txt').write_text('k')
+        for text in ('[]', '{"findings": {}}', '"x"'):
+            with self.subTest(text=text):
+                (self.lane / 'ledgers/ledger.json').write_text(text)
+                listing = self.listing(F1)
+                self.assertIn('ledger_unreadable', listing['notes'])
+                status, _, body = self.delete('reports/F1/keep.txt')
+                self.assertEqual((status, body), (409, {'error': 'not_deletable'}))
+        self.assertTrue((self.folder / 'keep.txt').exists())
+
     def test_unreadable_ledger_turns_delete_off(self):
         (self.folder / 'keep.txt').write_text('k')
         (self.lane / 'ledgers/ledger.json').write_text('{"findings": [')  # mid-write
