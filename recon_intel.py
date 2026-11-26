@@ -1264,8 +1264,8 @@ class ReconIntel:
         finally:
             self.url_slots.release()
 
-    def urls(self, family, program, lane, filters, after=0, limit=50):
-        status, body = self._url_call(family, program, lane, lambda path: list_urls(path, filters, after, limit, self.budget))
+    def urls(self, family, program, lane, filters, cursor=0, limit=50, order='desc'):
+        status, body = self._url_call(family, program, lane, lambda path: list_urls(path, filters, cursor, limit, self.budget, order))
         if status == 200:
             body['filters'] = {k: (text(v, 300) if isinstance(v, str) else v) for k, v in filters.items() if v}
         return status, body
@@ -1396,15 +1396,17 @@ def split_url(raw):
     return rest[cut:] or '/'
 
 
-def list_urls(path, filters, after=0, limit=50, budget=QUERY_BUDGET):
-    """One keyset page of URLs (id ascending) matching filters.
+def list_urls(path, filters, cursor=0, limit=50, budget=QUERY_BUDGET, order='desc'):
+    """One keyset page of URLs matching filters, newest first (order='desc') or
+    oldest first (order='asc').
 
-    Never OFFSET and never a full scan in one statement: rows are read in id
-    windows (first URL_SCAN_FIRST ids, doubling while windows are empty), each
-    window a bounded statement, until the page is full, the table ends or the
-    page budget (2 query budgets) runs out. next_after is the last id returned
-    when the page is full, else the end of the last window read, so "next"
-    continues exactly where this page stopped."""
+    cursor: 0 starts at the newest (or oldest) URL; otherwise the page holds ids
+    below it (desc) or above it (asc). Never OFFSET and never a full scan in one
+    statement: rows are read in id windows (first URL_SCAN_FIRST ids, doubling
+    while windows are empty), each window a bounded statement, until the page is
+    full, the table ends or the page budget (2 query budgets) runs out. The
+    returned cursor is the last id on a full page, else the far edge of the last
+    window read, so the next page continues exactly where this one stopped."""
     started = time.monotonic()
     db = ReadOnlyDB(path, budget)
     try:
@@ -1419,30 +1421,34 @@ def list_urls(path, filters, after=0, limit=50, budget=QUERY_BUDGET):
         extra = ''.join(f' AND {w}' for w in where)
         seen = ', '.join(c if c in cols['urls'] else f'NULL AS {c}' for c in ('first_seen', 'last_seen'))
         max_id = db.one('SELECT MAX(id) FROM urls') or 0
-        rows, lo, window, partial = [], max(0, after), URL_SCAN_FIRST, None
+        desc = order == 'desc'
+        rows, window, partial = [], URL_SCAN_FIRST, None
+        # edge: the next id boundary still to read (exclusive): ids above it (asc) or below it (desc).
+        edge = max(0, cursor) if not desc else (min(cursor, max_id + 1) if cursor > 0 else max_id + 1)
         deadline = started + 2 * budget
-        while len(rows) < limit and lo < max_id:
-            hi = min(max_id, lo + window)
+        more = lambda e: e < max_id if not desc else e > 1
+        while len(rows) < limit and more(edge):
+            lo, hi = (edge, min(max_id, edge + window)) if not desc else (max(0, edge - 1 - window), edge - 1)
             try:
                 got = db.query(f'SELECT id, canonical_url, host, param_keys, {seen} FROM urls '
-                               f'WHERE id > ? AND id <= ?{extra} ORDER BY id LIMIT ?', (lo, hi, *args, limit - len(rows)))
+                               f'WHERE id > ? AND id <= ?{extra} ORDER BY id {"DESC" if desc else "ASC"} LIMIT ?',
+                               (lo, hi, *args, limit - len(rows)))
             except QueryTimeout:
                 partial = 'timeout'
                 break
             rows += got
             if len(rows) >= limit:
                 break
-            lo = hi
+            edge = hi if not desc else lo + 1
             window = window if got else min(URL_SCAN_MAX, window * 2)
             if time.monotonic() > deadline:
                 partial = 'budget'
                 break
         full = len(rows) >= limit
-        next_after = rows[-1][0] if full else lo
+        next_cursor = rows[-1][0] if full else edge
         items = enrich_urls(db, cols, rows)
-        return {'items': items, 'next_after': next_after, 'done': not full and lo >= max_id and partial is None,
-                'scanned_to': next_after, 'max_id': max_id, 'partial': partial, 'open_mode': db.mode,
-                'elapsed': round(time.monotonic() - started, 3)}
+        return {'items': items, 'order': order, 'next': next_cursor, 'done': not full and not more(edge) and partial is None,
+                'max_id': max_id, 'partial': partial, 'open_mode': db.mode, 'elapsed': round(time.monotonic() - started, 3)}
     finally:
         db.close()
 
@@ -1665,11 +1671,11 @@ def parse_url_filters(params):
 
 
 def handle_url_request(handler, url, service):
-    """GET /api/recon/urls?family=&program=&lane=[&host=&q=&test_lane=&status=&params=1&param=&after=&limit=]
+    """GET /api/recon/urls?family=&program=&lane=[&host=&q=&test_lane=&status=&params=1&param=&order=desc|asc&cursor=&limit=]
     and GET /api/recon/url?family=&program=&lane=&id=."""
     from urllib.parse import parse_qs
     listing = url.path == '/api/recon/urls'
-    allowed = {'family', 'program', 'lane'} | ({'host', 'q', 'test_lane', 'status', 'params', 'param', 'after', 'limit'} if listing else {'id'})
+    allowed = {'family', 'program', 'lane'} | ({'host', 'q', 'test_lane', 'status', 'params', 'param', 'cursor', 'order', 'limit'} if listing else {'id'})
     try:
         params = parse_qs(url.query, keep_blank_values=True, strict_parsing=True, max_num_fields=12,
                           encoding='utf-8', errors='strict')
@@ -1686,11 +1692,14 @@ def handle_url_request(handler, url, service):
             return int(raw)
         if listing:
             filters = parse_url_filters(params)
-            after, limit = integer('after', 0, 0, 2 ** 62), integer('limit', 50, 1, URL_PAGE_LIMIT)
+            cursor, limit = integer('cursor', 0, 0, 2 ** 62), integer('limit', 50, 1, URL_PAGE_LIMIT)
+            order = params.get('order', ['desc'])[0]
+            if order not in ('asc', 'desc'):
+                raise ValueError('order')
         else:
             url_id = integer('id', 0, 1, 2 ** 62)
     except (ValueError, UnicodeError):
         return handler.reply(400, {'error': 'invalid_recon_request'})
-    status, body = (service.urls(family, program, lane, filters, after, limit) if listing
+    status, body = (service.urls(family, program, lane, filters, cursor, limit, order) if listing
                     else service.url(family, program, lane, url_id))
     return handler.reply(status, body)

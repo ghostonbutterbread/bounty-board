@@ -67,21 +67,32 @@ test('URL browser: links from counts, keyset pages, filters in the hash, history
   await page.locator('#ri-urls').waitFor();
   await waitRows(page, 50, 'first page');
   const first = await rowIds(page);
-  assert.deepEqual(first, [...first].sort((a, b) => a - b));
+  assert.deepEqual(first, [...first].sort((a, b) => b - a), 'newest first by default');
+  assert.equal(first[0], 99);
   await page.locator('[data-ru-page="next"]').click();
   await page.waitForFunction(() => /[?&]ua=\d+/.test(location.hash));
-  await until(async () => (await rowIds(page))[0] > first[first.length - 1], 'second page starts after the first');
+  await until(async () => (await rowIds(page))[0] < first[first.length - 1], 'second page continues below the first');
   const second = await rowIds(page);
   assert.equal(second.length, 49);
   assert.ok(!second.some(id => first.includes(id)), 'no overlap between pages');
   await page.locator('[data-ru-page="prev"]').click();
   await until(async () => (await rowIds(page))[0] === first[0], 'previous page');
+  // Oldest first: a toggle kept in the hash.
+  await page.locator('[data-ru-filters] input[name=order]').check();
+  await page.waitForFunction(() => location.hash.includes('uo=asc') && !/[?&]ua=/.test(location.hash));
+  await until(async () => (await rowIds(page))[0] === 1, 'oldest first');
+  assert.deepEqual(await rowIds(page), [...await rowIds(page)].sort((a, b) => a - b));
+  await page.locator('[data-ru-filters] input[name=order]').uncheck();
+  await page.waitForFunction(() => !location.hash.includes('uo=asc'));
+  await until(async () => (await rowIds(page))[0] === 99, 'newest first again');
 
   // A host row opens its URLs; the history of a tested URL links its report evidence.
   await page.locator('tr[data-ri-host="app.example.test"] td.ri-host a[data-ri-urls]').click();
   await page.waitForFunction(() => location.hash.includes('uh=app.example.test'));
   await waitRows(page, 50, 'host page 1');
   assert.equal(await page.locator('[data-ru-filters] input[name=host]').inputValue(), 'app.example.test');
+  await page.locator('[data-ru-filters] select[name=status]').selectOption('surface_reviewed');
+  await waitRows(page, 1, 'the surface-reviewed URL');
   const tested = rows(page).filter({hasText: 'Surface reviewed'}).first();
   const testedId = await tested.getAttribute('data-ru-row');
   await tested.locator(`[data-ru-history="${testedId}"]`).click();
@@ -89,7 +100,20 @@ test('URL browser: links from counts, keyset pages, filters in the hash, history
   await history.waitFor();
   assert.match(await history.innerText(), /reflected safely/);
   assert.equal(await history.locator('a', {hasText: 'reports/xss-notes.md'}).first().getAttribute('href'), '#/programs/web_bounty%2Facme-demo/web/reports/xss-notes.md');
+  // History columns do not run together: the parameter and the family sit on their own line
+  // under the lane and the skill, and cells keep the Recon table padding.
+  const layout = await history.locator('.ru-history-table').first().evaluate(table => {
+    const cells = [...table.querySelectorAll('tbody tr:first-child td')];
+    const sub = [...table.querySelectorAll('.ru-sub-value')];
+    return {padding: cells.map(c => parseFloat(getComputedStyle(c).paddingLeft)), subs: sub.map(s => ({display: getComputedStyle(s).display, top: s.getBoundingClientRect().top, cellTop: s.parentElement.getBoundingClientRect().top}))};
+  });
+  assert.ok(layout.padding.every(px => px >= 12), `cell padding ${layout.padding}`);
+  assert.ok(layout.subs.length >= 2, 'parameter and family sub-values');
+  assert.ok(layout.subs.every(s => s.display === 'block' && s.top > s.cellTop + 10), JSON.stringify(layout.subs));
   await shot('recon-urls-light.png');
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  await shot('recon-urls-history-dark.png', page.locator('#ri-urls'));
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
 
   // Filters: status, has parameters, parameter name. All in the hash and kept on reload.
   await page.locator('[data-ru-filters] select[name=status]').selectOption('untested');
@@ -108,6 +132,9 @@ test('URL browser: links from counts, keyset pages, filters in the hash, history
   await until(async () => (await rows(page).count()) > 0 && (await page.locator('tr[data-ru-row] .ru-path').allInnerTexts()).every(t => t.includes('next=')), 'next rows');
 
   // Mark one URL: BBH url_ingest mark runs with the mapped arguments; the row and the summary update.
+  // (static.example.test URLs are unique in the synthetic index, as BBH's url_hash keeps them.)
+  await page.goto(programUrl(origin, '&u=1&uh=static.example.test&un=next'));
+  await waitRows(page, 1, 'static next row');
   const target = rows(page).first();
   const targetId = Number(await target.getAttribute('data-ru-row'));
   const targetUrl = await page.evaluate(id => window.BoardReconUrls && document.querySelector(`tr[data-ru-row="${id}"] .ru-path`).textContent, targetId);
@@ -122,7 +149,7 @@ test('URL browser: links from counts, keyset pages, filters in the hash, history
   await until(async () => (await page.locator(`tr[data-ru-row="${targetId}"] .ru-result.is-ok`).count()) === 1, 'row marked');
   const call = calls().at(-1);
   assert.deepEqual(call.slice(0, 3), ['agents/url_ingest.py', 'mark', 'acme-demo']);
-  assert.ok(call[3].startsWith('--url=https://app.example.test/') && call[3].endsWith(targetUrl), call[3]);
+  assert.ok(call[3].startsWith('--url=https://static.example.test/') && call[3].endsWith(targetUrl), call[3]);
   assert.deepEqual(call.slice(4), ['--lane=open-redirect', '--status=deep_reviewed', '--agent-id=bounty-board', '--param=next', '--param-location=query', '--notes=checked with an owned account']);
   assert.match(await page.locator(`tr[data-ru-row="${targetId}"] .ru-lanes`).innerText(), /open-redirect\s*next\s*Deep reviewed/);
   const testedTile = page.locator('[data-ri-depth] .ri-stat').filter({hasText: 'Tested URLs'});

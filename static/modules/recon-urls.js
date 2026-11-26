@@ -6,7 +6,7 @@
  * recon-intel.js owns the #/recon hash (filters live there, so a filtered list
  * can be bookmarked) and renders the section frame; this module fills it:
  * BoardReconUrls.update(node, opts) with opts = {ctx, program, programName, lane,
- * filters, after, hrefWith(filters, after), canMark, markOff}. State (rows, the
+ * filters, cursor, hrefWith(filters, cursor), canMark, markOff}. filters.order 'asc' lists oldest first; the default is newest first. State (rows, the
  * open history rows, the selection and a running bulk mark) lives here, so the
  * view's periodic repaints never lose it.
  * Target data: URLs and hosts are escaped; nothing is fetched from a target;
@@ -26,15 +26,17 @@
   const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\ufeff]/;
 
   // ---- pure helpers (exported for Node tests) --------------------------------
-  const EMPTY = {host: '', q: '', lane: '', status: '', params: false, param: ''};
+  const EMPTY = {host: '', q: '', lane: '', status: '', params: false, param: '', order: ''};
   function cleanFilters(f) {
     const text = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, n);
-    const out = {host: text(f?.host, 300).trim(), q: text(f?.q, 300), lane: '', status: '', params: f?.params === true || f?.params === '1', param: text(f?.param, 200).trim()};
+    const out = {host: text(f?.host, 300).trim(), q: text(f?.q, 300), lane: '', status: '', params: f?.params === true || f?.params === '1', param: text(f?.param, 200).trim(),
+      order: f?.order === 'asc' ? 'asc' : ''};
     if (/^[a-z][a-z0-9-]{0,39}$/.test(String(f?.lane || ''))) out.lane = f.lane;
     if (STATUSES.includes(f?.status)) out.status = f.status;
     return out;
   }
-  function apiQuery(program, lane, filters, after = 0, limit = PAGE) {
+  // Keyset cursor: ids below it (newest first, the default) or above it (filters.order 'asc').
+  function apiQuery(program, lane, filters, cursor = 0, limit = PAGE) {
     const f = cleanFilters(filters);
     const params = new URLSearchParams({family: 'web_bounty', program, lane});
     if (f.host) params.set('host', f.host);
@@ -43,7 +45,8 @@
     if (f.status) params.set('status', f.status);
     if (f.params) params.set('params', '1');
     if (f.param) params.set('param', f.param);
-    if (after > 0) params.set('after', String(after));
+    params.set('order', f.order === 'asc' ? 'asc' : 'desc');
+    if (cursor > 0) params.set('cursor', String(cursor));
     params.set('limit', String(limit));
     return params.toString();
   }
@@ -80,13 +83,13 @@
     return Number.isFinite(t) ? `<time datetime="${esc(new Date(t).toISOString())}" title="${esc(new Date(t).toISOString())}">${esc(ui().relativeTime(t / 1000))}</time>` : '<span class="muted">-</span>';
   };
   const statusBadge = status => `<span class="badge ${STATUS_KIND[status] ?? ''}">${esc(STATUS_LABEL[status] || status || 'unknown')}</span>`;
-  const keyOf = o => JSON.stringify([o.program, o.lane, cleanFilters(o.filters), o.after || 0]);
+  const keyOf = o => JSON.stringify([o.program, o.lane, cleanFilters(o.filters), o.cursor || 0]);
 
   async function fetchPage() {
     const mine = ++st.seq, o = st.opts;
     st.loading = true; paint();
     try {
-      const response = await fetch(`/api/recon/urls?${apiQuery(o.programName, o.lane, o.filters, o.after)}`, {cache: 'no-store'});
+      const response = await fetch(`/api/recon/urls?${apiQuery(o.programName, o.lane, o.filters, o.cursor)}`, {cache: 'no-store'});
       const body = await response.json().catch(() => ({}));
       if (mine !== st.seq) return;
       if (response.status === 503) { st.error = 'Another URL query is running. Retrying.'; setTimeout(() => { if (mine === st.seq) fetchPage(); }, 1200); return; }
@@ -116,7 +119,8 @@
       <label>Status<select name="status"><option value="">Any status</option>${STATUSES.map(s => `<option value="${s}"${s === f.status ? ' selected' : ''}>${esc(STATUS_LABEL[s])}</option>`).join('')}</select></label>
       <label>Parameter<input name="param" type="search" value="${esc(f.param)}" placeholder="name" autocomplete="off" spellcheck="false"></label>
       <label class="ru-check"><input name="params" type="checkbox"${f.params ? ' checked' : ''}> Has parameters</label>
-      ${Object.values(f).some(Boolean) ? `<a class="link-button" href="${esc(o.hrefWith(EMPTY, 0))}" data-ru-clear>Clear filters</a>` : ''}
+      <label class="ru-check"><input name="order" type="checkbox"${f.order === 'asc' ? ' checked' : ''}> Oldest first</label>
+      ${Object.entries(f).some(([k, v]) => k !== 'order' && v) ? `<a class="link-button" href="${esc(o.hrefWith({...EMPTY, order: f.order}, 0))}" data-ru-clear>Clear filters</a>` : ''}
     </form>`;
   }
   function statusLine(o) {
@@ -125,8 +129,9 @@
     const bits = [];
     if (p && !p.error) {
       const n = p.items.length;
-      bits.push(n ? `Showing ${n} ${n === 1 ? 'URL' : 'URLs'}${o.after ? ` after id ${o.after}` : ''}` : (p.done ? 'No URLs match' : 'No matches in this stretch yet'));
-      if (!p.done && p.partial) bits.push(`searched ids up to ${p.scanned_to} of ${p.max_id}; use Next to keep searching`);
+      const oldest = cleanFilters(o.filters).order === 'asc';
+      bits.push(n ? `Showing ${n} ${n === 1 ? 'URL' : 'URLs'}, ${oldest ? 'oldest' : 'newest'} first${o.cursor ? `, ${oldest ? 'after' : 'before'} id ${o.cursor}` : ''}` : (p.done ? 'No URLs match' : 'No matches in this stretch yet'));
+      if (!p.done && p.partial) bits.push(`searched ${oldest ? 'up' : 'down'} to id ${p.next} of ${p.max_id}; use Next to keep searching`);
       if (st.loading) bits.push('updating');
     }
     return `${esc(bits.join(' · '))}${st.error ? ` <span class="ri-err" role="alert">${esc(st.error)}</span>` : ''}`;
@@ -159,11 +164,11 @@
     const h = st.history.get(id);
     if (!h) return '<div class="state">Loading history…</div>';
     if (h.error) return `<div class="state">${esc(h.error)}</div>`;
-    const runs = h.test_runs.map(r => `<tr><td class="date">${isoWhen(r.completed_at)}</td><td>${esc(r.lane)}${r.param_key ? `<span class="id">param ${esc(r.param_key)}</span>` : ''}</td><td>${statusBadge(r.status)}</td><td>${esc(r.skill || '-')}<span class="id">${esc(r.test_family || '')}</span></td><td>${esc(r.agent_id || '-')}</td><td><span class="ri-notes" title="${esc(r.notes || r.response_summary || '')}">${esc(r.notes || r.response_summary || '')}</span></td><td>${evidence(o, r.evidence_path)}</td></tr>`).join('');
-    const obs = h.observations.map(r => `<tr><td class="date">${isoWhen(r.created_at)}</td><td>${esc(r.lane)}${r.param_key ? `<span class="id">param ${esc(r.param_key)}</span>` : ''}</td><td>${statusBadge(r.status)}</td><td>${esc(r.agent_id || '-')}</td><td><span class="ri-notes" title="${esc(r.notes || '')}">${esc(r.notes || '')}</span></td><td>${evidence(o, r.evidence_path)}</td></tr>`).join('');
+    const runs = h.test_runs.map(r => `<tr><td class="date">${isoWhen(r.completed_at)}</td><td>${esc(r.lane)}${r.param_key ? `<span class="ru-sub-value">param ${esc(r.param_key)}</span>` : ''}</td><td>${statusBadge(r.status)}</td><td>${esc(r.skill || '-')}${r.test_family ? `<span class="ru-sub-value">${esc(r.test_family)}</span>` : ''}</td><td>${esc(r.agent_id || '-')}</td><td><span class="ri-notes" title="${esc(r.notes || r.response_summary || '')}">${esc(r.notes || r.response_summary || '')}</span></td><td>${evidence(o, r.evidence_path)}</td></tr>`).join('');
+    const obs = h.observations.map(r => `<tr><td class="date">${isoWhen(r.created_at)}</td><td>${esc(r.lane)}${r.param_key ? `<span class="ru-sub-value">param ${esc(r.param_key)}</span>` : ''}</td><td>${statusBadge(r.status)}</td><td>${esc(r.agent_id || '-')}</td><td><span class="ri-notes" title="${esc(r.notes || '')}">${esc(r.notes || '')}</span></td><td>${evidence(o, r.evidence_path)}</td></tr>`).join('');
     return `<div class="ru-history" data-ru-history-panel="${id}"><p class="hint ru-full-url ri-mono">${esc(h.url)}</p>
-      <h4>Test runs <span class="count">${h.test_runs.length}</span></h4>${runs ? `<div class="ri-scroll"><table class="ri-table"><thead><tr><th class="date">When</th><th>Lane</th><th>Status</th><th>Skill / family</th><th>Agent</th><th>Notes</th><th>Evidence</th></tr></thead><tbody>${runs}</tbody></table></div>` : '<p class="hint">No test runs recorded.</p>'}
-      <h4>Latest status per lane <span class="count">${h.observations.length}</span></h4>${obs ? `<div class="ri-scroll"><table class="ri-table"><thead><tr><th class="date">When</th><th>Lane</th><th>Status</th><th>Agent</th><th>Notes</th><th>Evidence</th></tr></thead><tbody>${obs}</tbody></table></div>` : '<p class="hint">No observations recorded.</p>'}
+      <h4>Test runs <span class="count">${h.test_runs.length}</span></h4>${runs ? `<div class="ri-scroll"><table class="ri-table ru-history-table"><thead><tr><th class="date">When</th><th>Lane</th><th>Status</th><th>Skill / family</th><th>Agent</th><th>Notes</th><th>Evidence</th></tr></thead><tbody>${runs}</tbody></table></div>` : '<p class="hint">No test runs recorded.</p>'}
+      <h4>Latest status per lane <span class="count">${h.observations.length}</span></h4>${obs ? `<div class="ri-scroll"><table class="ri-table ru-history-table"><thead><tr><th class="date">When</th><th>Lane</th><th>Status</th><th>Agent</th><th>Notes</th><th>Evidence</th></tr></thead><tbody>${obs}</tbody></table></div>` : '<p class="hint">No observations recorded.</p>'}
       ${h.truncated ? '<p class="hint">Showing the newest 200 of each.</p>' : ''}</div>`;
   }
   function bulkHtml(o) {
@@ -187,9 +192,9 @@
     if (!p || p.error) return '';
     const prev = st.prev.length ? st.prev[st.prev.length - 1] : null;
     return `<nav class="ru-pager" aria-label="URL pages">
-      ${o.after ? `<a class="button sm" href="${esc(o.hrefWith(o.filters, 0))}" data-ru-page="first">${icon('angle-double-left')}<span>First</span></a>` : ''}
-      ${prev != null && o.after ? `<a class="button sm" href="${esc(o.hrefWith(o.filters, prev))}" data-ru-page="prev">${icon('angle-left')}<span>Previous</span></a>` : ''}
-      ${p.done ? '<span class="hint">End of list</span>' : `<a class="button sm" href="${esc(o.hrefWith(o.filters, p.next_after))}" data-ru-page="next"><span>Next</span>${icon('angle-right')}</a>`}</nav>`;
+      ${o.cursor ? `<a class="button sm" href="${esc(o.hrefWith(o.filters, 0))}" data-ru-page="first">${icon('angle-double-left')}<span>First</span></a>` : ''}
+      ${prev != null && o.cursor ? `<a class="button sm" href="${esc(o.hrefWith(o.filters, prev))}" data-ru-page="prev">${icon('angle-left')}<span>Previous</span></a>` : ''}
+      ${p.done ? '<span class="hint">End of list</span>' : `<a class="button sm" href="${esc(o.hrefWith(o.filters, p.next))}" data-ru-page="next"><span>Next</span>${icon('angle-right')}</a>`}</nav>`;
   }
   function html(o) {
     const p = st.page;
@@ -199,7 +204,7 @@
     const table = items.length ? `<div class="table-wrap ru-table-wrap"><table class="ri-table ru-table"><thead><tr>${head}<th>URL</th><th>Status by lane</th><th class="num">Tests</th><th class="date">First seen</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${items.map(r => rowHtml(r, o)).join('')}</tbody></table></div>`
       : `<div class="state">${st.loading ? 'Loading URLs…' : p && !p.error ? (p.done ? 'No URLs match these filters.' : 'No matches in this stretch of ids. Use Next to keep searching.') : ''}</div>`;
     const off = !o.canMark && o.markOff ? `<p class="hint ru-off">${esc(o.markOff)}</p>` : '';
-    return `<div class="panel-head"><div><h2>URLs</h2><p class="hint">From the URL index of this lane, oldest id first. Filters stay in the link.</p>${off}</div><a class="button sm ghost" href="${esc(o.closeHref)}" data-ru-close>${icon('times')}<span>Close</span></a></div>
+    return `<div class="panel-head"><div><h2>URLs</h2><p class="hint">From the URL index of this lane. Filters and the page stay in the link.</p>${off}</div><a class="button sm ghost" href="${esc(o.closeHref)}" data-ru-close>${icon('times')}<span>Close</span></a></div>
       <div class="panel-pad ru-controls">${filtersHtml(o)}</div>
       <p class="hint ru-status" role="status" data-ru-status>${statusLine(o)}</p>${bulkHtml(o)}${table}${pagerHtml(o)}`;
   }
@@ -219,7 +224,8 @@
   let filterTimer = 0;
   function readFilters(form) {
     const v = name => form.elements[name];
-    return cleanFilters({host: v('host').value, q: v('q').value, lane: v('lane').value, status: v('status').value, params: v('params').checked, param: v('param').value});
+    return cleanFilters({host: v('host').value, q: v('q').value, lane: v('lane').value, status: v('status').value, params: v('params').checked, param: v('param').value,
+      order: v('order').checked ? 'asc' : ''});
   }
   function onInput(event) {
     const form = event.target.closest('[data-ru-filters]'); if (!form) return;
@@ -344,7 +350,7 @@
   function onLinkClick(event) {
     const page = event.target.closest('[data-ru-page]');
     if (page && st.opts) {
-      if (page.dataset.ruPage === 'next') st.prev.push(st.opts.after || 0);
+      if (page.dataset.ruPage === 'next') st.prev.push(st.opts.cursor || 0);
       else if (page.dataset.ruPage === 'prev') st.prev.pop();
       else st.prev = [];
     }

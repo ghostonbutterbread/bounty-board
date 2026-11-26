@@ -19,7 +19,7 @@
   const HOST_SORTS = ['host', 'urls', 'routes', 'param_urls', 'js_files', 'js_bytes', 'test_runs', 'tested_urls', 'findings', 'coverage_reviewed', 'last_test', 'surface_score'];
   const DEFAULTS = {p: '', lane: '', sort: 'urls', dir: 'desc', q: '', hsort: 'surface_score', hdir: 'desc', hq: '', under: false, hint: '',
     // URL browser (recon-urls.js): open flag, filters and keyset cursor.
-    u: false, uh: '', uq: '', ul: '', us: '', up: false, un: '', ua: 0};
+    u: false, uh: '', uq: '', ul: '', us: '', up: false, un: '', ua: 0, uo: ''};
   const URL_STATUSES = ['untested', 'tested', 'discovered', 'surface_reviewed', 'deep_reviewed', 'validated_signal', 'dismissed'];
 
   // ---- pure helpers (exported for Node tests) ------------------------------
@@ -48,6 +48,7 @@
     if (URL_STATUSES.includes(params.get('us'))) out.us = params.get('us');
     out.up = params.get('up') === '1';
     out.un = clean(params.get('un')).slice(0, 200);
+    if (params.get('uo') === 'asc') out.uo = 'asc'; // oldest first; newest first is the default
     const ua = params.get('ua') || '';
     if (/^[0-9]{1,15}$/.test(ua)) out.ua = Number(ua);
     return out;
@@ -65,6 +66,7 @@
         params.set('u', '1');
         for (const [key, value] of [['uh', state.uh], ['uq', state.uq], ['ul', state.ul], ['us', state.us], ['un', state.un]]) if (value) params.set(key, value);
         if (state.up) params.set('up', '1');
+        if (state.uo === 'asc') params.set('uo', 'asc');
         if (state.ua > 0) params.set('ua', String(state.ua));
       }
     } else {
@@ -128,8 +130,9 @@
     return (urls + 20 * js) / (1 + runs);
   };
   // URL browser filters <-> hash state.
-  const urlFilters = s => ({host: s.uh, q: s.uq, lane: s.ul, status: s.us, params: s.up, param: s.un});
-  const urlState = (f, after = 0) => ({u: true, uh: f.host || '', uq: f.q || '', ul: f.lane || '', us: f.status || '', up: !!f.params, un: f.param || '', ua: after});
+  const urlFilters = s => ({host: s.uh, q: s.uq, lane: s.ul, status: s.us, params: s.up, param: s.un, order: s.uo});
+  const urlState = (f, cursor = 0) => ({u: true, uh: f.host || '', uq: f.q || '', ul: f.lane || '', us: f.status || '', up: !!f.params, un: f.param || '',
+    uo: f.order === 'asc' ? 'asc' : '', ua: cursor});
   const helpers = {parseQuery, buildQuery, urlFilters, urlState, sortRows, fmtNum, fmtBytes, shellQuote, isCopySafe, safeHttpUrl, curlCommand, bbhNext, bbhStatus, metric, approx, depthGap};
   if (typeof module === 'object' && module.exports) { module.exports = helpers; return; }
   root.BoardReconIntel = helpers;
@@ -523,9 +526,9 @@
     urlsSlot.replaceWith(node);
     const cap = ctx.state.data?.capabilities?.ledger_actions?.url_mark;
     const lane = s.lane || d.lane;
-    window.BoardReconUrls.update(node, {ctx, program: s.p, programName: programName(s.p), lane, filters: urlFilters(s), after: s.ua,
-      hrefWith: (filters, after) => href({...s, ...urlState(filters, after)}), closeHref: href({...s, ...urlState({}, 0), u: false}),
-      onFilters: (filters, after) => { go({...urlState(filters, after)}, false); paint(); },
+    window.BoardReconUrls.update(node, {ctx, program: s.p, programName: programName(s.p), lane, filters: urlFilters(s), cursor: s.ua,
+      hrefWith: (filters, cursor) => href({...s, ...urlState(filters, cursor)}), closeHref: href({...s, ...urlState({}, 0), u: false}),
+      onFilters: (filters, cursor) => { go({...urlState(filters, cursor)}, false); paint(); },
       canMark: !!cap?.enabled, markOff: cap?.enabled ? '' : (window.BoardFindingActions?.OFF_HINT || 'Editing is off: the backend has not enabled the BBH writer.')});
   }
   function mountView(host) {

@@ -2316,7 +2316,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     return None
                 recon.refresh_url_index(family, program, lane)
                 history = ri.url_history(db, url_id, recon.budget)
-                page = ri.list_urls(db, {}, url_id - 1, 1, recon.budget)
+                page = ri.list_urls(db, {}, url_id - 1, 1, recon.budget, 'asc')
                 item = page['items'][0] if page['items'] and page['items'][0]['id'] == url_id else None
                 return 200, {'url': history, 'item': item}
             return self.run_writer(argv, verify)

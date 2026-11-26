@@ -140,21 +140,51 @@ class Base(unittest.TestCase):
 
 
 class UrlListTests(Base):
-    def test_keyset_pages_cover_every_url_once(self):
-        seen, after, pages = [], 0, 0
+    def walk(self, order, **filters):
+        seen, cursor, pages = [], 0, 0
         while True:
-            status, body = self.urls(after=after, limit=17)
+            status, body = self.urls(order=order, cursor=cursor, limit=17, **filters)
             self.assertEqual(status, 200)
+            self.assertEqual(body['order'], order)
             seen += [i['id'] for i in body['items']]
             pages += 1
             if body['done']:
-                break
-            after = body['next_after']
+                return seen, pages
+            cursor = body['next']
+
+    def test_keyset_pages_cover_every_url_once(self):
+        seen, pages = self.walk('asc')
         self.assertEqual(seen, sorted(set(seen)))
         self.assertEqual(len(seen), 98)
         self.assertEqual(pages, 6)
         item = self.urls(limit=1)[1]['items'][0]
         self.assertEqual(set(item), {'id', 'url', 'host', 'path', 'params', 'first_seen', 'last_seen', 'lanes', 'tests', 'last_test', 'unsafe_chars'})
+
+    def test_newest_first_by_default_and_both_directions_cover_every_url_once(self):
+        first = self.urls(limit=5)[1]
+        self.assertEqual(first['order'], 'desc')
+        self.assertEqual([i['id'] for i in first['items']], [98, 97, 96, 95, 94])
+        down, pages = self.walk('desc')
+        self.assertEqual(down, sorted(set(down), reverse=True))
+        self.assertEqual(len(down), 98)
+        self.assertEqual(pages, 6)
+        up, _ = self.walk('asc')
+        self.assertEqual(sorted(up), sorted(down))
+
+    def test_id_gaps_and_filters_in_both_directions(self):
+        db = sqlite3.connect(self.db)
+        db.execute('DELETE FROM urls WHERE id BETWEEN 10 AND 40 OR id IN (2, 77, 98)')
+        db.commit()
+        expected = [r[0] for r in db.execute('SELECT id FROM urls ORDER BY id')]
+        hosted = [r[0] for r in db.execute("SELECT id FROM urls WHERE host = 'app.example.test' ORDER BY id")]
+        db.close()
+        for order in ('asc', 'desc'):
+            with self.subTest(order=order):
+                seen, _ = self.walk(order)
+                self.assertEqual(seen, expected if order == 'asc' else expected[::-1])
+                seen, _ = self.walk(order, host='app.example.test')
+                self.assertEqual(sorted(seen), hosted)
+                self.assertEqual(len(seen), len(set(seen)))
 
     def test_filters(self):
         ids = lambda **f: [i['id'] for i in self.urls(limit=100, **f)[1]['items']]
@@ -190,7 +220,9 @@ class UrlListTests(Base):
     def test_rejections(self):
         self.assertEqual(self.urls(status='bogus')[0], 400)
         self.assertEqual(self.urls(limit='500')[0], 400)
-        self.assertEqual(self.urls(after='-1')[0], 400)
+        self.assertEqual(self.urls(cursor='-1')[0], 400)
+        self.assertEqual(self.urls(order='sideways')[0], 400)
+        self.assertEqual(self.urls(after='5')[0], 400)
         self.assertEqual(self.urls(offset='10')[0], 400)
         self.assertEqual(self.urls(test_lane='X;1')[0], 400)
         self.assertEqual(self.request('GET', '/api/recon/urls', {'family': 'web_bounty', 'program': '../etc', 'lane': 'web'})[0], 400)
@@ -239,26 +271,44 @@ class LargeIndexTests(unittest.TestCase):
             started = time.monotonic()
             # Small windows and a tiny budget force the page to stop early.
             with mock.patch.object(ri, 'URL_SCAN_FIRST', 100), mock.patch.object(ri, 'URL_SCAN_MAX', 200):
-                page = ri.list_urls(path, {'q': 'NO-SUCH-TEXT'}, 0, 50, budget=0.002)
+                page = ri.list_urls(path, {'q': 'NO-SUCH-TEXT'}, 0, 50, budget=0.002, order='asc')
             self.assertLess(time.monotonic() - started, 2.0)
             self.assertEqual(page['items'], [])
             self.assertFalse(page['done'])
             self.assertIn(page['partial'], ('budget', 'timeout'))
-            self.assertLess(page['next_after'], 400_000)
-            cursor, rounds = page['next_after'], 0
+            self.assertLess(page['next'], 400_000)
+            cursor, rounds = page['next'], 0
+            while True:
+                rounds += 1
+                page = ri.list_urls(path, {'q': 'NO-SUCH-TEXT'}, cursor, 50, budget=2.0, order='asc')
+                if page['done'] or rounds > 50:
+                    break
+                self.assertGreaterEqual(page['next'], cursor)
+                cursor = page['next']
+            self.assertTrue(page['done'])
+            # An unfiltered page is one small window and returns at once.
+            started = time.monotonic()
+            page = ri.list_urls(path, {}, 123_456, 50, order='asc')
+            self.assertEqual([i['id'] for i in page['items']], list(range(123_457, 123_507)))
+            self.assertLess(time.monotonic() - started, 2.0)
+            # Newest first: the same bounded windows going down, resumable to the start.
+            with mock.patch.object(ri, 'URL_SCAN_FIRST', 100), mock.patch.object(ri, 'URL_SCAN_MAX', 200):
+                page = ri.list_urls(path, {'q': 'NO-SUCH-TEXT'}, 0, 50, budget=0.002)
+            self.assertEqual((page['order'], page['done']), ('desc', False))
+            self.assertGreater(page['next'], 1)
+            cursor, rounds = page['next'], 0
             while True:
                 rounds += 1
                 page = ri.list_urls(path, {'q': 'NO-SUCH-TEXT'}, cursor, 50, budget=2.0)
                 if page['done'] or rounds > 50:
                     break
-                self.assertGreaterEqual(page['next_after'], cursor)
-                cursor = page['next_after']
+                self.assertLessEqual(page['next'], cursor)
+                cursor = page['next']
             self.assertTrue(page['done'])
-            # An unfiltered page is one small window and returns at once.
-            started = time.monotonic()
             page = ri.list_urls(path, {}, 123_456, 50)
-            self.assertEqual([i['id'] for i in page['items']], list(range(123_457, 123_507)))
-            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertEqual([i['id'] for i in page['items']], list(range(123_455, 123_405, -1)))
+            top = ri.list_urls(path, {}, 0, 3)
+            self.assertEqual([i['id'] for i in top['items']], [400_000, 399_999, 399_998])
             host = ri.list_urls(path, {'host': 'h7.example.test'}, 0, 20)
             self.assertTrue(all(i['host'] == 'h7.example.test' for i in host['items']))
             self.assertEqual(len(host['items']), 20)
