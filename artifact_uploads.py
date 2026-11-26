@@ -19,6 +19,7 @@ writer makes ``linkat`` fail and the next suffix is tried.
 
 Contract: docs/integrations/artifact-uploads.md.
 """
+import ctypes
 import errno
 import os
 import re
@@ -108,8 +109,10 @@ def sanitize_name(raw):
     stem = name[:len(name) - len(ext)] if ext else name
     if not stem:
         stem, ext = name, ''
-    if _WINDOWS_RESERVED.fullmatch(stem.split('.')[0]):
-        stem += '_'  # CON, NUL, COM1... cannot exist on Windows sync peers
+    head, dot, rest = stem.partition('.')
+    if _WINDOWS_RESERVED.fullmatch(head.rstrip(' ')):
+        # CON, NUL, COM1... (before the first dot) cannot exist on Windows sync peers.
+        stem = head.rstrip(' ') + '_' + dot + rest
     return _fit(stem, ext)
 
 
@@ -140,8 +143,26 @@ def candidates(name):
         yield _fit(stem, ext, f'-{number}')
 
 
+def _fold(name):
+    return unicodedata.normalize('NFC', name).casefold()
+
+
 def _taken(dir_fd):
-    return {entry.casefold() for entry in os.listdir(dir_fd)}
+    return {_fold(entry) for entry in os.listdir(dir_fd)}
+
+
+def _rename_noreplace(dir_fd, source, target):
+    """renameat2(RENAME_NOREPLACE): fails with FileExistsError instead of replacing."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        fn = libc.renameat2
+    except AttributeError as exc:
+        raise OSError(errno.ENOSYS, 'renameat2 unavailable') from exc
+    fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    fn.restype = ctypes.c_int
+    if fn(dir_fd, os.fsencode(source), dir_fd, os.fsencode(target), 1):  # RENAME_NOREPLACE
+        err = ctypes.get_errno()
+        raise (FileExistsError if err == errno.EEXIST else OSError)(err, os.strerror(err))
 
 
 def _place(uploads, dir_fd, staged, name):
@@ -149,23 +170,32 @@ def _place(uploads, dir_fd, staged, name):
     with uploads.place_lock:
         taken = _taken(dir_fd)
         for candidate in candidates(name):
-            if candidate.casefold() in taken:
+            if _fold(candidate) in taken:
                 continue
             try:
                 os.link(staged, candidate, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
                 return candidate
             except FileExistsError:
-                taken.add(candidate.casefold())  # created meanwhile by another writer
+                taken.add(_fold(candidate))  # created meanwhile by another writer
             except OSError as error:
                 if error.errno not in _LINK_UNSUPPORTED:
                     raise
-                # No hard links on this filesystem: check again and rename in place.
-                # Another process could create the same name between check and
-                # rename; this process's own uploads are serialized by the lock.
-                if candidate.casefold() in _taken(dir_fd):
-                    taken.add(candidate.casefold())
+                # No hard links on this filesystem: check again, then rename in
+                # place with RENAME_NOREPLACE. Only where that is unsupported too
+                # does a plain rename remain, which could replace a file another
+                # process creates in the instant after the check.
+                if _fold(candidate) in _taken(dir_fd):
+                    taken.add(_fold(candidate))
                     continue
-                os.rename(staged, candidate, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                try:
+                    _rename_noreplace(dir_fd, staged, candidate)
+                except FileExistsError:
+                    taken.add(_fold(candidate))
+                    continue
+                except OSError as rename_error:
+                    if rename_error.errno not in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+                        raise
+                    os.rename(staged, candidate, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
                 return candidate
     raise UploadError(409, 'name_unavailable')
 
@@ -202,7 +232,10 @@ def store(uploads, dir_fd, name, length, rfile):
 
 
 def _selector(handler, families):
-    params = parse_qs(urlsplit(handler.path).query, keep_blank_values=True, max_num_fields=8)
+    try:
+        params = parse_qs(urlsplit(handler.path).query, keep_blank_values=True, max_num_fields=8)
+    except ValueError as error:  # too many fields
+        raise ra.ArtifactError('invalid selector') from error
     bound = 'root_instance' in params
     needed = {'family', 'program', 'lane', 'path', 'name'} | ({'root_instance'} if bound else set())
     if set(params) != needed or any(len(v) != 1 for v in params.values()):

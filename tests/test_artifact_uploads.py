@@ -182,7 +182,8 @@ class GateTests(Fixture):
                       urlencode({**SELECT, 'program': '..', 'path': F1, 'name': 'a'}),
                       urlencode({**SELECT, 'family': 'nope', 'path': F1, 'name': 'a'}),
                       urlencode({**SELECT, 'path': '../F1/REPORT.md', 'name': 'a'}),
-                      urlencode({**SELECT, 'path': 'F1/missing.md', 'name': 'a'})):
+                      urlencode({**SELECT, 'path': 'F1/missing.md', 'name': 'a'}),
+                      urlencode({**SELECT, 'path': F1, 'name': 'a', 'root_instance': '0'}) + '&x=1&y=2&z=3'):
             with self.subTest(query):
                 status, _, body = self.upload('a', b'x', query=query)
                 self.assertEqual((status, body), (404, {'error': 'artifact_not_found_or_unavailable'}))
@@ -347,6 +348,26 @@ class StoreTests(Fixture):
         self.assertEqual((self.folder / 'fallback.txt').read_bytes(), b'old')
         self.assertEqual(self.staged(), [])
 
+    def test_rename_fallback_never_replaces(self):
+        # No hard links and an outside writer creates the name after the check.
+        def racing(dir_fd, source, target):
+            if target == 'late.txt':  # the outside writer wins the first name only
+                (self.folder / target).write_bytes(b'outside writer')
+            return original(dir_fd, source, target)
+        original = au._rename_noreplace
+        with mock.patch.object(au.os, 'link', side_effect=OSError(18, 'cross-device')), \
+                mock.patch.object(au, '_rename_noreplace', side_effect=racing):
+            status, _, body = self.upload('late.txt', b'mine')
+        self.assertEqual(status, 201, body)
+        self.assertEqual((self.folder / 'late.txt').read_bytes(), b'outside writer')
+        self.assertNotEqual(body['artifact']['name'], 'late.txt')
+        self.assertEqual((self.folder / body['artifact']['name']).read_bytes(), b'mine')
+
+    def test_nfd_name_on_disk_counts_as_taken(self):
+        (self.folder / 'cafe\u0301.txt').write_bytes(b'nfd')
+        status, _, body = self.upload('caf\u00e9.txt', b'nfc')
+        self.assertEqual(body['artifact']['name'], 'caf\u00e9-2.txt')
+
     def test_short_body_leaves_nothing(self):
         before = tree(self.root)
         target = '/api/report-artifact-upload?' + urlencode({**SELECT, 'path': F1, 'name': 'cut.mp4'})
@@ -397,7 +418,8 @@ class SanitizeTests(unittest.TestCase):
             '../../x.py': 'x.py', 'a\\b.js': 'b.js', 'C:\\Users\\me\\shot.png': 'shot.png', '.env': 'env',
             '_meta': 'meta', '__pycache__': 'pycache__', '...': 'upload', '': 'upload', ' . _ ': 'upload',
             'a\x01b\u202e.txt': 'a_b_.txt', 'line\nbreak.txt': 'line_break.txt', 'what?*.txt': 'what__.txt',
-            'trailing. . ': 'trailing', 'con.txt': 'con_.txt', 'NUL': 'NUL_', 'cafe\u0301.md': 'caf\u00e9.md',
+            'trailing. . ': 'trailing', 'con.txt': 'con_.txt', 'NUL': 'NUL_', 'nul.tar.gz': 'nul_.tar.gz',
+            'COM1.x.png': 'COM1_.x.png', 'CON .txt': 'CON_.txt', 'console.txt': 'console.txt', 'cafe\u0301.md': 'caf\u00e9.md',
             '.png': 'png', 'report.tar.gz': 'report.tar.gz', 'pasted image.png': 'pasted image.png',
         }
         for raw, expected in cases.items():
