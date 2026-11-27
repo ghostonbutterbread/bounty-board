@@ -22,10 +22,12 @@ async function withFixture(mode,fn){
   let browser;
   try {
     const info=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',code=>reject(Error(`fixture exited ${code}`)));let buf='';child.stdout.on('data',d=>{buf+=d;if(buf.includes('\n'))resolve(JSON.parse(buf.split('\n')[0]));});});
-    browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN,args:['--no-sandbox','--disable-dev-shm-usage','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1']});
+    browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN,args:['--no-sandbox','--disable-dev-shm-usage','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE 127.0.0.2']});
     const newPage=async(options={})=>{
       const context=await browser.newContext({viewport:{width:1280,height:900},...options});
       await context.route('**/*',route=>/^127\.0\.0\.\d+$/.test(new URL(route.request().url()).hostname)?route.continue():route.abort());
+      // TEST ONLY: the fixture's "Tailscale address" is the loopback alias 127.0.0.2 (see safeOrigin).
+      await context.addInitScript(()=>{window.__BOARD_PORTS_TEST_TAILNET__='127.0.0.2';});
       const page=await context.newPage();
       page.errors=[];page.on('pageerror',e=>page.errors.push(String(e)));
       return page;
@@ -52,7 +54,8 @@ async function openDrawer(page){
 const get=url=>new Promise((resolve,reject)=>{http.get(url,res=>{let body='';res.on('data',d=>body+=d);res.on('end',()=>resolve({status:res.statusCode,body}));}).on('error',reject);});
 async function shot(page,name){if(shots){fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,name)});}}
 async function theme(page,value){await page.evaluate(v=>{localStorage.setItem('bounty-board-theme',v);document.documentElement.dataset.theme=v;},value);}
-const pill=page=>page.locator('#term-drawer [data-term-slot="ports"] [data-ports-pill]');
+const chips=page=>page.locator('#term-drawer [data-term-slot="ports"] [data-ports-chip]');
+const more=page=>page.locator('#term-drawer [data-term-slot="ports"] [data-ports-more]');
 const popover=page=>page.locator('[data-ports-popover]');
 const rect=(page,selector)=>page.evaluate(s=>{const el=document.querySelector(s);if(!el)return null;const r=el.getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom};},selector);
 function setPorts(info,ports){fs.writeFileSync(info.ports_file,JSON.stringify(ports));}
@@ -61,20 +64,53 @@ async function openSettings(page){
   await page.locator('[data-settings-section="terminal-ports"] [data-ports-tailscale],[data-settings-section="terminal-ports"] [data-ports-disabled]').first().waitFor({timeout:15000});
 }
 const section=page=>page.locator('[data-settings-section="terminal-ports"]');
+// Independent check that the chips add no header row, move nothing, stay on one line inside the drawer.
+async function headerIntact(page){
+  return page.evaluate(()=>{
+    const head=document.querySelector('#term-drawer [data-term-head]'),slot=head.querySelector('[data-term-slot="ports"]');
+    const marks=[...head.querySelectorAll('[data-term-dock],.term-actions,[data-term-sub],[data-term-status]')];
+    const probe=()=>({h:head.offsetHeight,tops:marks.map(e=>Math.round(e.getBoundingClientRect().top))});
+    const withChips=probe();slot.style.display='none';const without=probe();slot.style.display='';
+    const d=document.querySelector('#term-drawer').getBoundingClientRect();
+    const boxes=[...slot.querySelectorAll('[data-ports-chip],[data-ports-more]')].map(c=>c.getBoundingClientRect());
+    const inside=boxes.every(r=>r.left>=d.left-1&&r.right<=d.right+1&&r.width>0);
+    const oneLine=new Set(boxes.map(r=>Math.round(r.top))).size<=1;
+    const others=[...head.querySelectorAll('.term-grip,.term-title,[data-term-status],[data-term-flash],[data-term-dock],[data-term-sub],.term-actions,[data-term-slot]')].filter(el=>el!==slot).map(el=>el.getBoundingClientRect());
+    const clear=boxes.every(r=>others.every(o=>!(o.width>0&&r.left<o.right-1&&o.left<r.right-1&&r.top<o.bottom-1&&o.top<r.bottom-1)));
+    const moreEl=slot.querySelector('[data-ports-more]');
+    return {ok:withChips.h===without.h&&withChips.tops.every((t,i)=>Math.abs(t-without.tops[i])<=1)&&inside&&oneLine&&clear,
+      withChips,without,inside,oneLine,clear,boxes:boxes.map(r=>[Math.round(r.left),Math.round(r.right),Math.round(r.top)]),fit:slot.dataset.portsFit,shown:slot.querySelectorAll('[data-ports-chip]').length,
+      more:moreEl?Number(moreEl.textContent.trim().slice(1)):0,tight:slot.dataset.portsTight};
+  });
+}
+// Viewport position of the middle of buffer cells [col, col+len) on the first line that contains `needle`.
+async function cellOf(page,needle,offset=0){
+  return page.evaluate(([needle,offset])=>{
+    const t=window.BoardTerminal.term,b=t.buffer.active;
+    for(let i=b.length-1;i>=0;i--){
+      const text=b.getLine(i).translateToString(true),col=text.indexOf(needle);
+      if(col<0)continue;
+      const r=document.querySelector('#term-drawer .xterm-screen').getBoundingClientRect();
+      const w=r.width/t.cols,h=r.height/t.rows,row=i-b.viewportY;
+      return {x:r.left+(col+offset+0.5)*w,y:r.top+(row+0.5)*h,w,h};
+    }
+    return null;
+  },[needle,offset]);
+}
 
-test('ports pill and popover follow the sandbox; Tailscale switch round-trips through the server',{timeout:300000},async()=>{
+test('address chips follow the sandbox; Tailscale switch round-trips through the server',{timeout:300000},async()=>{
   await withFixture('tailnet,ports',async info=>{
     const {base,newPage,sandbox_port:sandboxPort}=info;
     const page=await newPage({permissions:CLIP});
     await openReport(page,base);
     await openDrawer(page);
-    assert.equal(await pill(page).count(),0,'no pill without ports');
+    assert.equal(await chips(page).count(),0,'no chip without ports');
     assert.equal(await page.locator('#term-drawer [data-term-slot="ports"]').isHidden(),true);
+    assert.equal(await page.locator('[data-term-strip]').count(),0,'no below-header line');
 
-    // A server starts listening in the sandbox: the pill appears by push, no reload.
+    // A server starts listening in the sandbox: its address appears by push, no reload.
     setPorts(info,[sandboxPort]);
-    await pill(page).waitFor({timeout:15000});
-    assert.equal((await pill(page).textContent()).trim(),'1 port');
+    await chips(page).first().waitFor({timeout:15000});
     const item=(await page.evaluate(()=>window.BoardPorts.ports))[0];
     const [lo,hi]=info.ports_range;
     assert.ok(item.host_port>=lo&&item.host_port<=hi,JSON.stringify(item));
@@ -82,36 +118,31 @@ test('ports pill and popover follow the sandbox; Tailscale switch round-trips th
     assert.equal(item.tailscale_url,null);
     assert.match((await get(item.local_url)).body,/synthetic-preview-ok/,'the host port reaches the sandbox server');
 
-    // Popover, Tailscale off: only the local URL plus the Settings hint.
-    await pill(page).click();
-    await popover(page).waitFor();
-    assert.equal(await pill(page).getAttribute('aria-expanded'),'true');
-    assert.equal(await popover(page).getAttribute('role'),'dialog');
-    assert.equal((await popover(page).locator('.term-ports-port code').textContent()),`:${sandboxPort}`);
-    assert.deepEqual(await popover(page).locator('[data-ports-url]').evaluateAll(as=>as.map(a=>a.textContent)),[item.local_url]);
-    assert.equal(await popover(page).locator('.term-ports-where').count(),0);
-    for(const sel of ['[data-ports-url]','[data-ports-open]']){
-      const a=popover(page).locator(sel).first();
-      assert.equal(await a.getAttribute('href'),item.local_url);
-      assert.equal(await a.getAttribute('target'),'_blank');
-      assert.equal(await a.getAttribute('rel'),'noopener noreferrer');
+    // Tailscale off: one muted chip with the local address; the hint is in its tooltip.
+    {
+      const c=chips(page).first();
+      assert.equal(await chips(page).count(),1);
+      assert.equal((await c.textContent()).trim(),`127.0.0.1:${item.host_port}`);
+      assert.equal(await c.evaluate(el=>el.tagName),'A');
+      assert.equal(await c.getAttribute('href'),item.local_url);
+      assert.equal(await c.getAttribute('target'),'_blank');
+      assert.equal(await c.getAttribute('rel'),'noopener noreferrer');
+      assert.equal(await c.getAttribute('title'),`${item.local_url}\nOnly reachable on the server. Turn on Tailscale in Settings.\nCtrl+click to open, click to copy`);
+      assert.match(await c.getAttribute('class'),/\bmuted\b/);
+      assert.equal(await c.locator('.fa-plug').count(),1,'plug icon on the first chip');
+      assert.equal(await more(page).count(),0,'one port: no +N');
     }
-    assert.equal((await popover(page).locator('[data-ports-note]').textContent()).trim(),'Only reachable on the server. Turn on Tailscale in Settings.');
-    assert.equal(await popover(page).locator('[data-ports-settings]').getAttribute('href'),'#/settings');
-    // Keyboard: focus starts inside, Esc closes and returns focus to the pill.
-    assert.equal(await page.evaluate(()=>!!document.activeElement?.closest('[data-ports-popover]')),true);
-    // Copy writes the URL and says so.
-    await popover(page).locator('[data-ports-copy]').click();
-    await popover(page).locator('[data-ports-copy]').filter({hasText:'Copied'}).waitFor({timeout:5000});
+    // A plain click copies (no navigation, no new tab, no popover) and the chip says so, then shows the address again.
+    let popups=0;page.context().on('page',()=>popups++);
+    await chips(page).first().click();
+    await chips(page).first().filter({hasText:'Copied'}).waitFor({timeout:5000});
     assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),item.local_url);
-    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-popover-bottom-off-${t}.png`);}
-    await page.keyboard.press('Escape');
-    await popover(page).waitFor({state:'detached'});
-    assert.equal(await page.evaluate(()=>document.activeElement?.matches('[data-ports-pill]')),true,'focus back on the pill');
-    // Click outside closes.
-    await pill(page).click();await popover(page).waitFor();
-    await page.mouse.click(640,120);
-    await popover(page).waitFor({state:'detached'});
+    assert.equal(popups,0,'a plain click does not open');
+    assert.equal(new URL(page.url()).origin,base);
+    assert.equal(await popover(page).count(),0,'one or two ports: no popover');
+    await chips(page).first().filter({hasText:`127.0.0.1:${item.host_port}`}).waitFor({timeout:5000});
+    assert.equal(await chips(page).first().getAttribute('data-copied'),null);
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-chip-local-${t}.png`);}
 
     // Settings: off, then on through the server.
     await openSettings(page);
@@ -120,7 +151,8 @@ test('ports pill and popover follow the sandbox; Tailscale switch round-trips th
     assert.equal(await sw.getAttribute('role'),'switch');
     assert.match(await section(page).textContent(),/Saved on the server\./);
     assert.match(await section(page).locator('[data-ports-address]').textContent(),/detected when you turn this on/);
-    assert.equal((await section(page).locator('[data-ports-acl]').textContent()).trim(),'While this is on, anyone on your tailnet allowed by your ACLs can open sandbox ports. They are plain http.');
+    assert.equal((await section(page).locator('[data-ports-acl]').textContent()).trim(),'While this is on, anyone on your tailnet allowed by your ACLs can open sandbox ports. They are plain http and can be on almost any port number, not only the range above.');
+    assert.match(await section(page).textContent(),/on the same port number as in the sandbox when that number is free/);
     for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-settings-off-${t}.png`);}
     // No Tailscale address on the server: 409 with the plain message; the switch stays off.
     fs.writeFileSync(info.tailscale_file,'');
@@ -135,25 +167,149 @@ test('ports pill and popover follow the sandbox; Tailscale switch round-trips th
     assert.equal(settings.ports_tailscale,true);
     for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-settings-on-${t}.png`);}
 
-    // Back to the report: the Tailscale URL is the main one, the local one is "on the server".
+    // Back to the report: the chip shows the Tailscale address with the sandbox's own port number.
     await openReport(page,base);
     await openDrawer(page);
-    await pill(page).waitFor({timeout:15000});
     await page.waitForFunction(()=>window.BoardPorts.ports[0]?.tailscale_url);
-    await pill(page).click();await popover(page).waitFor();
-    const tsUrl=`http://127.0.0.2:${item.host_port}/`;
-    assert.deepEqual(await popover(page).locator('[data-ports-url]').evaluateAll(as=>as.map(a=>a.textContent)),[tsUrl,item.local_url]);
-    assert.equal((await popover(page).locator('.term-ports-url.secondary .term-ports-where').textContent()).trim(),'on the server');
-    assert.equal(await popover(page).locator('[data-ports-note]').count(),0);
-    assert.equal(await popover(page).locator('[data-ports-open]').first().getAttribute('href'),tsUrl);
+    const tsUrl=`http://127.0.0.2:${sandboxPort}/`;
+    const onItem=(await page.evaluate(()=>window.BoardPorts.ports))[0];
+    assert.equal(onItem.tailscale_port,sandboxPort);
+    assert.equal(onItem.host_port,item.host_port);
+    assert.equal(onItem.local_url,item.local_url);
+    await chips(page).first().filter({hasText:`127.0.0.2:${sandboxPort}`}).waitFor({timeout:10000});
+    {
+      const c=chips(page).first();
+      assert.equal(await c.getAttribute('href'),tsUrl);
+      assert.equal(await c.getAttribute('title'),`${tsUrl}\nCtrl+click to open, click to copy`);
+      assert.doesNotMatch(await c.getAttribute('class'),/\bmuted\b/);
+    }
     assert.match((await get(tsUrl)).body,/synthetic-preview-ok/,'reachable on the Tailscale address');
-    await popover(page).locator('[data-ports-copy]').first().click();
-    await popover(page).locator('[data-ports-copy]').first().filter({hasText:'Copied'}).waitFor({timeout:5000});
+    await assert.rejects(get(`http://127.0.0.2:${item.host_port}/`),'no tailnet listener on the range number');
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    await chips(page).first().click();
+    await chips(page).first().filter({hasText:'Copied'}).waitFor({timeout:5000});
     assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),tsUrl);
-    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-popover-bottom-on-${t}.png`);}
-    await page.keyboard.press('Escape');
+    await chips(page).first().filter({hasText:`127.0.0.2:${sandboxPort}`}).waitFor({timeout:5000});
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-chip-one-${t}.png`);}
+    {
+      const [opened]=await Promise.all([page.context().waitForEvent('page'),chips(page).first().click({modifiers:['Control']})]);
+      await opened.waitForLoadState('domcontentloaded').catch(()=>{});
+      assert.equal(opened.url(),tsUrl,'Ctrl+click opens');
+      assert.equal(await opened.evaluate(()=>window.opener),null,'noopener');
+      await opened.close();
+    }
+    {
+      const [opened]=await Promise.all([page.context().waitForEvent('page'),chips(page).first().click({button:'middle'})]);
+      assert.equal(opened.url(),tsUrl,'middle click opens natively');
+      await opened.close();
+    }
+    // Copy blocked by the browser: said on the chip.
+    await page.evaluate(()=>{window.__clip=navigator.clipboard.writeText;navigator.clipboard.writeText=()=>Promise.reject(new Error('blocked'));window.__exec=document.execCommand;document.execCommand=()=>false;});
+    await chips(page).first().click();
+    await chips(page).first().filter({hasText:'Copy blocked by the browser'}).waitFor({timeout:5000});
+    assert.equal(await chips(page).first().getAttribute('data-copied'),'warn');
+    await page.evaluate(()=>{navigator.clipboard.writeText=window.__clip;document.execCommand=window.__exec;});
+    await chips(page).first().filter({hasText:`127.0.0.2:${sandboxPort}`}).waitFor({timeout:5000});
 
-    // Another tab switches it off: this drawer's URLs update by push.
+    // Terminal links: a printed loopback URL for the forwarded port opens the Tailscale URL, path kept.
+    await page.locator('#term-drawer .xterm').click();
+    await page.keyboard.type(`printf 'serving http://localhost:%s/poc/x.html?a=1#f, not http://127.0.0.1:%s/\\n' ${sandboxPort} 9\n`);
+    const printed=`http://localhost:${sandboxPort}/poc/x.html?a=1#f`;
+    const target=`http://127.0.0.2:${sandboxPort}/poc/x.html?a=1#f`;
+    await page.waitForFunction(p=>{const b=window.BoardTerminal.term.buffer.active;for(let i=0;i<b.length;i++)if(b.getLine(i).translateToString(true).startsWith('serving '+p))return true;return false;},printed,{timeout:10000});
+    const at=await cellOf(page,'serving '+printed,12);
+    await page.mouse.move(at.x,at.y);
+    const tip=page.locator('[data-ports-tip]');
+    await tip.waitFor({timeout:5000});
+    assert.equal(await tip.locator('.term-ports-tip-title').textContent(),'Opens over Tailscale');
+    assert.equal(await tip.locator('.term-ports-tip-url').textContent(),target);
+    assert.equal(await tip.locator('.term-ports-tip-hint').textContent(),'Ctrl+click to open, click to copy');
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(300);await page.mouse.move(at.x+1,at.y);await tip.waitFor();await shot(page,`ports-terminal-link-${t}.png`);}
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    await page.mouse.click(at.x,at.y);
+    await tip.locator('.term-ports-tip-hint').filter({hasText:'Copied'}).waitFor({timeout:5000});
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),target,'a click copies the Tailscale URL');
+    for(const key of ['Control','Meta']){
+      const [opened]=await Promise.all([page.context().waitForEvent('page'),(async()=>{await page.keyboard.down(key);await page.mouse.click(at.x,at.y);await page.keyboard.up(key);})()]);
+      await opened.waitForLoadState('domcontentloaded').catch(()=>{});
+      assert.equal(opened.url(),target,`${key}+click opens the Tailscale URL with the path`);
+      assert.equal(await opened.evaluate(()=>window.opener),null,'noopener');
+      await opened.close();
+    }
+    assert.equal(await tip.evaluate(el=>el.querySelectorAll('*').length),3,'the tip holds text only');
+    // Which printed text becomes a link, and where it goes.
+    const P=sandboxPort,T=`http://127.0.0.2:${P}`;
+    const cases=[
+      [`http://localhost:${P}/`,`${T}/`],[`http://LOCALHOST:${P}`,`${T}/`],[`http://0.0.0.0:${P}/a`,`${T}/a`],
+      [`http://127.5.6.7:${P}/x?q=1#h`,`${T}/x?q=1#h`],[`http://[::1]:${P}/p`,`${T}/p`],[`http://[::]:${P}/`,`${T}/`],
+      [`http://localhost:${P}/x).`,`${T}/x`],[`https://localhost:${P}/s`,`https://127.0.0.2:${P}/s`],
+      [`http://localhost:${P}/%3Cb%3E`,`${T}/%3Cb%3E`],[`http://localhost:${P}/../../etc`,`${T}/etc`],
+      [`http://localhost:${P+1}/`,null],[`http://localhost/`,null],[`http://evil.example:${P}/`,null],[`http://10.0.0.1:${P}/`,null],
+      [`http://127.0.0.1.evil.example:${P}/`,null],[`http://a@localhost:${P}/`,null],[`http://localhost:${P}@evil.example/`,null],
+      [`http://127.0.0.999:${P}/`,null],[`http://[::2]:${P}/`,null],[`ftp://localhost:${P}/`,null],[`javascript:localhost:${P}`,null],
+      [`http://localhost:${P}evil/`,null]];
+    const got=await page.evaluate(list=>list.map(([text])=>window.BoardPorts.linkTarget(text)?.url??null),cases);
+    assert.deepEqual(got,cases.map(c=>c[1]));
+    // The port that is not forwarded is not a link.
+    await page.mouse.move(0,0);await tip.waitFor({state:'detached',timeout:5000});
+    const notLink=await cellOf(page,'http://127.0.0.1:9/',8);
+    await page.mouse.move(notLink.x,notLink.y);await page.waitForTimeout(400);
+    assert.equal(await tip.count(),0,'unforwarded port: no link');
+    // Dragging across the link still selects text, and copy-on-select copies the selection.
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    const from=await cellOf(page,'serving '+printed,0);
+    await page.mouse.move(from.x,from.y);await page.mouse.down();
+    await page.mouse.move(at.x+from.w*6,at.y,{steps:8});await page.mouse.up();
+    await page.waitForTimeout(300);
+    const selected=await page.evaluate(()=>window.BoardTerminal.term.getSelection());
+    assert.ok(selected.length>=15&&('serving '+printed).startsWith(selected),`a drag into the link selects text: ${selected}`);
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),selected,'copy-on-select still copies the selection');
+    await page.evaluate(()=>window.BoardTerminal.term.clearSelection());
+
+    // Three ports on a wide screen: two chips and "+1"; "+1" opens the popover with every port (same click rule, no buttons).
+    await page.setViewportSize({width:1800,height:900});
+    setPorts(info,[sandboxPort,61001,61002]);
+    await more(page).filter({hasText:'+1'}).waitFor({timeout:15000});
+    assert.equal(await chips(page).count(),2);
+    assert.equal((await chips(page).first().textContent()).trim(),`127.0.0.2:${sandboxPort}`);
+    assert.equal(await page.locator('#term-drawer [data-term-slot="ports"] .fa-plug').count(),1,'plug icon on the first chip only');
+    assert.equal((await headerIntact(page)).ok,true,'bottom dock: chips add no row');
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-chips-three-${t}.png`);}
+    await more(page).click();
+    await popover(page).waitFor();
+    assert.equal(await more(page).getAttribute('aria-expanded'),'true');
+    assert.equal(await popover(page).getAttribute('role'),'dialog');
+    assert.equal(await popover(page).locator('[data-ports-item]').count(),3);
+    assert.deepEqual(await popover(page).locator('[data-ports-item]').first().locator('[data-ports-url]').evaluateAll(as=>as.map(a=>a.textContent)),[tsUrl,item.local_url]);
+    assert.equal((await popover(page).locator('.term-ports-url.secondary .term-ports-where').first().textContent()).trim(),'on the server');
+    {
+      const a=popover(page).locator('[data-ports-url]').first();
+      assert.equal(await a.getAttribute('href'),tsUrl);
+      assert.equal(await a.getAttribute('target'),'_blank');
+      assert.equal(await a.getAttribute('rel'),'noopener noreferrer');
+      assert.equal(await a.getAttribute('title'),'Ctrl+click to open, click to copy');
+    }
+    assert.equal(await popover(page).locator('button,[data-ports-open],[data-ports-copy]').count(),0,'no Open or Copy buttons');
+    assert.equal(await page.evaluate(()=>!!document.activeElement?.closest('[data-ports-popover]')),true,'focus inside');
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    await popover(page).locator('[data-ports-url]').first().click();
+    await popover(page).locator('[data-ports-copied]').filter({hasText:'Copied'}).waitFor({timeout:5000});
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),tsUrl);
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-popover-three-${t}.png`);}
+    {
+      const [opened]=await Promise.all([page.context().waitForEvent('page'),popover(page).locator('[data-ports-url]').first().click({modifiers:['Control']})]);
+      await opened.waitForLoadState('domcontentloaded').catch(()=>{});
+      assert.equal(opened.url(),tsUrl);
+      await opened.close();
+    }
+    await page.keyboard.press('Escape');
+    await popover(page).waitFor({state:'detached'});
+    assert.equal(await page.evaluate(()=>document.activeElement?.matches('[data-ports-more]')),true,'focus back on +N');
+    await more(page).click();await popover(page).waitFor();
+    await page.mouse.click(640,120);
+    await popover(page).waitFor({state:'detached'});
+
+    // Another tab switches it off: the chips turn into the muted local addresses by push.
     const other=await page.context().newPage();
     await other.goto(`${base}/#/settings`);
     await section(other).locator('[data-ports-tailscale]').waitFor({timeout:15000});
@@ -162,73 +318,190 @@ test('ports pill and popover follow the sandbox; Tailscale switch round-trips th
     await section(other).locator('[data-ports-address]').filter({hasText:'detected when you turn this on'}).waitFor({timeout:10000});
     await page.waitForFunction(()=>window.BoardPorts.ports[0]&&window.BoardPorts.ports[0].tailscale_url===null&&window.BoardPorts.flags.ports_tailscale===false,null,{timeout:10000});
     await assert.rejects(get(tsUrl),'the tailnet listener is closed');
-    await pill(page).click();await popover(page).waitFor();
+    await chips(page).first().filter({hasText:`127.0.0.1:${item.host_port}`}).waitFor({timeout:10000});
+    assert.match(await chips(page).first().getAttribute('class'),/\bmuted\b/);
+    await more(page).click();await popover(page).waitFor();
     assert.equal(await popover(page).locator('[data-ports-note]').count(),1);
     await page.keyboard.press('Escape');
     await other.close();
 
-    // Docks: the pill works left, right and top; dragging from it never starts a drag.
-    for(const dock of ['right','left','top','bottom']){
+    // Docks: chips never add a header row or leave the drawer; dragging from a chip or "+N" never starts a drag.
+    const shown={};
+    for(const [dock,width] of [['right',1280],['left',1280],['top',1280],['bottom',1280],['right',1120],['bottom',760]]){
+      await page.setViewportSize({width,height:900});
       await page.locator(`[data-term-dock] [data-dock="${dock}"]`).click();
       await page.waitForFunction(d=>document.querySelector('#term-drawer').dataset.dock===d,dock);
-      await pill(page).click();await popover(page).waitFor();
+      await page.waitForTimeout(300);
+      const state=await headerIntact(page);
+      assert.equal(state.ok,true,`${dock} @${width}: header intact ${JSON.stringify(state)}`);
+      shown[`${dock}@${width}`]=`${state.shown} chip(s), +${state.more}, ${state.fit}`;
+      if(state.fit==='none'){
+        // A side dock at its minimum width has no room left in its first row: no chip rather than an overlap.
+        assert.equal(width,1120,`only the minimum-width side dock may hide the chips (${dock}@${width})`);
+        assert.equal(await page.locator('#term-drawer [data-term-slot="ports"]').isHidden(),true);
+        if(dock==='right')for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-chips-right-narrow-${t}.png`);}
+        continue;
+      }
+      assert.ok(state.more>=1,'three ports always offer +N');
+      assert.equal(state.shown+state.more,3,'every port is either a chip or behind +N');
+      await more(page).click();await popover(page).waitFor();
       const p=await rect(page,'[data-ports-popover]');
-      assert.ok(p.left>=0&&p.top>=0&&p.right<=1280&&p.bottom<=900,`${dock}: popover inside the viewport ${JSON.stringify(p)}`);
-      if(dock==='right')for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-popover-right-${t}.png`);}
+      assert.ok(p.left>=0&&p.top>=0&&p.right<=width&&p.bottom<=900,`${dock}: popover inside the viewport ${JSON.stringify(p)}`);
+      if(dock==='right'&&width===1280)for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-popover-right-${t}.png`);}
       await page.keyboard.press('Escape');
       await popover(page).waitFor({state:'detached'});
-      const box=await pill(page).boundingBox();
-      await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
-      await page.mouse.move(box.x+box.width/2-150,box.y+box.height/2-150,{steps:6});
-      const dragging=await page.evaluate(()=>document.documentElement.classList.contains('term-dragging')||!!document.querySelector('[data-term-drop-preview]:not([hidden])'));
-      await page.mouse.up();
-      assert.equal(dragging,false,`${dock}: no drag from the pill`);
+      for(const el of state.shown?[chips(page).first(),more(page)]:[more(page)]){
+        const box=await el.boundingBox();
+        await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+        await page.mouse.move(box.x+box.width/2-150,box.y+box.height/2-150,{steps:6});
+        const dragging=await page.evaluate(()=>document.documentElement.classList.contains('term-dragging')||!!document.querySelector('[data-term-drop-preview]:not([hidden])'));
+        await page.mouse.up();
+        assert.equal(dragging,false,`${dock}: no drag from a chip`);
+      }
       assert.equal(await page.evaluate(()=>document.querySelector('#term-drawer').dataset.dock),dock,'dock unchanged');
+      if(dock==='right'&&width===1120)for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-chips-right-narrow-${t}.png`);}
     }
-
-    // The server stops listening: the pill goes away by push.
+    console.log('PORTS CHIPS SHOWN',JSON.stringify(shown));
+    await page.setViewportSize({width:1280,height:900});
+    // The server stops listening: the chips go away by push.
     setPorts(info,[]);
-    await pill(page).waitFor({state:'detached',timeout:15000});
+    await page.waitForFunction(()=>window.BoardPorts.ports.length===0,null,{timeout:15000});
+    assert.equal(await chips(page).count(),0);
+    assert.equal(await more(page).count(),0);
     assert.equal(await page.locator('#term-drawer [data-term-slot="ports"]').isHidden(),true);
     assert.deepEqual(page.errors,[]);
   });
 });
 
-test('phone sheet: the pill and popover fit',{timeout:120000},async()=>{
+test('stale terminal link opens and copies nothing after the forward disappeared (review round 1, L1)',{timeout:240000},async()=>{
+  await withFixture('tailnet,ports',async info=>{
+    const {base,newPage,sandbox_port:P}=info;
+    const page=await newPage({permissions:CLIP});
+    await openReport(page,base);
+    await openDrawer(page);
+    setPorts(info,[P]);
+    await chips(page).first().waitFor({timeout:15000});
+    await page.locator('#term-drawer .xterm').click();
+    await page.keyboard.type(`printf 'serving http://localhost:%s/x\\n' ${P}\n`);
+    const printed=`serving http://localhost:${P}/x`;
+    await page.waitForFunction(p=>{const b=window.BoardTerminal.term.buffer.active;for(let i=0;i<b.length;i++)if(b.getLine(i).translateToString(true).startsWith(p))return true;return false;},printed,{timeout:10000});
+    const at=await cellOf(page,printed,12);
+    await page.mouse.move(at.x,at.y);
+    const tip=page.locator('[data-ports-tip]');
+    await tip.waitFor({timeout:5000});                                 // the link is live and hovered
+    setPorts(info,[]);                                                 // the sandbox server stops
+    await page.waitForFunction(()=>window.BoardPorts.ports.length===0,null,{timeout:15000});
+    await tip.waitFor({state:'detached',timeout:5000});                // the hover goes away without moving the pointer
+    const opened=[];page.context().on('page',p=>opened.push(p.url()));
+    await page.keyboard.down('Control');await page.mouse.click(at.x,at.y);await page.keyboard.up('Control');
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    await page.mouse.click(at.x,at.y);
+    await page.waitForTimeout(1500);
+    assert.deepEqual(opened,[],'Ctrl+click on a link whose forward is gone opens nothing');
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'-','a plain click copies nothing');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+test('a URL wrapped across terminal rows links as a whole, never by its first row (review round 1, minor 1)',{timeout:240000},async()=>{
+  await withFixture('tailnet,ports',async info=>{
+    const {base,newPage,sandbox_port:P}=info;
+    const page=await newPage({permissions:CLIP});
+    await openReport(page,base);
+    await openDrawer(page);
+    setPorts(info,[P,800]);                                            // 800 is forwarded too
+    await page.waitForFunction(()=>window.BoardPorts.ports.length===2,null,{timeout:15000});
+    const cols=await page.evaluate(()=>window.BoardTerminal.term.cols);
+    await page.locator('#term-drawer .xterm').click();
+    // Row 1 ends with "http://localhost:800", row 2 starts with "0/" (the printed URL is :8000, not forwarded).
+    const pad=cols-'http://localhost:800'.length;
+    await page.keyboard.type(`clear; printf '%${pad}s%s\\n' '' 'http://localhost:8000/'\n`);
+    await page.waitForFunction(()=>{const b=window.BoardTerminal.term.buffer.active;for(let i=1;i<b.length;i++)if(b.getLine(i).isWrapped&&b.getLine(i).translateToString(true).startsWith('0/')&&b.getLine(i-1).translateToString(true).endsWith('http://localhost:800'))return true;return false;},null,{timeout:10000});
+    const tip=page.locator('[data-ports-tip]');
+    for(const offset of [8,18]){
+      const c=await page.evaluate(([needle,offset])=>{const t=window.BoardTerminal.term,b=t.buffer.active;for(let i=b.length-1;i>0;i--){const text=b.getLine(i-1).translateToString(true);if(b.getLine(i).isWrapped&&text.endsWith(needle)){const r=document.querySelector('#term-drawer .xterm-screen').getBoundingClientRect();const w=r.width/t.cols,h=r.height/t.rows;return {x:r.left+(text.length-needle.length+offset+0.5)*w,y:r.top+(i-1-b.viewportY+0.5)*h};}}return null;},['http://localhost:800',offset]);
+      await page.mouse.move(c.x,c.y);await page.waitForTimeout(400);
+      assert.equal(await tip.count(),0,`no link from the first row's prefix (offset ${offset})`);
+    }
+    // A forwarded URL wrapped across rows is one link: hovering its second row shows the whole target.
+    await page.mouse.move(0,0);
+    const pad2=cols-`http://localhost:${P}/wr`.length;
+    await page.keyboard.type(`clear; printf '%${pad2}s%s\\n' '' 'http://localhost:${P}/wrapped'\n`);
+    await page.waitForFunction(()=>{const b=window.BoardTerminal.term.buffer.active;for(let i=1;i<b.length;i++)if(b.getLine(i).isWrapped&&b.getLine(i).translateToString(true).startsWith('apped'))return true;return false;},null,{timeout:10000});
+    const wrappedUrl=(await page.evaluate(P=>window.BoardPorts.ports.find(p=>p.port===P).local_url,P))+'wrapped';   // Tailscale is off here
+    const second=await cellOf(page,'apped',2);
+    await page.mouse.move(second.x,second.y);
+    await tip.waitFor({timeout:5000});
+    assert.equal(await tip.locator('.term-ports-tip-url').textContent(),wrappedUrl);
+    const first=await page.evaluate(([needle])=>{const t=window.BoardTerminal.term,b=t.buffer.active;for(let i=b.length-1;i>0;i--){const text=b.getLine(i-1).translateToString(true);if(b.getLine(i).isWrapped&&text.endsWith(needle)){const r=document.querySelector('#term-drawer .xterm-screen').getBoundingClientRect();const w=r.width/t.cols,h=r.height/t.rows;return {x:r.left+(text.length-4+0.5)*w,y:r.top+(i-1-b.viewportY+0.5)*h};}}return null;},[`/wr`]);
+    await page.mouse.move(0,0);await tip.waitFor({state:'detached',timeout:5000});
+    await page.mouse.move(first.x,first.y);
+    await tip.waitFor({timeout:5000});
+    assert.equal(await tip.locator('.term-ports-tip-url').textContent(),wrappedUrl,'the first row gives the same whole link');
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    await page.mouse.click(first.x,first.y);
+    await tip.locator('.term-ports-tip-hint').filter({hasText:'Copied'}).waitFor({timeout:5000});
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),wrappedUrl);
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+test('phone sheet: the chip fits and a tap opens it',{timeout:120000},async()=>{
   await withFixture('tailnet,ports',async info=>{
     const page=await info.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true,deviceScaleFactor:2});
     await openReport(page,info.base);
     await openDrawer(page);
     setPorts(info,[info.sandbox_port]);
-    await pill(page).waitFor({timeout:15000});
-    await pill(page).tap();
+    await chips(page).first().waitFor({timeout:15000});
+    const state=await headerIntact(page);
+    assert.equal(state.ok,true,`phone: header intact ${JSON.stringify(state)}`);
+    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-phone-${t}.png`);}
+    // Touch only: a tap on the chip opens it (no copy).
+    assert.equal(await page.evaluate(()=>matchMedia('(any-pointer: fine)').matches),false,'touch-only emulation');
+    assert.equal(await chips(page).first().getAttribute('title').then(t=>t.split('\n').pop()),'Tap to open');
+    const [opened]=await Promise.all([page.context().waitForEvent('page'),chips(page).first().tap()]);
+    assert.equal(opened.url(),(await page.evaluate(()=>window.BoardPorts.ports[0].local_url)));
+    await opened.close();
+    // Three ports on the phone: still one header line for the chips, "+N" opens a popover that fits.
+    setPorts(info,[info.sandbox_port,61001,61002]);
+    await more(page).waitFor({timeout:15000});
+    assert.equal((await headerIntact(page)).ok,true);
+    await more(page).tap();
     await popover(page).waitFor();
     const p=await rect(page,'[data-ports-popover]');
     assert.ok(p.left>=0&&p.right<=390&&p.top>=0&&p.bottom<=844,JSON.stringify(p));
-    for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-phone-${t}.png`);}
     assert.deepEqual(page.errors,[]);
   });
 });
 
-test('popover links only http URLs to loopback or a Tailscale address on the host port (review P1)',{timeout:240000},async()=>{
+test('chips and popover link only http URLs to loopback or a Tailscale address on the right port (review P1)',{timeout:240000},async()=>{
   await withFixture('tailnet,ports',async info=>{
-    const page=await info.newPage({permissions:CLIP});
+    const page=await info.newPage({permissions:CLIP,viewport:{width:1800,height:900}});
     const reply={preview_ports:true,ports_tailscale:true,ports:[
       {port:8000,host_port:9100,state:'open',local_url:'javascript:document.title="pwned"//',tailscale_url:'http://evil.example/'},
       {port:8001,host_port:9101,state:'open',local_url:'http://127.0.0.1:9999/',tailscale_url:'http://100.64.1.2:9101/x?y'},
-      {port:8002,host_port:9102,state:'open',local_url:'http://127.0.0.1:9102/',tailscale_url:'http://100.101.102.103:9102/'}]};
+      {port:8002,host_port:9102,state:'open',local_url:'http://127.0.0.1:9102/',tailscale_port:8002,tailscale_url:'http://100.101.102.103:8002/'},
+      {port:8003,host_port:9103,state:'open',local_url:'http://127.0.0.1:9103/',tailscale_port:8003,tailscale_url:'http://100.101.102.103:9103/'},
+      // Each URL is held to its own address type (review round 1, minor 2): a Tailscale address as local_url,
+      // a loopback address as tailscale_url, both on the right port, are text.
+      {port:8004,host_port:9104,state:'open',local_url:'http://100.101.102.103:9104/',tailscale_port:8004,tailscale_url:'http://127.0.0.1:8004/'}]};
     await page.route('**/api/ports?**',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(reply)}));
     await openReport(page,info.base);
     await openDrawer(page);
-    await pill(page).waitFor({timeout:15000});
-    await pill(page).click();
+    await more(page).filter({hasText:'+3'}).waitFor({timeout:15000});
+    // The first two addresses do not validate: muted text, not links.
+    assert.equal(await chips(page).count(),2);
+    assert.equal(await page.locator('#term-drawer [data-term-slot="ports"] a').count(),0,'no link for a bad address');
+    assert.deepEqual(await chips(page).evaluateAll(cs=>cs.map(c=>[c.tagName,c.classList.contains('muted'),c.hasAttribute('data-ports-invalid')])),[['SPAN',true,true],['SPAN',true,true]]);
+    assert.equal((await more(page).textContent()).trim(),'+3');
+    await more(page).click();
     await popover(page).waitFor();
     const hrefs=await popover(page).locator('a[href]').evaluateAll(as=>as.map(a=>a.getAttribute('href')).filter(h=>h!=='#/settings'));
-    const copies=await popover(page).locator('[data-ports-copy]').evaluateAll(bs=>bs.map(b=>b.dataset.portsCopy));
-    const valid=['http://100.101.102.103:9102/','http://127.0.0.1:9102/'];
-    assert.deepEqual([...new Set(hrefs)].sort(),valid.sort(),'only the valid URLs are links');
-    assert.deepEqual([...new Set(copies)].sort(),valid.sort(),'only the valid URLs can be copied');
-    assert.equal(await popover(page).locator('[data-ports-invalid]').count(),4,'the four bad URLs are shown as text');
+    const valid=['http://100.101.102.103:8002/','http://127.0.0.1:9102/','http://127.0.0.1:9103/'];
+    assert.deepEqual([...new Set(hrefs)].sort(),valid.sort(),'only the valid URLs are links (tailscale_port honoured)');
+    assert.equal(await popover(page).locator('button,[data-ports-copy],[data-ports-open]').count(),0);
+    assert.equal(await popover(page).locator('[data-ports-invalid]').count(),7,'the seven bad URLs are shown as text');
+    assert.equal(await popover(page).locator('[data-ports-item="8004"] a').count(),0,'wrong address type: no link either way');
     assert.match(await popover(page).locator('[data-ports-invalid]').first().textContent(),/not linked/);
     assert.notEqual(await page.title(),'pwned');
     assert.deepEqual(page.errors,[]);
@@ -241,7 +514,8 @@ test('preview ports off on the server: no pill, Settings says it is not enabled'
     await openReport(page,base);
     await openDrawer(page);
     await page.waitForTimeout(1500);
-    assert.equal(await pill(page).count(),0);
+    assert.equal(await chips(page).count(),0);
+    assert.equal(await more(page).count(),0);
     assert.equal(await page.evaluate(()=>window.BoardPorts.flags.preview_ports),false);
     await openSettings(page);
     assert.equal((await section(page).locator('[data-ports-disabled]').textContent()).trim(),'Not enabled on this server. Start the terminal service with --preview-ports.');

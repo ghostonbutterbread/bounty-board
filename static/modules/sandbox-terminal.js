@@ -135,14 +135,20 @@
     }
     return el;
   }
-  const listeners = {session: new Set(), message: new Set(), mount: new Set()};
-  function on(type, callback) { if (listeners[type] && typeof callback === 'function') listeners[type].add(callback); return () => off(type, callback); }
+  // 'terminal' event: the xterm instance, once, when the first session attaches
+  // (replayed to late subscribers).
+  let termSent = null;
+  const listeners = {session: new Set(), message: new Set(), mount: new Set(), terminal: new Set()};
+  function on(type, callback) { if (listeners[type] && typeof callback === 'function') { listeners[type].add(callback); if (type === 'terminal' && termSent) try { callback(termSent); } catch (error) { console.error('Terminal terminal listener failed:', error); } } return () => off(type, callback); }
   function off(type, callback) { listeners[type]?.delete(callback); }
   function emit(type, payload) {
     for (const callback of [...listeners[type]]) { try { callback(payload); } catch (error) { console.error(`Terminal ${type} listener failed:`, error); } }
   }
   let sessionLive = false;
-  function emitSession() { sessionLive = true; emit('session', {selector: sel ? {...sel} : null, session: info}); }
+  function emitSession() {
+    if (term && term !== termSent) { termSent = term; emit('terminal', term); }
+    sessionLive = true; emit('session', {selector: sel ? {...sel} : null, session: info});
+  }
   function emitClosed() { if (sessionLive) { sessionLive = false; emit('session', {selector: null, session: null}); } }
   const esc = value => (ctx?.esc ? ctx.esc(value) : String(value ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`));
   const keyOf = s => JSON.stringify([s.family, s.program, s.lane, s.path]);

@@ -233,6 +233,10 @@ class AutoAgent(Agent):
 
 
 class HubCase(unittest.TestCase):
+    # Same-number Tailscale ports are off here so the older tests keep checking the
+    # range-number listener (the --ports-same "" configuration); SameNumberTests turn them on.
+    SAME = ()
+
     def setUp(self):
         self.base = fx.tmp_base('ports')
         self.range = free_range()
@@ -245,12 +249,16 @@ class HubCase(unittest.TestCase):
                                                                           if a in ('127.0.0.2', '127.0.0.3')), None)
                                              if name == 'tailscale0' else None)
         self.logs = []
-        self.hub = tp.PortsHub(state_dir=self.base, ports_range=self.range, tailscale=self.tailscale,
-                               log=self.logs.append, refresh_interval=0)
+        self.hub = self.make_hub()
         self.owner = FakeOwner()
         self.sock_path = self.base / 'ports.sock'
         self.sp = self.hub.open_session(str(self.sock_path), self.owner)
         self.servers = []
+
+    def make_hub(self):
+        kw = {} if self.SAME is None else {'same_ranges': self.SAME}
+        return tp.PortsHub(state_dir=self.base, ports_range=self.range, tailscale=self.tailscale,
+                           log=self.logs.append, refresh_interval=0, **kw)
 
     def tearDown(self):
         close_all()
@@ -1102,11 +1110,318 @@ class TailscaleTests(HubCase):
     def test_setting_survives_restart_and_new_forwards_bind_both(self):
         self.hub.set_tailscale(True)
         self.hub.close()
-        self.hub = tp.PortsHub(state_dir=self.base, ports_range=self.range, tailscale=self.tailscale,
-                               log=self.logs.append, refresh_interval=0)
+        self.hub = self.make_hub()
         self.sp = self.hub.open_session(str(self.sock_path), self.owner)
         server, agent, item = self.forward()
         self.assertEqual(item['tailscale_url'], f'http://127.0.0.2:{item["host_port"]}/')
+
+
+class SameNumberTests(HubCase):
+    """Tailscale listener on the sandbox's own number when free (--ports-same), else the range number."""
+    SAME = None  # the hub's default ranges, 1024-8999,10000-65535
+
+    def make_hub(self):
+        # The test's "sandbox servers" (EchoServer) are host processes here; in production they live
+        # in the container's own network namespace and never show in the host's /proc/net/tcp.
+        return tp.PortsHub(state_dir=self.base, ports_range=self.range, tailscale=self.tailscale,
+                           log=self.logs.append, refresh_interval=0,
+                           host_ports=lambda exclude: tp.host_listening_ports(exclude) - {s.port for s in getattr(self, 'servers', [])})
+
+    def free_port(self):
+        lo, hi = self.range
+        for _ in range(100):
+            probe = socket.socket()
+            probe.bind(('0.0.0.0', 0))
+            number = probe.getsockname()[1]
+            probe.close()
+            if number >= 10000 and not lo <= number <= hi:
+                return number
+        raise AssertionError('no free port')
+
+    def test_s1_host_service_number_is_not_taken_during_its_restart(self):
+        # Review round 1 (S1), the reviewer's repro: a host service on 0.0.0.0:N restarts while a
+        # sandbox reports N; the sandbox must not get <ts ip>:N, and the service must rebind.
+        n = self.free_port()
+        host_service = socket.socket()
+        host_service.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        host_service.bind(('0.0.0.0', n))
+        host_service.listen(8)
+        self.hub.set_tailscale(True)
+        self.hub.refresh()                 # the 60 s refresh scans the host listeners
+        host_service.close()               # the host service restarts ...
+        Agent(self.sock_path).ports([n])   # ... and the sandbox reports that number right now
+        item = self.wait_items(1)[0]
+        self.assertNotEqual(item['tailscale_port'], n)
+        self.assertEqual(item['tailscale_port'], item['host_port'], 'falls back to the range number')
+        self.assertIn(n, self.hub.seen_host)
+        again = socket.socket()
+        again.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            again.bind(('0.0.0.0', n))     # the host service comes back
+            again.listen(8)
+        finally:
+            again.close()
+
+    def test_s1_numbers_seen_at_start_or_right_before_the_bind_are_never_used(self):
+        n_start, n_now = self.free_port(), self.free_port()
+        early = socket.socket()
+        early.bind(('127.0.0.1', n_start))
+        early.listen(1)
+        self.hub.close()
+        self.hub = self.make_hub()          # scanned at start
+        early.close()
+        self.sp = self.hub.open_session(str(self.sock_path), self.owner)
+        self.hub.set_tailscale(True)
+        late = socket.socket()
+        late.bind(('127.0.0.1', n_now))     # appears after start, still listening at bind time
+        late.listen(1)
+        try:
+            agent = Agent(self.sock_path)
+            agent.ports([n_start, n_now])
+            items = {i['port']: i for i in self.wait_items(2)}
+            for n in (n_start, n_now):
+                self.assertEqual(items[n]['tailscale_port'], items[n]['host_port'], n)
+        finally:
+            late.close()
+        agent.ports([])
+        self.wait_items(0)
+        agent.ports([n_start, n_now])       # never again, for the life of the service
+        for item in self.wait_items(2):
+            self.assertEqual(item['tailscale_port'], item['host_port'])
+
+    def test_s1_own_same_number_listener_does_not_poison_the_number(self):
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        self.assertEqual(item['tailscale_port'], server.port)
+        self.hub.refresh()                  # scans while our own 127.0.0.2:N listener is up
+        self.assertNotIn(server.port, self.hub.seen_host)
+        agent.ports([])
+        self.wait_items(0)
+        agent.ports([server.port])
+        self.assertEqual(self.wait_items(1)[0]['tailscale_port'], server.port)
+
+    def test_s1_a_failed_scan_fails_closed_for_that_attempt(self):
+        self.hub.set_tailscale(True)
+        good = self.hub.host_ports
+        self.hub.host_ports = mock.Mock(side_effect=OSError(13, 'Permission denied'))
+        server, agent, item = self.forward()
+        self.assertEqual(item['tailscale_port'], item['host_port'], 'no same number without a scan')
+        self.assertTrue(any('cannot read the host listeners' in line for line in self.logs))
+        self.hub.host_ports = good
+        agent.ports([])
+        self.wait_items(0)
+        agent.ports([server.port])
+        self.assertEqual(self.wait_items(1)[0]['tailscale_port'], server.port, 'a later good scan allows it')
+
+    def test_s1_host_listening_ports_reads_proc_and_skips_excluded_inodes(self):
+        sock = socket.socket(socket.AF_INET6 if socket.has_ipv6 else socket.AF_INET)
+        sock.bind(('::1' if socket.has_ipv6 else '127.0.0.1', 0))
+        sock.listen(1)
+        plain = socket.socket()
+        plain.bind(('127.0.0.1', 0))       # bound, not listening: not counted
+        try:
+            port, inode = sock.getsockname()[1], os.fstat(sock.fileno()).st_ino
+            found = tp.host_listening_ports()
+            self.assertIn(port, found)
+            self.assertNotIn(plain.getsockname()[1], found)
+            self.assertNotIn(port, tp.host_listening_ports(frozenset({inode})))
+        finally:
+            sock.close()
+            plain.close()
+
+    def ts_names(self, sp, port):
+        return {sock.getsockname() for ip, sock in sp.forwards[port].listeners.items() if ip != '127.0.0.1'}
+
+    def test_tailscale_gets_the_sandbox_number_and_loopback_keeps_the_range_number(self):
+        self.assertEqual(self.hub.same_ranges, ((1024, 8999), (10000, 65535)))
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        lo, hi = self.range
+        self.assertTrue(lo <= item['host_port'] <= hi, 'loopback stays on the range number')
+        self.assertEqual(item['local_url'], f'http://127.0.0.1:{item["host_port"]}/')
+        self.assertEqual(item['tailscale_port'], server.port)
+        self.assertEqual(item['tailscale_url'], f'http://127.0.0.2:{server.port}/')
+        names = {sock.getsockname() for sock in self.sp.forwards[server.port].listeners.values()}
+        self.assertEqual(names, {('127.0.0.1', item['host_port']), ('127.0.0.2', server.port)})
+        self.assertFalse(connectable('127.0.0.2', item['host_port']), 'no tailnet listener on the range number')
+        sock = tcp('127.0.0.2', server.port)
+        sock.sendall(b'same-number')
+        self.assertEqual(sock.recv(11), b'same-number')
+
+    def test_second_sandbox_on_the_same_port_falls_back_to_its_range_number(self):
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        path2 = self.base / 'ports2.sock'
+        sp2 = self.hub.open_session(str(path2), FakeOwner())
+        agent2 = AutoAgent(path2)
+        agent2.ports([server.port])
+        item2 = wait(lambda: sp2.items())[0]
+        self.assertEqual(item['tailscale_port'], server.port, 'the first one keeps the number')
+        self.assertEqual(item2['tailscale_port'], item2['host_port'], 'the second one falls back')
+        self.assertNotEqual(item2['host_port'], item['host_port'])
+        self.assertEqual(item2['tailscale_url'], f'http://127.0.0.2:{item2["host_port"]}/')
+        for port in (server.port, item2['host_port']):
+            sock = tcp('127.0.0.2', port)
+            sock.sendall(b'hi')
+            self.assertEqual(sock.recv(2), b'hi')
+        # The first sandbox stops its server: the number is retried when the second one's forward opens again.
+        agent.ports([])
+        self.wait_items(0)
+        self.assertFalse(connectable('127.0.0.2', server.port))
+        agent2.ports([])
+        wait(lambda: not sp2.items())
+        agent2.ports([server.port])
+        item2 = wait(lambda: sp2.items())[0]
+        self.assertEqual(item2['tailscale_port'], server.port, 'retried when the forward opens again')
+        self.assertEqual(item2['tailscale_url'], f'http://127.0.0.2:{server.port}/')
+
+    def test_busy_number_falls_back_and_is_retried_when_the_forward_opens_again(self):
+        self.hub.set_tailscale(True)
+        server = self.server()
+        squatter = socket.socket()
+        squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        squatter.bind(('127.0.0.2', server.port))  # another host process on the Tailscale address
+        squatter.listen(1)
+        agent = AutoAgent(self.sock_path)
+        try:
+            agent.ports([server.port])
+            item = self.wait_items(1)[0]
+            self.assertEqual(item['tailscale_port'], item['host_port'])
+            self.assertTrue(connectable('127.0.0.2', item['host_port']))
+        finally:
+            squatter.close()
+        agent.ports([])
+        self.wait_items(0)
+        agent.ports([server.port])
+        item = self.wait_items(1)[0]
+        self.assertEqual(item['tailscale_port'], server.port, 'the number comes back once free')
+
+    def test_restarted_service_gets_the_number_back(self):
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        self.hub.close()
+        close_all()
+        self.hub = self.make_hub()
+        self.sp = self.hub.open_session(str(self.sock_path), self.owner)
+        AutoAgent(self.sock_path).ports([server.port])
+        self.assertEqual(self.wait_items(1)[0]['tailscale_port'], server.port)
+
+    def test_excluded_numbers_and_ranges(self):
+        lo, hi = self.range
+        hub = self.hub
+        hub.exclude = {9011}  # what make_service passes: the service --port
+        for number in (9011, 3128, 3129, lo, hi, (lo + hi) // 2, 9000, 9001, 9502, 9999, 80, 1023):
+            self.assertFalse(hub.same_number_allowed(number), number)
+        for number in (1024, 8000, 8999, 10000, 65535):
+            self.assertTrue(hub.same_number_allowed(number), number)
+        hub.same_ranges = ()
+        self.assertFalse(hub.same_number_allowed(8000), 'empty --ports-same turns it off')
+        # Live: a sandbox port outside the ranges gets the range number on Tailscale.
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        self.assertEqual(item['tailscale_port'], item['host_port'])
+        self.assertFalse(connectable('127.0.0.2', server.port))
+        # And a sandbox port inside the --ports-range never takes its own number.
+        hub.same_ranges = ((1, 65535),)
+        self.assertFalse(hub.same_number_allowed(lo))
+
+    def test_parse_same_ranges(self):
+        self.assertEqual(tp.parse_same_ranges(tp.DEFAULT_SAME), ((1024, 8999), (10000, 65535)))
+        self.assertEqual(tp.parse_same_ranges(' 80-80 , 8000-8100'), ((80, 80), (8000, 8100)))
+        self.assertEqual(tp.parse_same_ranges(''), ())
+        self.assertEqual(tp.parse_same_ranges('  '), ())
+        for bad in ('8000', '0-100', '100-70000', '9000-8000', '1024-8999,', 'a-b', '1024-8999;10000-65535', '-5'):
+            with self.assertRaises(ValueError, msg=bad):
+                tp.parse_same_ranges(bad)
+
+    def test_off_closes_same_number_listeners_and_connections_even_when_the_save_fails(self):
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        via = tcp('127.0.0.2', server.port)
+        via.sendall(b'x')
+        self.assertEqual(via.recv(1), b'x')
+        with mock.patch.object(self.hub.settings, 'update', side_effect=OSError(28, 'No space left on device')):
+            with self.assertRaises(OSError):
+                self.hub.set_tailscale(False)
+        self.assertTrue(closed_by_peer(via))
+        self.assertFalse(connectable('127.0.0.2', server.port), 'off means off, saved or not')
+        item = self.sp.items()[0]
+        self.assertEqual((item['tailscale_port'], item['tailscale_url']), (None, None))
+        self.assertTrue(connectable('127.0.0.1', item['host_port']))
+        self.hub.set_tailscale(True)
+        self.assertEqual(self.sp.items()[0]['tailscale_port'], server.port, 'on again: same number again')
+
+    def test_address_change_rebinds_the_same_number(self):
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        self.addresses = {'127.0.0.1', '127.0.0.3'}
+        self.hub.refresh()
+        item = self.sp.items()[0]
+        self.assertEqual((item['tailscale_port'], item['tailscale_url']), (server.port, f'http://127.0.0.3:{server.port}/'))
+        self.assertTrue(connectable('127.0.0.3', server.port))
+        self.assertFalse(connectable('127.0.0.2', server.port))
+        self.addresses = {'127.0.0.1'}
+        self.hub.refresh()
+        self.assertFalse(connectable('127.0.0.3', server.port))
+        self.assertIsNone(self.sp.items()[0]['tailscale_port'])
+
+    def test_reset_and_removal_close_the_same_number_listener(self):
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        via = tcp('127.0.0.2', server.port)
+        self.sp.close()  # what a reset or removal does
+        self.assertTrue(closed_by_peer(via))
+        self.assertFalse(connectable('127.0.0.2', server.port))
+        self.assertEqual(self.sp.items(), [])
+
+    def test_stopped_server_closes_the_same_number_listener(self):
+        self.hub.set_tailscale(True)
+        server, agent, item = self.forward()
+        agent.ports([])
+        self.wait_items(0)
+        self.assertFalse(connectable('127.0.0.2', server.port))
+
+
+class ScanRateTests(HubCase):
+    """Phase 3 re-review F1: agent churn cannot force a full /proc/net/tcp scan per bind under the hub lock."""
+    SAME = None
+
+    def make_hub(self):
+        self.scans = 0
+
+        def counting(exclude):
+            self.scans += 1
+            return tp.host_listening_ports(exclude)
+        return tp.PortsHub(state_dir=self.base, ports_range=self.range, tailscale=self.tailscale,
+                           log=self.logs.append, refresh_interval=0, host_ports=counting)
+
+    def churn(self, rounds):
+        agent = Agent(self.sock_path)
+        a, b = list(range(41001, 41005)), list(range(42001, 42005))
+        for i in range(rounds):                 # under the 10-per-5-s report limit
+            agent.ports(a if i % 2 == 0 else b)
+            want = set(a if i % 2 == 0 else b)
+            wait(lambda: set(self.sp.forwards) == want, timeout=5)
+
+    def test_agent_churn_does_not_force_a_scan_per_bind(self):
+        self.hub.set_tailscale(True)
+        start, before = time.monotonic(), self.scans
+        self.churn(9)
+        elapsed = time.monotonic() - start
+        scans = self.scans - before
+        self.assertLessEqual(scans, int(elapsed / getattr(tp, 'SCAN_MAX_AGE', 1.0)) + 2,
+                             f'{scans} full /proc/net/tcp scans in {elapsed:.1f} s under the hub lock')
+
+    def test_an_expired_scan_is_redone_before_a_same_number_bind(self):
+        old = tp.SCAN_MAX_AGE
+        tp.SCAN_MAX_AGE = 0.0
+        try:
+            self.hub.set_tailscale(True)
+            before = self.scans
+            self.churn(2)
+            self.assertGreaterEqual(self.scans - before, 8, 'every bind scans when the cache age is 0')
+        finally:
+            tp.SCAN_MAX_AGE = old
 
 
 class PortsDocker(FakeDocker):

@@ -41,6 +41,7 @@ Contract as implemented:
 - Status pill: Opening / Saved / Saving / Unsaved / Merged / Conflict / Offline / Not saved / Read-only.
 - Persistence across app renders: the session element is moved into the new `#live-report-host` and CodeMirror refreshed; focus is restored when the render removed it. Leaving a report parks the session: pending text is flushed, SSE closed, and the session destroyed once clean (dirty/conflicted sessions stay alive until saved).
 - Undo history restarts whenever foreign text enters the editor, so Ctrl+Z cannot remove someone else's text and autosave it.
+- Foreign text also re-renders the full Preview when it is on, keeping its scroll position: EasyMDE renders that pane only when it is toggled, so agent edits used to reach the hidden editor while the Preview being read stayed stale. Side by side already follows edits.
 - Author defaults to "Board editor"; `localStorage['bounty-board-live-author']` overrides it.
 
 ### Server changes on this branch

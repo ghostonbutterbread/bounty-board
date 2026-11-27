@@ -155,9 +155,11 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
                  max_connections=MAX_CONNECTIONS, ping_interval=PING_INTERVAL, peer_timeout=PEER_TIMEOUT,
                  max_anonymous=MAX_ANONYMOUS, max_pending=MAX_PENDING, request_deadline=REQUEST_DEADLINE,
                  preview_ports=False, ports_range=terminal_ports.DEFAULT_RANGE, tailscale_address='auto',
-                 tailscale=None, ports_refresh=terminal_ports.TAILSCALE_REFRESH, report_agent=None, agent_connect=None):
-    """``tailscale`` (a terminal_ports.TailscaleAddress) is for tests only; the
-    command line reaches ``tailscale_address``. ``report_agent`` is a
+                 tailscale=None, ports_refresh=terminal_ports.TAILSCALE_REFRESH,
+                 ports_same=terminal_ports.parse_same_ranges(terminal_ports.DEFAULT_SAME), host_ports=None,
+                 report_agent=None, agent_connect=None):
+    """``tailscale`` (a terminal_ports.TailscaleAddress) and ``host_ports`` are for tests only;
+    the command line reaches ``tailscale_address``. ``report_agent`` is a
     terminal_report_agent.ReportAgentHub and ``agent_connect`` a
     terminal_connect.ConnectHub (both off when None)."""
     root = Path(root).absolute()
@@ -181,7 +183,8 @@ def make_service(root, *, port=9011, allowed_origins=(), allowed_users=(), hash_
     if preview_ports:
         ports = terminal_ports.PortsHub(state_dir=state_dir, ports_range=ports_range, exclude={port},
                                         tailscale=tailscale or terminal_ports.TailscaleAddress(tailscale_address),
-                                        refresh_interval=ports_refresh)
+                                        refresh_interval=ports_refresh, same_ranges=ports_same,
+                                        host_ports=host_ports or terminal_ports.host_listening_ports)
     # Off: no ports.sock, no listeners, no agent connection.
     if backend is not None and hasattr(backend, 'ports_hub'):
         backend.ports_hub = ports
@@ -785,12 +788,16 @@ def main(argv=None):
                         help='forward ports that a sandbox listens on to host ports (127.0.0.1, plus Tailscale when '
                              'switched on in Settings)')
     parser.add_argument('--ports-range', default='9100-9199', help='host ports for preview ports (default 9100-9199)')
+    parser.add_argument('--ports-same', default=terminal_ports.DEFAULT_SAME,
+                        help='on Tailscale, give a sandbox port its own number when free and in these ranges '
+                             f'(default {terminal_ports.DEFAULT_SAME}; empty turns it off)')
     parser.add_argument('--tailscale-address', default='auto',
                         help='"auto" (an address in 100.64.0.0/10, tailscale0 first) or that IPv4 address')
     agent_flags(parser)
     args = parser.parse_args(argv)
     try:
         args.ports_range = terminal_ports.parse_range(args.ports_range)
+        args.ports_same = terminal_ports.parse_same_ranges(args.ports_same)
         args.tailscale_address = terminal_ports.parse_tailscale_address(args.tailscale_address)
     except ValueError as error:
         parser.error(str(error))
@@ -813,7 +820,7 @@ def main(argv=None):
         report_agent, agent_connect = build_agent_hubs(args)
     except ValueError as error:
         parser.error(str(error))
-    tailscale = None
+    tailscale = host_ports = None
     if args.backend == 'local-test-only':
         tmp = os.path.realpath(os.environ.get('TMPDIR', '/nonexistent'))
         if os.environ.get('BBTERM_ALLOW_LOCAL_BACKEND') != '1' or not os.path.realpath(args.root).startswith(tmp + '/'):
@@ -832,6 +839,12 @@ def main(argv=None):
             tailscale = terminal_ports.TailscaleAddress(
                 networks=[ipaddress.ip_network('127.0.0.0/8')], addresses=lambda: {a for a in [alias()] if a},
                 interfaces=lambda: ['tailscale0'], interface=lambda name: alias())
+        test_sandbox_ports = os.environ.get('BBTERM_TEST_SANDBOX_PORTS')
+        if test_sandbox_ports:
+            # TEST ONLY, same gate: the local backend's "sandbox servers" are host processes,
+            # so the host-listener scan would see them; in Docker they are in the container.
+            ignored = {int(n) for n in test_sandbox_ports.split(',') if n.strip().isdigit()}
+            host_ports = lambda exclude: terminal_ports.host_listening_ports(exclude) - ignored  # noqa: E731
     else:
         import terminal_proxy
         backend = sb.DockerBackend(image=args.image, state_dir=args.state_dir, proxy=terminal_proxy.FilteringProxy(),
@@ -843,6 +856,7 @@ def main(argv=None):
                               remove_after=args.remove_after, min_free_memory=args.min_free_memory,
                               reap_interval=max(1, args.reap_interval), preview_ports=args.preview_ports,
                               ports_range=args.ports_range, tailscale_address=args.tailscale_address, tailscale=tailscale,
+                              ports_same=args.ports_same, host_ports=host_ports,
                               report_agent=report_agent, agent_connect=agent_connect)
     except ValueError as error:
         parser.error(str(error))

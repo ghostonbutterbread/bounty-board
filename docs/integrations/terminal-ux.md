@@ -76,11 +76,13 @@ window.BoardTerminal.on('message', message => { if (message.type === 'ports') {}
 window.BoardTerminal.off('session', handler);
 window.BoardTerminal.selector();                  // {family, program, lane, path} or null
 window.BoardTerminal.session();                   // the hello `session` object while the drawer is open, else null
+window.BoardTerminal.on('terminal', term => {});  // the xterm instance (replayed to late subscribers)
 ```
 
 - `slot(name)` (`[a-z][a-z0-9-]*`, up to 32 chars) returns the same element every time, created on first use and placed between the status text and the dock picker; it is hidden while empty (`:empty`).
 - `session` fires `{selector, session}` on hello (attach) and on a sandbox reset, and `{selector: null, session: null}` once when the drawer closes or the report changes.
 - `message` fires with every parsed server text message object (after the drawer's own handling), so a later module can handle new types such as `{"type": "ports", ...}` without editing this file.
+- `terminal` fires once with the xterm instance when the first session attaches, and immediately for a listener added later. Modules may add xterm link providers or decorations; nothing may type into the terminal except through this file's paste/type filter.
 - `on` returns an unsubscribe function; a throwing listener is logged and does not affect others.
 - The other `BoardTerminal` members (`term`, `status`, `checks`, `prefs`, `unsafeText`, `unsafePaste`, `shortcutProblem`, ...) are for tests and diagnostics only.
 - Drawer tabs (`registerTab`, `openTab`, `updateTab`, `removeTab`), code-block actions (`registerBlockAction`, `refreshBlocks`) and `mount()` / the `mount` event were added for the report agent UI; see [`report-agent-ui.md`](report-agent-ui.md#seams-added-to-sandbox-terminaljs).
