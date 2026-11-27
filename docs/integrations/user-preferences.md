@@ -1,0 +1,26 @@
+# User preferences integration dossier
+
+- **Status:** feature; independent review and full isolated gates pending.
+- **Branch / owner:** `feat/board-user-conf`, assigned builder.
+- **Base:** `63f3f4f037ac131c886af005f33106419f651d96` (`origin/beta` at start).
+- **Target:** `beta`. This branch is not a deployment.
+- **Recovery checkpoint / implementation:** recorded in the follow-up handoff commit.
+- **Intent:** Ryushe requested `~/.config/bountyboard/user.conf` so theme, recent programs and settings survive Board restarts and other devices. Do not change `--config`, terminal network state, or Shared data.
+
+## Contract
+
+- The server user's `~/.config/bountyboard/user.conf` is JSON, independent of the data root and service config. `make_server(..., user_config=...)` exists for disposable fixtures, not as a new CLI option. Missing means defaults; a failed or corrupt read refuses all writes without replacing the file. Writes use a private 0600 exclusive temporary file, fsync and directory-relative atomic replacement. A 0600 advisory lock serializes cooperating Board processes; path components and the target are opened without following symlinks; paths inside the Board data root or `~/Shared` are refused.
+- `GET /api/user-preferences` uses the existing Host/Origin/Sec-Fetch gate. `POST` also requires same-origin, the Board request header, JSON and a bounded body. The allowlisted API exposes only UI preference keys. It applies key patches under the lock; list fields and terminal Settings are separate keys so stale clients do not replace unrelated options. Same-key concurrent edits are last-completed-write wins; there is no multi-device live push.
+- Existing browser values migrate once per origin, filling only absent server keys. Server values win. Startup theme/sidebar defaults are not writes. Before application initialization, a synchronous bootstrap loads the server view into the existing browser compatibility cache. Pending failed edits are held per key locally and retried, and a persistent alert makes read/save failure visible. A browser with storage disabled cannot retain a local fallback across reloads.
+- Shared: theme, last/recent programs, archived flag, sidebar, finding sorting, dashboard and report-view preferences, Recent/Submissions list fields, and Terminal Settings (copy switches, shortcut and default dock). Excluded: drafts, report content, credentials, tab locks, terminal network exposure, and free-text search recents (queries can contain sensitive text). Existing search recents stay in browser storage. The current terminal dock and maximize state stay in sessionStorage; terminal open/size state retains its existing browser-local behavior and is not sent to the server. The default dock remains distinct from the current tab's dock.
+
+## Evidence and review
+
+- `python3 -m unittest tests.test_user_preferences -v`: 9 synthetic API tests passed as non-root, including corrupt/unreadable files, symlinks, concurrent distinct keys, migration precedence, size and origin checks. Each server uses an explicit temporary root and config override.
+- `CHROME_BIN=/opt/google/chrome/chrome NODE_PATH=/home/ryushe/projects/bounty-board/node_modules node --test --test-concurrency=1 static/tests/user-preferences.synthetic.test.cjs`: 1 passed. Exercises actual Board and Settings controls, default/no-write startup, migration, refresh, distinct browser context, restart, distinct stale-tab list changes, corruption, visible failure and browser-backed retry. The fixture explicitly supplies a temporary config. Playwright resolved to `/home/ryushe/node_modules/playwright` 1.60.0 because the specified NODE_PATH has no package.
+- Browser suite launched with disposable HOME before worker isolation was added; it exercised a mixed in-progress tree and is not final-tree evidence. It exposed cross-test preference contamination; individual reruns of three affected tests passed after isolating their synthetic config fixtures. `npm test` now preloads a temporary HOME per Node test worker; a two-worker canary verified distinct disposable paths. Full exact-tree npm and broad gates remain required after the final implementation checkpoint.
+- Parent is responsible for independent complete-diff review, integration and release gates. No review has yet been obtained.
+
+## Integration and activation boundary
+
+No push, merge, deployment, service restart or real user config write is authorized by this branch. Review the synchronous bootstrap latency, cross-tab pending-write behavior and preference/privacy allowlist. Direct standalone browser tests should use `node --require ./static/tests/isolate-home.cjs --test ...` or give every synthetic `make_server` a temporary `user_config`; otherwise older fixtures can write the real user's preferences. For full gates, run with temporary HOME/XDG and synthetic roots. Resolve gate failures and obtain independent review before beta. Delete this branch-local dossier during integration; durable behavior is in the code and the updated terminal UX note.

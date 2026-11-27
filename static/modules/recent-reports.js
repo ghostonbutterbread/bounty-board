@@ -195,7 +195,15 @@
         L.subs = strings(saved.subs); L.sevs = strings(saved.sevs); L.classes = strings(saved.classes);
       }
     } catch {}
-    const savePrefs = () => { try { localStorage.setItem(cfg.prefs, JSON.stringify({window: L.window, order: L.order, nav: L.nav, hideNa: L.hideNa, programs: L.programs, lanes: L.lanes, subs: L.subs, sevs: L.sevs, classes: L.classes})); } catch {} };
+    const snapshot = () => ({window: L.window, order: L.order, nav: L.nav, hideNa: L.hideNa, programs: L.programs, lanes: L.lanes, subs: L.subs, sevs: L.sevs, classes: L.classes});
+    let shared = JSON.parse(JSON.stringify(snapshot()));
+    const savePrefs = () => {
+      const next = snapshot(), raw = JSON.stringify(next);
+      try { localStorage.setItem(cfg.prefs, raw); } catch {}
+      for (const [field, value] of Object.entries(next))
+        if (JSON.stringify(value) !== JSON.stringify(shared[field])) window.BoardPreferences?.list(cfg.id, field, value);
+      shared = JSON.parse(raw);
+    };
     // Drop facet values that are not options (old prefs, edited links); true when something changed.
     function validateFacets() {
       const before = JSON.stringify([L.subs, L.sevs, L.classes]);
@@ -440,7 +448,7 @@
       const linked = ctx.state[cfg.stateKey];
       const fromLink = typeof linked === 'string' && linked !== '' && linked !== queryFor();
       if (fromLink) { applyQuery(linked); L.retry = 0; L.keep = false; }
-      else if (validateFacets()) savePrefs();
+      else validateFacets();
       writeUrl();
       el.innerHTML = `<section class="panel recent-panel" aria-label="${esc(cfg.listLabel)}" data-na-scope="${cfg.naScope}"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">${esc(cfg.footnote)} Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
       el.onclick = onClick; el.onchange = onChange; el.oninput = onInput; el.oncontextmenu = onRowMenu; el.onkeydown = onRowKey;
@@ -468,7 +476,7 @@
       L.q = event.target.value; L.offset = 0;
       ctx.state[cfg.stateKey] = queryFor(); // the address bar follows after the debounce
       clearTimeout(L.qTimer);
-      L.qTimer = setTimeout(() => { writeUrl(); savePrefs(); paintControls(); fresh(); }, 200);
+      L.qTimer = setTimeout(() => { writeUrl(); paintControls(); fresh(); }, 200);
     }
     return {L, cfg, mount, load, paint, host, get data() { return L.data; }};
   }
@@ -590,6 +598,7 @@
     if (t.dataset.recentPanelNa) {
       panel.showNa = t.dataset.recentPanelNa === 'show'; panel.retry = 0;
       try { localStorage.setItem(PANEL_NA, panel.showNa ? '1' : '0'); } catch {}
+      window.BoardPreferences?.set(PANEL_NA, panel.showNa ? '1' : '0');
       loadPanel().then(() => ctx.app.querySelector('#dashboard-recent-host [data-recent-panel-na]')?.focus());
     }
   }

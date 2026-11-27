@@ -72,6 +72,6 @@ if mode != 'readonly':
                  '--submission-state --submission-result --submission-report')
     os.environ['FAKE_HELP'] = help_text if mode == 'nodelete' else help_text + ' --delete-finding --actor'
 # Private Board state (previous status of archived findings), outside the data root.
-server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None, state_dir=base / 'state')
+server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None, state_dir=base / 'state', user_config=base / 'config' / 'user.conf')
 print(server.server_port, flush=True)
 server.serve_forever()

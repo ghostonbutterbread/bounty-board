@@ -706,7 +706,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 tailnet_port=443, collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
                 report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
                 live_edit_dir=None, state_dir=None, terminal_url=None, artifact_root=None, recon_query_budget=None,
-                artifact_uploads=False):
+                artifact_uploads=False, user_config=None):
     import os
     import tempfile
     import threading
@@ -736,6 +736,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         tailnet_authorities = frozenset({f'{tailnet_host}:{tailnet_port}'})
         tailnet_origin = f'https://{tailnet_host}:{tailnet_port}'
     root = Path(root).absolute()
+    from user_preferences import UserPreferences, MAX_BYTES as USER_PREFERENCES_MAX_BYTES
+    user_preferences = UserPreferences(user_config if user_config is not None else Path.home() / '.config/bountyboard/user.conf', root)
 
     def root_snapshot():
         import hashlib
@@ -1607,6 +1609,11 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if not self.trusted_request(navigation=url.path in ('/', '/index.html')):
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
+            if url.path == '/api/user-preferences':
+                try:
+                    return self.reply(200, {'preferences': user_preferences.read()})
+                except (OSError, ValueError, UnicodeError):
+                    return self.reply(503, {'error': 'preferences_unavailable'})
             if url.path in ('/api/report-artifacts', '/api/report-artifact', '/api/report-artifact-media', '/api/report-artifacts.zip'):
                 return self.report_artifacts({'/api/report-artifacts': 'list', '/api/report-artifact': 'file',
                                               '/api/report-artifact-media': 'media', '/api/report-artifacts.zip': 'zip'}[url.path])
@@ -1858,6 +1865,23 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.reply(403, {'error': 'editing_disabled', 'message': 'Report writes are disabled; retain your draft.'})
 
         def do_POST(self):
+            if urlsplit(self.path).path == '/api/user-preferences':
+                try:
+                    payload = self.live_read_json(USER_PREFERENCES_MAX_BYTES)
+                    if set(payload) not in ({'set'}, {'migrate'}):
+                        raise ValueError('invalid payload')
+                    migrate = 'migrate' in payload
+                    result = user_preferences.update(payload['migrate' if migrate else 'set'], migrate=migrate)
+                    return self.reply(200, {'preferences': result})
+                except PermissionError:
+                    self.close_connection = True
+                    return self.reply(403, {'error': 'untrusted_origin'})
+                except (ValueError, UnicodeError):
+                    self.close_connection = True
+                    return self.reply(400, {'error': 'invalid_or_unreadable_preferences'})
+                except OSError:
+                    self.close_connection = True
+                    return self.reply(503, {'error': 'preferences_unavailable'})
             if urlsplit(self.path).path == '/api/report-artifact-upload':  # feat/board-artifact-uploads
                 return self.artifact_upload()
             if urlsplit(self.path).path == '/api/report-artifact-delete':  # feat/board-artifact-delete

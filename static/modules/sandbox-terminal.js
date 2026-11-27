@@ -646,6 +646,7 @@
   function setDefaultDock(dock) {
     if (!DOCKS.includes(dock)) return;
     prefs.dock = dock;
+    window.BoardPreferences?.terminal('dock', dock);
     savePrefs(); layout(); notifyPrefs();
   }
 
@@ -1312,13 +1313,13 @@
     };
     const stop = text => { recording = false; message.textContent = text || idleHint(); sync(); };
     const saveShortcut = shortcut => {
-      prefs.shortcut = shortcut; savePrefs(); paintTitles(); notifyPrefs();
+      prefs.shortcut = shortcut; savePrefs(); window.BoardPreferences?.terminal('shortcut', shortcut); paintTitles(); notifyPrefs();
       stop(`Saved. ${shortcutText()} now opens and closes the terminal.${shortcutText() === 'Ctrl+E' ? '' : ' Ctrl+E goes to the shell again.'}`);
     };
     host.addEventListener('change', event => {
       const key = event.target.dataset?.termPref;
       if (!key) return;
-      prefs[key] = event.target.checked; savePrefs(); notifyPrefs();
+      prefs[key] = event.target.checked; savePrefs(); window.BoardPreferences?.terminal(key, prefs[key]); notifyPrefs();
     });
     host.addEventListener('click', event => {
       const target = event.target.closest('button');

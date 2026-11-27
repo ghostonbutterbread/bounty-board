@@ -156,7 +156,7 @@
   const pickButton = (kind, label, inner) => window.BoardFindingActions ? `<button type="button" class="pick-trigger" data-${kind}-pick aria-haspopup="menu" aria-expanded="false" aria-label="${esc(label)}">${inner}</button>` : inner;
   const programLabel = p => p ? String(p.name || p.id || 'Unknown program') : 'Unknown program';
   const readStore = (key,fallback) => {try {const raw=localStorage.getItem(key);return raw==null ? fallback : JSON.parse(raw);} catch {return fallback;}};
-  const writeStore = (key,value) => {try {localStorage.setItem(key,JSON.stringify(value));} catch {}};
+  const writeStore = (key,value) => {const raw=JSON.stringify(value);try {localStorage.setItem(key,raw);} catch {} window.BoardPreferences?.set(key,raw);};
 
   // ---- BoardUI: shared UI primitives for the app and feature modules ----
   const uiLayer=document.querySelector('#ui-layer') || document.body.appendChild(Object.assign(document.createElement('div'),{id:'ui-layer'}));
@@ -457,14 +457,14 @@
   const hasUnsaved = () => state.metadataPending || state.metadataDrafts.size>0 || recoveryPaths.size>0 || [...state.drafts.values()].some(d => d.hasDraft || d.storageError || d.storageBlocked) || state.rationaleDrafts.size>0;
   window.addEventListener('beforeunload', event => { if (hasUnsaved()) { event.preventDefault(); event.returnValue = ''; } });
   const THEMES=[['light','Light','sun-o'],['dark','Dark','moon-o'],['dusk','Dusk','adjust']];
-  function applyTheme(value) {
+  function applyTheme(value, persist=true) {
     if (!THEMES.some(([key])=>key===value)) value = 'light';
     document.documentElement.dataset.theme=value;
     const [,label,glyph]=THEMES.find(([key])=>key===value);
     themeButton.innerHTML=icon(glyph);themeButton.title=`Theme: ${label}`;
-    try { localStorage.setItem('bounty-board-theme',value); } catch {}
+    if(persist){try { localStorage.setItem('bounty-board-theme',value); } catch {} window.BoardPreferences?.set('bounty-board-theme',value);}
   }
-  try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light'); } catch { applyTheme('light'); }
+  try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light',false); } catch { applyTheme('light',false); }
   themeButton.addEventListener('click', () => openMenu(themeButton,[{heading:'Theme'},...THEMES.map(([key,label,glyph])=>({label,icon:glyph,checked:document.documentElement.dataset.theme===key,onSelect:()=>applyTheme(key)}))],{label:'Theme',align:'end'}));
   // Sidebar items and section tabs are links (middle-click and Ctrl/Cmd+click
   // open a new tab); a plain left click keeps the in-app behaviour.
@@ -479,12 +479,12 @@
   document.querySelectorAll('[data-view]').forEach(link => link.addEventListener('click', event => {if(!plainClick(event))return;event.preventDefault();state.view=link.dataset.view;state.routeNotice='';routePush=true;render();}));
   // Collapsible sidebar (icon rail); the preference persists per browser origin.
   const shell=document.querySelector('#shell'), sidebarToggle=document.querySelector('#sidebar-toggle');
-  function setSidebar(collapsed) {
+  function setSidebar(collapsed, persist=true) {
     shell.classList.toggle('sidebar-collapsed',collapsed);sidebarToggle.setAttribute('aria-expanded',String(!collapsed));
     sidebarToggle.title=collapsed?'Expand sidebar':'Collapse sidebar';sidebarToggle.querySelector('span').textContent=collapsed?'Expand sidebar':'Collapse sidebar';
-    writeStore('bounty-board-sidebar-collapsed',collapsed);
+    if(persist)writeStore('bounty-board-sidebar-collapsed',collapsed);
   }
-  setSidebar(readStore('bounty-board-sidebar-collapsed',false)===true);
+  setSidebar(readStore('bounty-board-sidebar-collapsed',false)===true,false);
   sidebarToggle.addEventListener('click',()=>setSidebar(!shell.classList.contains('sidebar-collapsed')));
   state.sort=(s=>s && typeof s.key==='string' && ['title','severity','class','status','id','first_seen','last_seen'].includes(s.key) && ['asc','desc'].includes(s.dir) ? s : {key:'',dir:'asc'})(readStore('bounty-board-finding-sort',null));
   state.dashWork=readStore('bounty-board-dashboard-work','all')==='open' ? 'open' : 'all';
@@ -2090,7 +2090,7 @@
     else if(el.id==='program-select'){++laneGeneration;state.program=el.value;state.lane='';state.report='';state.filters=emptyFilters();normalizeSelection();markProgramUsed();routePush=true;render();}
     else if(el.id==='lane-select'){++laneGeneration;state.lane=el.value;state.report='';state.filters=emptyFilters();markProgramUsed();routePush=true;render();}
     else if(el.id==='report-select'){state.report=el.value;routePush=true;render();}
-    else if(el.matches('[data-show-archived]')){state.showArchived=el.checked;try{localStorage.setItem('bounty-board-show-archived',String(el.checked));}catch{}render();app.querySelector('[data-show-archived]')?.focus();}
+    else if(el.matches('[data-show-archived]')){state.showArchived=el.checked;try{localStorage.setItem('bounty-board-show-archived',String(el.checked));}catch{}window.BoardPreferences?.set('bounty-board-show-archived',String(el.checked));render();app.querySelector('[data-show-archived]')?.focus();}
     else if(el.id==='report-nav-toggle'){state.reportNav=el.checked;render();app.querySelector('#report-nav-toggle')?.focus();}
     else if(el.id==='report-hide-na'){state.reportHideNa=el.checked;writeStore('bounty-board-report-list-hide-na',el.checked);render();app.querySelector('#report-hide-na')?.focus();}
     else if(el.dataset.metadata)saveMetadata(el.dataset.metadata,el.dataset.id,el.value);

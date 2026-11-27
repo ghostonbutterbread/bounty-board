@@ -50,6 +50,6 @@ if mode == 'writer':
     writer.chmod(0o700)
     os.environ['FAKE_LOG'] = str(base / 'writer.log')
     os.environ['FAKE_MODE'] = str(base / 'mode')
-server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None)
+server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None, user_config=base / 'config' / 'user.conf')
 print(server.server_port, flush=True)
 server.serve_forever()
