@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -28,6 +30,10 @@ class UserPreferencesTests(unittest.TestCase):
         self.temp.cleanup()
 
     def request(self, method, payload=None, override=None):
+        if method == 'POST' and isinstance(payload, dict) and set(payload) == {'set'} and isinstance(payload['set'], dict):
+            status, snapshot = self.request('GET')
+            revisions = snapshot.get('revisions', {}) if status == 200 else {}
+            payload = {**payload, 'expected': {key: revisions.get(key, 0) for key in payload['set']}}
         conn = HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
         headers = {'Origin': f'http://127.0.0.1:{self.server.server_port}',
                    'X-Requested-With': 'Bounty-Board', 'Content-Type': 'application/json'}
@@ -39,7 +45,7 @@ class UserPreferencesTests(unittest.TestCase):
         return result
 
     def test_absent_then_persist(self):
-        self.assertEqual(self.request('GET'), (200, {'preferences': {}}))
+        self.assertEqual(self.request('GET'), (200, {'preferences': {}, 'revisions': {}}))
         self.assertFalse(self.config.exists())
         self.assertEqual(self.request('POST', {'set': {'bounty-board-theme': 'dark'}})[0], 200)
         self.assertEqual(self.request('GET')[1]['preferences']['bounty-board-theme'], 'dark')
@@ -61,11 +67,54 @@ class UserPreferencesTests(unittest.TestCase):
             self.server = original
             server.shutdown(); thread.join(); server.server_close()
 
+    def test_standalone_report_links_fixture_does_not_write_inherited_home(self):
+        home = Path(self.temp.name) / 'sentinel-home'
+        config = home / '.config/bountyboard/user.conf'
+        config.parent.mkdir(parents=True)
+        original = '{"bounty-board-theme":"dusk"}'
+        config.write_text(original)
+        root = Path(self.temp.name) / 'fixture-root'
+        env = dict(os.environ, HOME=str(home), TMPDIR=self.temp.name, PYTHONPATH=str(Path(app.__file__).parent))
+        proc = subprocess.Popen([sys.executable, '-u', 'tests/report_links_fixture.py', str(root)],
+                                cwd=Path(app.__file__).parent, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            port = int(proc.stdout.readline().strip())
+            conn = HTTPConnection('127.0.0.1', port, timeout=5)
+            conn.request('POST', '/api/user-preferences', json.dumps({'set': {'bounty-board-theme': 'dark'}, 'expected': {'bounty-board-theme': 0}}),
+                         {'Origin': f'http://127.0.0.1:{port}', 'X-Requested-With': 'Bounty-Board', 'Content-Type': 'application/json'})
+            response=conn.getresponse(); response.read(); conn.close()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(config.read_text(), original)
+        finally:
+            proc.terminate(); proc.wait(timeout=10); proc.stdout.close()
+
     def test_migration_fills_missing_only(self):
         self.request('POST', {'set': {'bounty-board-theme': 'dark'}})
         status, body = self.request('POST', {'migrate': {'bounty-board-theme': 'light', 'terminal.dock': 'left'}})
         self.assertEqual(status, 200)
         self.assertEqual(body['preferences'], {'bounty-board-theme': 'dark', 'terminal.dock': 'left'})
+
+    def test_conditional_edit_rejects_stale_revision(self):
+        status, body = self.request('GET')
+        self.assertEqual(status, 200)
+        self.assertIn('revisions', body)
+        base = body['revisions'].get('bounty-board-theme', 0)
+        status, body = self.request('POST', {'set': {'bounty-board-theme': 'dark'}, 'expected': {'bounty-board-theme': base}})
+        self.assertEqual(status, 200)
+        self.assertGreater(body['revisions']['bounty-board-theme'], base)
+        status, body = self.request('POST', {'set': {'bounty-board-theme': 'dusk'}, 'expected': {'bounty-board-theme': base}})
+        self.assertEqual(status, 409)
+        self.assertEqual(self.request('GET')[1]['preferences']['bounty-board-theme'], 'dark')
+
+    def test_revision_detects_aba_and_preserves_other_keys(self):
+        self.assertEqual(self.request('POST', {'set': {'bounty-board-theme': 'dark'}})[0], 200)
+        old = self.request('GET')[1]['revisions']['bounty-board-theme']
+        self.assertEqual(self.request('POST', {'set': {'bounty-board-theme': 'dusk'}})[0], 200)
+        self.assertEqual(self.request('POST', {'set': {'bounty-board-theme': 'dark'}})[0], 200)
+        status, _ = self.request('POST', {'set': {'bounty-board-theme': 'light', 'terminal.dock': 'top'},
+                                          'expected': {'bounty-board-theme': old, 'terminal.dock': 0}})
+        self.assertEqual(status, 409)
+        self.assertEqual(self.request('GET')[1]['preferences'], {'bounty-board-theme': 'dark'})
 
     def test_concurrent_distinct_keys_are_preserved(self):
         barrier = threading.Barrier(3)

@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 root = Path(sys.argv[1])
 for name in ('alpha', 'beta'):
@@ -20,6 +21,6 @@ for name in ('alpha', 'beta'):
     body = maps / entries[0]['path']
     body.parent.mkdir(parents=True)
     body.write_text(f'{name} Capability:\n- grants: observed\n<img src="https://evil.invalid/pixel" onerror="alert(1)">\n[link](https://evil.invalid/)')
-server = app.make_server(root, port=0)
+server = make_test_server(root, port=0)
 print(server.server_port, flush=True)
 server.serve_forever()

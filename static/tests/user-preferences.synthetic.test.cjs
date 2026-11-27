@@ -7,6 +7,7 @@ const path = require('node:path');
 const {spawn} = require('node:child_process');
 const {chromium} = require('playwright');
 const {once} = require('node:events');
+const {assertPreferencesOnly} = require('./preference-write-check.cjs');
 const repo = path.resolve(__dirname, '../..');
 const source = `import sys,app
 s=app.make_server(sys.argv[1],int(sys.argv[3]),user_config=sys.argv[2],terminal_url='/terminal/')
@@ -25,6 +26,104 @@ async function stop(child) { if(child && child.exitCode===null && child.signalCo
 async function waitSaved(page) {
   await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith('bounty-board-preferences-pending:v1:')));
 }
+
+test('draft write guard rejects report endpoints and draft content in preference payloads', () => {
+  const base='http://127.0.0.1:1234', draft='draft-sentinel-content';
+  assert.throws(()=>assertPreferencesOnly([{method:'POST',url:base+'/api/live/save',body:'{}'}],base,[draft]));
+  assert.throws(()=>assertPreferencesOnly([{method:'POST',url:base+'/api/user-preferences',body:JSON.stringify({set:{'bounty-board-theme':draft},expected:{'bounty-board-theme':0}})}],base,[draft]));
+  assert.doesNotThrow(()=>assertPreferencesOnly([{method:'POST',url:base+'/api/user-preferences',body:JSON.stringify({set:{'bounty-board-theme':'dark'},expected:{'bounty-board-theme':0}})}],base,[draft]));
+});
+
+async function withEmptyBoard(initial, run) {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bup-review-'));
+  const root=path.join(dir,'data'), config=path.join(dir,'private','user.conf');
+  fs.mkdirSync(root,{recursive:true});
+  if(initial) { fs.mkdirSync(path.dirname(config),{recursive:true}); fs.writeFileSync(config,JSON.stringify(initial)); }
+  let child,browser;
+  try {
+    const running=await start(root,config); child=running.child;
+    browser=await chromium.launch({executablePath:process.env.CHROME_BIN,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+    await run({browser,base:`http://127.0.0.1:${running.port}`,config});
+  } finally { if(browser)await browser.close(); await stop(child); fs.rmSync(dir,{recursive:true,force:true}); }
+}
+
+test('failed older same-key edit does not overwrite a newer device', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const a=await browser.newPage(), b=await browser.newPage();
+  await a.goto(base); await b.goto(base);
+  await a.route('**/api/user-preferences',r=>r.request().method()==='POST'?r.abort('failed'):r.continue());
+  await a.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dusk'));
+  await a.locator('#preferences-save-error').waitFor();
+  await b.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dark'));
+  await waitSaved(b);
+  assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark');
+  await a.unroute('**/api/user-preferences');
+  await a.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await a.waitForTimeout(1200);
+  assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark', 'stale pending edit must not win');
+  assert.equal(await a.locator('#preferences-save-error').isVisible(),true,'conflict remains visible');
+  await a.reload();
+  await a.locator('#preferences-save-error').waitFor();
+  assert.equal(await a.evaluate(()=>localStorage.getItem('bounty-board-preferences-pending:v1:bounty-board-theme')),'dusk');
+  assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark','reload retains the unsent conflict');
+}));
+
+test('failed bootstrap retries the read and hydrates before clearing alert', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark'},async({browser,base})=>{
+  const page=await browser.newPage();
+  await page.route('**/api/user-preferences',r=>r.request().method()==='GET'?r.abort('failed'):r.continue());
+  await page.goto(base); await page.locator('#preferences-save-error').waitFor();
+  await page.unroute('**/api/user-preferences');
+  await page.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark',null,{timeout:4000});
+  await page.waitForFunction(()=>!document.querySelector('#preferences-save-error'));
+}));
+
+test('server theme is applied when browser storage is blocked', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark'},async({browser,base})=>{
+  const context=await browser.newContext();
+  await context.addInitScript(()=>{Storage.prototype.setItem=function(){throw new DOMException('blocked','SecurityError');};});
+  const page=await context.newPage(); await page.goto(base);
+  await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark',null,{timeout:4000});
+  assert.equal(await page.locator('#preferences-save-error').isVisible(),true,'blocked fallback is visible');
+}));
+
+test('preferences GET cannot block DOMContentLoaded indefinitely', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark'},async({browser,base})=>{
+  const page=await browser.newPage(); let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  await page.route('**/api/user-preferences',async route=>{if(route.request().method()==='GET')await gate; await route.continue().catch(()=>{});});
+  const navigation=page.goto(base,{waitUntil:'domcontentloaded'});
+  const finished=await Promise.race([navigation.then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),1200))]);
+  release(); await navigation;
+  assert.equal(finished,true,'DOMContentLoaded must not await the preference server');
+}));
+
+test('reports insertion and stale rerender do not save the details default', {timeout:60000}, async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bup-details-'));
+  const root=path.join(dir,'data'), config=path.join(dir,'private','user.conf');
+  const lane=path.join(root,'web_bounty','fictional','web');
+  fs.mkdirSync(path.join(lane,'ledgers'),{recursive:true});
+  fs.mkdirSync(path.join(lane,'reports'),{recursive:true});
+  fs.writeFileSync(path.join(lane,'ledgers','ledger.json'), JSON.stringify({findings:[]}));
+  fs.writeFileSync(path.join(lane,'reports','notes.md'),'# fictional');
+  let child,browser;
+  try {
+    const running=await start(root,config); child=running.child;
+    const base=`http://127.0.0.1:${running.port}`;
+    browser=await chromium.launch({executablePath:process.env.CHROME_BIN,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+    const a=await browser.newPage(), b=await browser.newPage();
+    let posts=[];
+    a.on('request',r=>{if(r.method()==='POST' && r.url().endsWith('/api/user-preferences'))posts.push(r.postData());});
+    const url=base+'/#/programs/web_bounty%2Ffictional/web/reports';
+    await a.goto(url); await a.locator('[data-report-browser]').waitFor();
+    await a.waitForTimeout(500);
+    assert.deepEqual(posts,[], 'opening Reports does not save defaults');
+    await b.goto(url); await b.locator('[data-report-browser] summary').click();
+    await waitSaved(b);
+    assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-report-list-open'],'false');
+    await a.getByRole('link',{name:'Findings',exact:true}).first().click();
+    await a.getByRole('link',{name:'Reports',exact:true}).first().click();
+    await a.locator('[data-report-browser]').waitFor(); await a.waitForTimeout(500);
+    assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-report-list-open'],'false');
+  } finally { if(browser)await browser.close(); await stop(child); fs.rmSync(dir,{recursive:true,force:true}); }
+});
 
 test('server preferences migrate, survive reload/new device/restart, and report a failed save', {timeout:120000}, async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bup-'));

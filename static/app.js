@@ -1973,7 +1973,11 @@
     const tab=event.target.closest('a[data-section]');if(!tab || !plainClick(event))return;
     event.preventDefault();state.section=tab.dataset.section;state.highlight='';routePush=true;render();
   });
-  app.addEventListener('toggle',event=>{if(event.target.matches?.('[data-report-browser]'))writeStore('bounty-board-report-list-open',event.target.open);},true);
+  // A details element emits toggle when inserted open too. Only a real summary
+  // activation represents the user's choice; rerenders must not save defaults.
+  const reportBrowserActivations=new WeakSet();
+  app.addEventListener('click',event=>{const summary=event.target.closest?.('[data-report-browser] > summary');if(event.isTrusted && summary)reportBrowserActivations.add(summary.parentElement);},true);
+  app.addEventListener('toggle',event=>{if(event.target.matches?.('[data-report-browser]') && reportBrowserActivations.has(event.target)){reportBrowserActivations.delete(event.target);writeStore('bounty-board-report-list-open',event.target.open);}},true);
   app.addEventListener('focusout',event=>{if(!phaseStatus.contains(event.relatedTarget) && !portfolioAction.contains(event.relatedTarget))retryDeferredApply();});
   app.addEventListener('click',async event=>{
     const target=event.target.closest('button');if(!target)return;

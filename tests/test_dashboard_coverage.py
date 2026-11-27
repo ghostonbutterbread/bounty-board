@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class DashboardCoverageTests(unittest.TestCase):
@@ -33,7 +34,7 @@ class DashboardCoverageTests(unittest.TestCase):
                 ('c','xss','untested',None,None,None,'[]','[]',None,'old'),
                 ('d','xss','open',None,None,None,'[]','[]',None,'@mapper-run:old-run')])
             writer.commit()
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             try:
                 conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
@@ -73,7 +74,7 @@ class DashboardCoverageTests(unittest.TestCase):
                     db.execute('INSERT INTO surfaces VALUES (?,?,?,?,?,?,?,?)', ('b','endpoint','例.test','/未評価',input_key,None,None,None))
                     db.execute('INSERT INTO assessments VALUES (?,?,?,?,?,?,?,?,?,?)', ('a','xss','open',None,None,None,'[]','[]',None,'@mapper-run:実行'))
                     db.commit()
-                server = app.make_server(root, port=0)
+                server = make_test_server(root, port=0)
                 thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
                 try:
                     conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
@@ -107,7 +108,7 @@ class DashboardCoverageTests(unittest.TestCase):
             INSERT INTO surfaces VALUES ('b','endpoint','例.test','/未評価',3.5,NULL,NULL,NULL);
             INSERT INTO assessments VALUES ('a','xss','open',NULL,NULL,NULL,'["鍵"]','[]',NULL,'@mapper-run:42');''')
             db.commit()
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             def get_lane():
                 conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
@@ -152,7 +153,7 @@ class DashboardCoverageTests(unittest.TestCase):
             for index, kind in enumerate([1, '1', '1', None, 'null', 'unknown', 1.5, '1.5']):
                 db.execute('INSERT INTO surfaces VALUES (?,?,?,?,?,?,?,?)', (str(index), kind, 'h', '/s', None, None, None, None))
             db.commit(); db.close()
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             try:
                 conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
@@ -208,7 +209,7 @@ class DashboardCoverageTests(unittest.TestCase):
             INSERT INTO surfaces VALUES ('a','endpoint','h','/s',NULL,NULL,NULL,NULL);
             INSERT INTO assessments VALUES ('a','xss','open',NULL,NULL,NULL,'[]','[]',NULL,NULL);''')
             db.commit()
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             real_dumps = json.dumps
             failed = set()
@@ -267,7 +268,7 @@ class DashboardCoverageTests(unittest.TestCase):
                 axes = deep if name == 'bad' else '[]'
                 db.execute('INSERT INTO assessments VALUES (?,?,?,?,?,?,?,?,?,?)', ('a','xss','open',None,None,None,axes,'[]',None,None))
                 db.commit(); db.close()
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             try:
                 conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)
@@ -301,7 +302,7 @@ class DashboardCoverageTests(unittest.TestCase):
             INSERT INTO surfaces VALUES ('a','endpoint','h','/s',NULL,NULL,NULL,NULL);
             INSERT INTO assessments VALUES ('a','xss','open',NULL,NULL,NULL,NULL,'[]',NULL,NULL);''')
             db.commit(); db.close()
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             try:
                 conn = HTTPConnection('127.0.0.1', server.server_port, timeout=3)

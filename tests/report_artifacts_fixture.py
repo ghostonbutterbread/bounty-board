@@ -111,10 +111,11 @@ def build(root):
 
 if __name__ == '__main__':
     import app
+    from tests.fixture_preferences import make_server as make_test_server
     target = Path(sys.argv[1])
     mode = sys.argv[2] if len(sys.argv) > 2 else 'live'
     build(target / 'root')
     options = {'live_edit_dir': target / 'live-state'} if mode == 'live' else {}
-    server = app.make_server(target / 'root', port=0, **options)
+    server = make_test_server(target / 'root', port=0, **options)
     print(server.server_port, flush=True)
     server.serve_forever()

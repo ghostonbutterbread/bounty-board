@@ -13,6 +13,7 @@ from unittest import mock
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 import scope_inventory as si
 from scope_inventory import ScopeInventory
 from tests.scope_panel_fixture import DAY, iso, make_acme, make_root, write
@@ -314,7 +315,7 @@ class ReadOnlyTests(Base):
 class HttpTests(Base):
     def setUp(self):
         super().setUp()
-        self.server = app.make_server(self.root, port=0, artifact_root=self.base / 'absent')
+        self.server = make_test_server(self.root, port=0, artifact_root=self.base / 'absent')
         self.addCleanup(self.server.server_close)
         self.port = self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

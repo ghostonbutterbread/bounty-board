@@ -6,10 +6,11 @@ import sys
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from tests.scope_panel_fixture import make_root
 
 root = Path(sys.argv[1])
 make_root(root)
-server = app.make_server(root, port=0, artifact_root=root.parent / 'no-artifact-mount')
+server = make_test_server(root, port=0, artifact_root=root.parent / 'no-artifact-mount')
 print(server.server_port, flush=True)
 server.serve_forever()

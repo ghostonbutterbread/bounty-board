@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from tests import test_ledger_actions
 from tests.search_fixture import write_lane
 
@@ -181,7 +182,7 @@ class EndpointTests(unittest.TestCase):
         self.stop()
 
     def start(self, state=True):
-        self.server = app.make_server(self.root, 0, state_dir=self.state if state else None)
+        self.server = make_test_server(self.root, 0, state_dir=self.state if state else None)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -354,7 +355,7 @@ class EndpointTests(unittest.TestCase):
 
     def test_state_dir_inside_root_is_refused(self):
         with self.assertRaises(ValueError):
-            app.make_server(self.root, 0, state_dir=self.root / 'state')
+            make_test_server(self.root, 0, state_dir=self.root / 'state')
 
 
 class WriterTouchTests(test_ledger_actions.LedgerActionTests):

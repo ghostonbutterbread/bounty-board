@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class MissingSourceTests(unittest.TestCase):
@@ -22,7 +23,7 @@ class MissingSourceTests(unittest.TestCase):
             identity = dict(family='web_bounty', program='example', lane='web', path='report.md',
                             root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest())
             def start():
-                server = app.make_server(root, 0, collaboration_dir=store)
+                server = make_test_server(root, 0, collaboration_dir=store)
                 thread = threading.Thread(target=server.serve_forever); thread.start()
                 return server, thread
             server, thread = start()

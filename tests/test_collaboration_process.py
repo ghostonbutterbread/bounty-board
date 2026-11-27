@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 def _server(root, store, pipe, pause):
@@ -24,7 +25,7 @@ def _server(root, store, pipe, pause):
                 raise RuntimeError('bad handshake')
             return data
         app.read_file = read_then_wait
-    server = app.make_server(root, 0, collaboration_dir=store)
+    server = make_test_server(root, 0, collaboration_dir=store)
     if not pause:
         # Signal the second process at the actual lock boundary, before it
         # attempts acquisition. The parent releases the first only afterward.
@@ -52,7 +53,7 @@ class SharedStoreProcessTests(unittest.TestCase):
             server = None
             try:
                 with self.assertRaisesRegex(ValueError, 'legacy history'):
-                    server = app.make_server(root, 0, collaboration_dir=store)
+                    server = make_test_server(root, 0, collaboration_dir=store)
             finally:
                 if server is not None: server.server_close()
             self.assertEqual(original.current('legacy')['content'], 'old retained draft')
@@ -63,7 +64,7 @@ class SharedStoreProcessTests(unittest.TestCase):
             report = root / 'web_bounty/example/web/reports/example.md'
             report.parent.mkdir(parents=True); report.write_text('old source\n')
             store = Path(tmp) / 'private'
-            server = app.make_server(root, 0, collaboration_dir=store)
+            server = make_test_server(root, 0, collaboration_dir=store)
             thread = threading.Thread(target=server.serve_forever); thread.start()
             identity = hashlib.sha256(os.fsencode(str(root.resolve()))).hexdigest()
             url = '/api/collaboration?' + urlencode(dict(family='web_bounty', program='example', lane='web', path='example.md', root_identity=identity))
@@ -82,7 +83,7 @@ class SharedStoreProcessTests(unittest.TestCase):
             finally:
                 server.shutdown(); thread.join(); server.server_close()
             with self.assertRaises(ValueError):
-                app.make_server(root, 0, collaboration_dir=store)
+                make_test_server(root, 0, collaboration_dir=store)
 
     def test_source_read_is_serialized_across_two_servers(self):
         with tempfile.TemporaryDirectory() as tmp:

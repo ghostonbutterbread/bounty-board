@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import app  # noqa: E402
+from tests.fixture_preferences import make_server as make_test_server
 import terminal_connect as tc  # noqa: E402
 import terminal_report_agent as ra  # noqa: E402
 import terminal_sandbox as sb  # noqa: E402
@@ -54,7 +55,7 @@ def main():
     lane = root / fx.FAMILY / fx.PROGRAM / fx.LANE
     program = os.path.realpath(root / fx.FAMILY / fx.PROGRAM)
     front, term_port = free_port(), free_port()
-    board = app.make_server(root, port=0, terminal_url='/terminal/',
+    board = make_test_server(root, port=0, terminal_url='/terminal/',
                             **({} if 'nolive' in modes else {'live_edit_dir': target / 'live-state'}))
     threading.Thread(target=board.serve_forever, daemon=True).start()
 

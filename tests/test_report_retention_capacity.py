@@ -13,6 +13,7 @@ from pathlib import Path
 
 import report_publisher
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from collaborative_engine import CollaborationStore
 
 
@@ -199,7 +200,7 @@ class RetentionCapacityTests(unittest.TestCase):
             root = Path(tmp) / 'root'; private = Path(tmp) / 'private'
             source = root / 'web_bounty/example/web/reports/report.md'
             source.parent.mkdir(parents=True); source.write_text('original\n')
-            server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True,
+            server = make_test_server(root, 0, collaboration_dir=private, report_autosave=True,
                                      retention_max_operations=1, retention_min_free_bytes=0)
             thread = threading.Thread(target=server.serve_forever); thread.start()
             query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md',
@@ -238,7 +239,7 @@ class RetentionCapacityTests(unittest.TestCase):
             root = Path(tmp) / 'root'; private = Path(tmp) / 'private'
             source = root / 'web_bounty/example/web/reports/report.md'
             source.parent.mkdir(parents=True); source.write_text('original\n')
-            server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True,
+            server = make_test_server(root, 0, collaboration_dir=private, report_autosave=True,
                                      retention_max_operations=1, retention_min_free_bytes=0)
             thread = threading.Thread(target=server.serve_forever); thread.start()
             query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md',
@@ -275,7 +276,7 @@ class RetentionCapacityTests(unittest.TestCase):
             query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md',
                                    root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest()))
             def start(limit):
-                server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True,
+                server = make_test_server(root, 0, collaboration_dir=private, report_autosave=True,
                                          retention_max_operations=limit, retention_min_free_bytes=0)
                 thread = threading.Thread(target=server.serve_forever); thread.start()
                 return server, thread

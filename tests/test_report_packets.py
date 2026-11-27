@@ -18,6 +18,7 @@ from unittest import mock
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 import report_packets
 from report_packets import plan, tier
 from tests.search_fixture import write_lane
@@ -464,7 +465,7 @@ class SearchIndexTests(Base):
 class EndpointTests(Base):
     def setUp(self):
         super().setUp()
-        self.server = app.make_server(self.root, port=0)
+        self.server = make_test_server(self.root, port=0)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(lambda: (self.server.shutdown(), self.server.server_close()))
 

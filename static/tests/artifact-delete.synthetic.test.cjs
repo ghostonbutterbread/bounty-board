@@ -1,3 +1,4 @@
+require('./isolate-home.cjs'); // Standalone runs must not use the operator's HOME.
 // Deleting report artifacts from the artifacts panel, on the synthetic
 // fixture (tests/report_artifacts_fixture.py) with --artifact-uploads.
 const {test}=require('node:test');

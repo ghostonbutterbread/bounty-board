@@ -116,7 +116,7 @@ class UserPreferences:
         try:
             fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         except FileNotFoundError:
-            return {}
+            return {}, {}
         with os.fdopen(fd, 'rb') as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise ValueError('not a regular file')
@@ -124,19 +124,25 @@ class UserPreferences:
         if len(data) > MAX_BYTES:
             raise ValueError('too large')
         result = json.loads(data)
-        return validate(result)
+        if not isinstance(result, dict):
+            raise ValueError('invalid preferences')
+        revisions = result.pop('__revisions', {})
+        if (not isinstance(revisions, dict) or set(revisions) - KEYS or
+                any(type(v) is not int or v < 1 for v in revisions.values())):
+            raise ValueError('invalid revisions')
+        return validate(result), revisions
 
     def read(self):
         try:
             directory = self._directory(False)
         except FileNotFoundError:
-            return {}
+            return {}, {}
         try:
             return self._read(directory)
         finally:
             os.close(directory)
 
-    def update(self, values, migrate=False):
+    def update(self, values, migrate=False, expected=None):
         validate(values)
         directory = self._directory(True)
         lock = None
@@ -146,14 +152,18 @@ class UserPreferences:
             if not stat.S_ISREG(os.fstat(lock).st_mode):
                 raise ValueError('invalid lock')
             fcntl.flock(lock, fcntl.LOCK_EX)
-            previous = self._read(directory)
+            previous, revisions = self._read(directory)
+            if expected is not None and any(revisions.get(key, 0) != version for key, version in expected.items()):
+                return previous, revisions, True
             result = dict(previous)
+            revisions = dict(revisions)
             for key, value in values.items():
                 if not migrate or key not in result:
                     result[key] = value
-            if result == previous:
-                return result
-            data = (json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
+                    revisions[key] = revisions.get(key, 0) + 1
+            if result == previous and migrate:
+                return result, revisions, False
+            data = (json.dumps({**result, '__revisions': revisions}, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
             if len(data) > MAX_BYTES:
                 raise ValueError('too large')
             name = '.user.conf-' + secrets.token_hex(16)
@@ -165,7 +175,7 @@ class UserPreferences:
             os.replace(name, self.path.name, src_dir_fd=directory, dst_dir_fd=directory)
             name = None
             os.fsync(directory)
-            return result
+            return result, revisions, False
         finally:
             if name is not None:
                 try:

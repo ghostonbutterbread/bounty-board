@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class CollaborativeProgressiveTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class CollaborativeProgressiveTests(unittest.TestCase):
                     lane = root / 'web_bounty/alpha/web'
                     (lane / 'reports').mkdir(parents=True)
                     (lane / 'reports/report.md').write_text('old\n')
-                    server = app.make_server(root, 0, collaboration_dir=Path(tmp)/'private', report_autosave=mode == 'autosave')
+                    server = make_test_server(root, 0, collaboration_dir=Path(tmp)/'private', report_autosave=mode == 'autosave')
                     thread = threading.Thread(target=server.serve_forever); thread.start()
                     base = f'http://127.0.0.1:{server.server_port}'
                     try:

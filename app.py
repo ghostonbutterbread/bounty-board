@@ -1611,10 +1611,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 return
             if url.path == '/api/user-preferences':
                 try:
-                    preferences = user_preferences.read()
+                    preferences, revisions = user_preferences.read()
                 except (OSError, ValueError, UnicodeError):
                     return self.reply(503, {'error': 'preferences_unavailable'})
-                return self.reply(200, {'preferences': preferences})
+                return self.reply(200, {'preferences': preferences, 'revisions': revisions})
             if url.path in ('/api/report-artifacts', '/api/report-artifact', '/api/report-artifact-media', '/api/report-artifacts.zip'):
                 return self.report_artifacts({'/api/report-artifacts': 'list', '/api/report-artifact': 'file',
                                               '/api/report-artifact-media': 'media', '/api/report-artifacts.zip': 'zip'}[url.path])
@@ -1869,10 +1869,14 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if urlsplit(self.path).path == '/api/user-preferences':
                 try:
                     payload = self.live_read_json(USER_PREFERENCES_MAX_BYTES)
-                    if set(payload) not in ({'set'}, {'migrate'}):
+                    if set(payload) not in ({'set', 'expected'}, {'migrate'}):
                         raise ValueError('invalid payload')
                     migrate = 'migrate' in payload
                     values = validate_user_preferences(payload['migrate' if migrate else 'set'])
+                    expected = None if migrate else payload['expected']
+                    if not migrate and (not isinstance(expected, dict) or set(expected) != set(values) or
+                                        any(type(v) is not int or v < 0 for v in expected.values())):
+                        raise ValueError('invalid revisions')
                 except PermissionError:
                     self.close_connection = True
                     return self.reply(403, {'error': 'untrusted_origin'})
@@ -1880,11 +1884,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     self.close_connection = True
                     return self.reply(400, {'error': 'invalid_request'})
                 try:
-                    result = user_preferences.update(values, migrate=migrate)
+                    result, revisions, conflict = user_preferences.update(values, migrate=migrate, expected=expected)
                 except (OSError, ValueError, UnicodeError):
                     self.close_connection = True
                     return self.reply(503, {'error': 'preferences_unavailable'})
-                return self.reply(200, {'preferences': result})
+                return self.reply(409 if conflict else 200, {'preferences': result, 'revisions': revisions,
+                                                             **({'error': 'preferences_conflict'} if conflict else {})})
             if urlsplit(self.path).path == '/api/report-artifact-upload':  # feat/board-artifact-uploads
                 return self.artifact_upload()
             if urlsplit(self.path).path == '/api/report-artifact-delete':  # feat/board-artifact-delete

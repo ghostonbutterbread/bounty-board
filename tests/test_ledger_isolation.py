@@ -7,6 +7,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class LedgerIsolationTests(unittest.TestCase):
@@ -20,7 +21,7 @@ class LedgerIsolationTests(unittest.TestCase):
             good_file = root / 'web_bounty/good/web/ledgers/ledger.json'
             bad_file = root / 'web_bounty/bad/web/ledgers/ledger.json'
             good_file.write_text(json.dumps(good, ensure_ascii=False), encoding='utf-8')
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             thread = threading.Thread(target=server.serve_forever); thread.start()
             def fetch():
                 conn = HTTPConnection('127.0.0.1', server.server_port, timeout=5)

@@ -18,6 +18,7 @@ from unittest import mock
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 import recon_intel as ri
 from tests.recon_intel_fixture import make_lane, make_large_url_index
 
@@ -108,7 +109,7 @@ class Base(unittest.TestCase):
             writer.write_text((REAL_BBH_LAUNCHER.replace('BBH_SOURCE', str(BBH_SOURCE)) if self.real_bbh else FAKE_RECON_WRITER)
                               .replace('PYTHON', sys.executable))
             writer.chmod(0o700)
-        self.server = app.make_server(self.root, 0, writer=writer, accept_uncoordinated_writes=writer is not None)
+        self.server = make_test_server(self.root, 0, writer=writer, accept_uncoordinated_writes=writer is not None)
         self.server.writer_timeout = 2
         self.addCleanup(self.server.server_close)
         self.port = self.server.server_port

@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 live_edit = os.environ.get('LIVE_EDIT') == '1'
 base_dir = Path(sys.argv[1])
@@ -82,6 +83,6 @@ live_dir = None
 if live_edit:
     live_dir = base_dir / 'live'
     live_dir.mkdir(mode=0o700)
-server = app.make_server(root, port=0, live_edit_dir=live_dir)
+server = make_test_server(root, port=0, live_edit_dir=live_dir)
 print(server.server_port, flush=True)
 server.serve_forever()

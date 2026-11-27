@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import app  # noqa: E402
+from tests.fixture_preferences import make_server as make_test_server
 import report_artifacts as ra  # noqa: E402
 from report_artifacts_fixture import LANE, build  # noqa: E402
 
@@ -29,7 +30,7 @@ class Fixture(unittest.TestCase):
         self.root = top / 'root'
         self.lane = build(self.root)
         options = {'live_edit_dir': top / 'live-state'} if self.live else {}
-        self.server = app.make_server(self.root, port=0, **options)
+        self.server = make_test_server(self.root, port=0, **options)
         self.port = self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(lambda: (self.server.shutdown(), self.server.server_close()))

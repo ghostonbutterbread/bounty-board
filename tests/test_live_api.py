@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 LANE = 'web_bounty/alpha/web'
 QUERY = 'family=web_bounty&program=alpha&lane=web&path='
@@ -26,7 +27,7 @@ class LiveAPITests(unittest.TestCase):
         self.report = reports / 'report.md'
         self.report.write_text('# Report\n\nfirst\n\nsecond\n')
         (reports / 'index/xss.md').write_text('# Xss\n')
-        self.server = app.make_server(self.root, port=0, live_edit_dir=top / 'state')
+        self.server = make_test_server(self.root, port=0, live_edit_dir=top / 'state')
         self.server.live.poll_interval = 0.05
         self.port = self.server.server_port
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -125,14 +126,14 @@ class LiveAPITests(unittest.TestCase):
     def test_live_edit_excludes_old_publication_modes(self):
         state = Path(self.tmp.name) / 'other'
         with self.assertRaises(ValueError):
-            app.make_server(self.root, port=0, live_edit_dir=state, collaboration_dir=Path(self.tmp.name) / 'collab')
+            make_test_server(self.root, port=0, live_edit_dir=state, collaboration_dir=Path(self.tmp.name) / 'collab')
         with self.assertRaises(SystemExit):
             app.parse_config(['--root', str(self.root), '--live-edit', '--report-autosave'])
         args = app.parse_config(['--root', str(self.root), '--live-edit', '--live-edit-dir', str(state)])
         self.assertTrue(args.live_edit)
 
     def test_disabled_by_default(self):
-        server = app.make_server(self.root, port=0)
+        server = make_test_server(self.root, port=0)
         self.addCleanup(server.server_close)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

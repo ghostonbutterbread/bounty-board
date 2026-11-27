@@ -630,6 +630,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_board_terminal_url_flag(self):
         import app
+        from tests.fixture_preferences import make_server as make_test_server
         for good in ('/terminal/', '/a/b/'):
             self.assertTrue(app.valid_terminal_url(good))
         for bad in ('terminal/', '/terminal', 'https://x/terminal/', '//evil/', '/../', '/a b/', None):
@@ -639,7 +640,7 @@ class ConfigTests(unittest.TestCase):
             app.parse_config(['--terminal-url', 'https://x/'])
         base = fx.tmp_base('board')
         for url, expected in ((None, None), ('/terminal/', '/terminal/')):
-            server = app.make_server(base, port=0, terminal_url=url)
+            server = make_test_server(base, port=0, terminal_url=url)
             try:
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=30)
@@ -651,7 +652,7 @@ class ConfigTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
         with self.assertRaises(ValueError):
-            app.make_server(base, port=0, terminal_url='http://x/')
+            make_test_server(base, port=0, terminal_url='http://x/')
         shutil.rmtree(base, ignore_errors=True)
 
     def test_lifecycle_flags_are_validated(self):

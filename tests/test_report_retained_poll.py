@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 import report_publisher
 from collaborative_engine import CollaborationStore
 
@@ -27,7 +28,7 @@ def server_process(root, private, pipe, barrier):
                     raise RuntimeError('bad barrier')
             return original(*args)
         report_publisher.retained_snapshot = wait
-    server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True)
+    server = make_test_server(root, 0, collaboration_dir=private, report_autosave=True)
     pipe.send(server.server_port)
     server.serve_forever()
 

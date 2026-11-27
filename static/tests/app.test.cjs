@@ -1,3 +1,4 @@
+require('./isolate-home.cjs'); // Standalone runs must not use the operator's HOME.
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');

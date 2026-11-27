@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 import live_editing
 
 root = Path(sys.argv[1])
@@ -40,7 +41,7 @@ def held_save(self, *args, **kwargs):
 
 
 live_editing.LiveReports.save = held_save
-server = app.make_server(source, port=int(os.environ.get('PORT', '0')), live_edit_dir=root / 'state')
+server = make_test_server(source, port=int(os.environ.get('PORT', '0')), live_edit_dir=root / 'state')
 server.live.poll_interval = 0.1
 print(server.server_port, flush=True)
 try:

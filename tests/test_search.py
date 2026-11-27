@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from search_index import SearchIndex, fold, parse_terms, ranges_for
 from tests.search_fixture import small_root, write_lane
 
@@ -241,7 +242,7 @@ class IndexTests(Base):
 class APITests(Base):
     def setUp(self):
         super().setUp()
-        self.server = app.make_server(self.root, port=0)
+        self.server = make_test_server(self.root, port=0)
         self.server.search_index.interval = 0.05
         self.port = self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class CollaborationAPITests(unittest.TestCase):
@@ -19,7 +20,7 @@ class CollaborationAPITests(unittest.TestCase):
             root = Path(tmp) / 'root'; report = root / 'web_bounty/example/web/reports/example.md'
             report.parent.mkdir(parents=True); report.write_text('one\ntwo\nthree\n')
             empty_path = Path(tmp) / 'empty-path'; empty_path.mkdir()
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private')
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private')
             thread = threading.Thread(target=server.serve_forever); thread.start()
             identity = dict(family='web_bounty', program='example', lane='web', path='example.md',
                             root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest())
@@ -63,7 +64,7 @@ class CollaborationAPITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'root'; report = root / 'web_bounty/example/web/reports/example.md'
             report.parent.mkdir(parents=True); report.write_text('base')
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private')
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private')
             thread = threading.Thread(target=server.serve_forever); thread.start()
             identity = dict(family='web_bounty', program='example', lane='web', path='example.md',
                             root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest())
@@ -98,7 +99,7 @@ class CollaborationAPITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'root'; report = root / 'web_bounty/example/web/reports/example.md'
             report.parent.mkdir(parents=True); report.write_text('x' * 5_000_000)
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private')
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private')
             thread = threading.Thread(target=server.serve_forever); thread.start()
             identity = dict(family='web_bounty', program='example', lane='web', path='example.md',
                             root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest())
@@ -130,7 +131,7 @@ class CollaborationAPITests(unittest.TestCase):
             identity = dict(family='web_bounty', program='example', lane='web', path='example.md',
                             root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest())
             def start(limit):
-                server = app.make_server(root, 0, collaboration_dir=store, collaboration_max_bytes=limit)
+                server = make_test_server(root, 0, collaboration_dir=store, collaboration_max_bytes=limit)
                 thread = threading.Thread(target=server.serve_forever); thread.start()
                 return server, thread
             server, thread = start(131072)
@@ -165,7 +166,7 @@ class CollaborationAPITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'root'; report = root / 'web_bounty/example/web/reports/example.md'
             report.parent.mkdir(parents=True); report.write_text('base\x00')
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private')
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private')
             thread = threading.Thread(target=server.serve_forever); thread.start()
             identity = dict(family='web_bounty', program='example', lane='web', path='example.md',
                             root_identity=hashlib.sha256(str(root.resolve()).encode()).hexdigest())
@@ -214,7 +215,7 @@ class CollaborationAPITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'root'; report = root / 'web_bounty/example/web/reports/example.md'
             report.parent.mkdir(parents=True); report.write_text('initial\n')
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private', experimental_fixture_publish=True)
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private', experimental_fixture_publish=True)
             thread = threading.Thread(target=server.serve_forever); thread.start()
             host = f'127.0.0.1:{server.server_port}'
             root_id=hashlib.sha256(str(root.resolve()).encode()).hexdigest()
@@ -261,7 +262,7 @@ class CollaborationAPITests(unittest.TestCase):
             identity = {'family': 'web_bounty', 'program': 'example', 'lane': 'web', 'path': 'example.md',
                         'root_identity': hashlib.sha256(str(root.resolve()).encode()).hexdigest()}
             def start():
-                server = app.make_server(root, 0, collaboration_dir=store)
+                server = make_test_server(root, 0, collaboration_dir=store)
                 thread = threading.Thread(target=server.serve_forever)
                 thread.start()
                 return server, thread

@@ -9,6 +9,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 FAKE_WRITER = r'''#!PYTHON
 import json, os, sys
@@ -155,7 +156,7 @@ class LedgerActionTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, writer=True):
-        self.server = app.make_server(self.root, 0, writer=self.writer if writer else None, accept_uncoordinated_writes=writer)
+        self.server = make_test_server(self.root, 0, writer=self.writer if writer else None, accept_uncoordinated_writes=writer)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 

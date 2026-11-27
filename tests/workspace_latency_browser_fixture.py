@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 root = Path(sys.argv[1])
 source = root / 'source'
@@ -48,7 +49,7 @@ def barrier(lane, warnings):
 setattr(app, held, barrier)
 mode = os.environ.get('BOARD_COLLAB_MODE', '')
 options = ({'collaboration_dir': root / 'private', 'report_autosave': mode == 'autosave'} if mode else {})
-server = app.make_server(source, port=0, **options)
+server = make_test_server(source, port=0, **options)
 print(server.server_port, flush=True)
 try:
     server.serve_forever()

@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 import report_publisher
 
 
@@ -23,13 +24,13 @@ def _crashing_server(root, private, pipe):
         publish(*args, **kwargs)
         os._exit(88)
     report_publisher.publish = crash_after_publish
-    server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True)
+    server = make_test_server(root, 0, collaboration_dir=private, report_autosave=True)
     pipe.send(server.server_port)
     server.serve_forever()
 
 
 def _autosave_server(root, private, pipe, pause):
-    server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True)
+    server = make_test_server(root, 0, collaboration_dir=private, report_autosave=True)
     if pause:
         exchange = report_publisher._exchange
         def delayed(*args):
@@ -226,7 +227,7 @@ class ReportAutosaveTests(unittest.TestCase):
                 with self.assertRaises((http.client.RemoteDisconnected, ConnectionResetError)):
                     request(port, 'POST', payload={'base': base, 'content': 'draft\n', 'request_id': 'crash'})
                 process.join(30); self.assertEqual(process.exitcode, 88)
-                server = app.make_server(root, 0, collaboration_dir=private, report_autosave=True)
+                server = make_test_server(root, 0, collaboration_dir=private, report_autosave=True)
                 thread = threading.Thread(target=server.serve_forever); thread.start()
                 try:
                     recovered = request(server.server_port, 'GET', '/recovery', extra='&request_id=crash')
@@ -306,7 +307,7 @@ class ReportAutosaveTests(unittest.TestCase):
             report.parent.mkdir(parents=True)
             base_text = 'one\ntwo\nthree\nfour\nfive\nsix\nseven\n'
             report.write_text(base_text)
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
             thread = threading.Thread(target=server.serve_forever); thread.start()
             host = f'127.0.0.1:{server.server_port}'
             url = '/api/collaboration?' + urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md',
@@ -336,7 +337,7 @@ class ReportAutosaveTests(unittest.TestCase):
             root = Path(tmp) / 'source'
             report = root / 'web_bounty/example/web/reports/report.md'
             report.parent.mkdir(parents=True); report.write_text('original\n')
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
             thread = threading.Thread(target=server.serve_forever); thread.start()
             host = f'127.0.0.1:{server.server_port}'
             query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md',
@@ -371,7 +372,7 @@ class ReportAutosaveTests(unittest.TestCase):
             report = root / 'web_bounty/example/web/reports/report.md'
             report.parent.mkdir(parents=True)
             report.write_text('original\n')
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
             thread = threading.Thread(target=server.serve_forever)
             thread.start()
             try:
@@ -402,7 +403,7 @@ class ReportAutosaveTests(unittest.TestCase):
                 status, unknown = request('GET', endpoint='/recovery', extra={'request_id': 'unknown'})
                 self.assertEqual(status, 404, unknown)
                 server.shutdown(); thread.join(); server.server_close()
-                server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
+                server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private', report_autosave=True)
                 thread = threading.Thread(target=server.serve_forever); thread.start()
                 host = f'127.0.0.1:{server.server_port}'
                 status, retry = request('POST', {'base': base, 'content': 'draft\n', 'request_id': 'one'})
