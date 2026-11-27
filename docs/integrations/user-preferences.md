@@ -4,7 +4,7 @@
 - **Branch / owner:** `feat/board-user-conf`, assigned builder.
 - **Base:** `63f3f4f037ac131c886af005f33106419f651d96` (`origin/beta` at start).
 - **Target:** `beta`. This branch is not a deployment.
-- **Recovery checkpoint / initial implementation:** `1d159db577776d0e4163941b783feb4b835f0397`; this branch also contains later follow-up corrections and handoff evidence. Review the complete branch range, not only the checkpoint.
+- **Recovery checkpoint:** `5ef71febadd18d0cce529a3b6cf2408e8a932487`. Implementation: `1d159db577776d0e4163941b783feb4b835f0397` plus the checkpoint corrections. This branch has a later dossier-only handoff commit; review the complete range.
 - **Intent:** Ryushe requested `~/.config/bountyboard/user.conf` so theme, recent programs and settings survive Board restarts and other devices. Do not change `--config`, terminal network state, or Shared data.
 
 ## Contract
@@ -18,7 +18,7 @@
 
 - `python3 -m unittest tests.test_user_preferences -v`: 10 synthetic API tests passed as non-root, including the exact default path under a temporary HOME, corrupt/unreadable files, symlinks, concurrent distinct keys, migration precedence, size and origin checks. Servers use a temporary root and explicit config override except the temporary-HOME default-path case.
 - `CHROME_BIN=/opt/google/chrome/chrome NODE_PATH=/home/ryushe/projects/bounty-board/node_modules node --test --test-concurrency=1 static/tests/user-preferences.synthetic.test.cjs`: 1 passed. Exercises actual Board and Settings controls, default/no-write startup, migration, refresh, distinct browser context, restart, distinct stale-tab list changes, corruption, visible failure and browser-backed retry. The fixture explicitly supplies a temporary config. Playwright resolved to `/home/ryushe/node_modules/playwright` 1.60.0 because the specified NODE_PATH has no package.
-- Browser suite launched with disposable HOME before worker isolation was added; it exercised a mixed in-progress tree and is not final-tree evidence. It exposed cross-test preference contamination; individual reruns of affected finding, ledger and Recent tests passed after isolating their synthetic config fixtures. The terminal Settings test passed after updating its server-persistence assertions and isolating its fixture. `npm test` now preloads a temporary HOME per Node test worker; a two-worker canary verified distinct disposable paths. Full exact-tree npm and broad gates remain required after the final implementation checkpoint.
+- Browser suite launched with disposable HOME before worker isolation was added; it exercised a mixed in-progress tree and is not final-tree evidence. It exposed cross-test preference contamination; individual reruns of affected finding, ledger and Recent tests passed after isolating their synthetic config fixtures. The terminal Settings test passed after updating its server-persistence assertions and isolating its fixture. `npm test` now preloads a temporary HOME per Node test worker; a two-worker canary verified distinct disposable paths. A fresh `npm test` was launched against the checkpoint code and is still running; retrieve its result before integration. Broad gates remain required.
 - Parent is responsible for independent complete-diff review, integration and release gates. No review has yet been obtained.
 
 ## Integration and activation boundary
