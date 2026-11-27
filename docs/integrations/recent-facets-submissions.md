@@ -122,6 +122,29 @@ R1 and R2 confirmed fixed (reviewer repros pass). Live keyboard check: one popov
 | --- | --- | --- | --- |
 | N1 (minor, pre-existing since the old Recent program picker): `trapTab` in `openPopover` only stopped Tab from closing the popover, so Tab past the last control moved focus behind the still-open popover (a toast's Dismiss, or out of the page). Also affected the Recon popovers that pass `trapTab`. | `openPopover`: with `trapTab`, Tab on the last focusable control wraps to the first and Shift+Tab on the first wraps to the last; focus outside the popover is pulled back in. The "Tab is trapped inside" line above is now true. | `static/app.js` swapped back: the N1 test fails ("Tab: focus left the popover"). | `recent-facets.synthetic` "N1: Tab and Shift+Tab stay inside an open facet popover" (12 presses each way, then Esc returns focus to the button). File **6/6**. |
 
+## Fix round 2: intermittent `recent-actions` failures
+
+**Cause.** A saved N/A mark (`report-na.js`) or a pill save (`finding-actions.js`) calls `ctx.render()` in the same task as the save. That rebuilds every Recent list host and drops focus to `<body>`. Focus came back only on a later animation frame (`report-na.js`'s `requestAnimationFrame` restore, the pickers' refocus callbacks). A 10 ms poll saw `<body>` at the moment the toggle flipped, on this branch and on `69ee73d` alike. Under machine load that frame is late, and this branch's heavier list mount (dropdown bar, chips, facet model) made the gap longer. So `recent-actions` assertions that check focus right after the change ("focus stays on the toggle") could land in the gap. The layout-stability and writer-off failures seen on the merged tree were not reproduced here (the branch alone passed 5 of 5 before the fix at load ~20); the identical-markup skip below removes the repaint churn they pointed to.
+
+**Fix (`a1a0985`).** `recent-reports.js` remembers the last focused control inside any Recent list (view, Submissions, dashboard panel, Recon list) by row identity (program, lane, path) plus a control selector, or by control id outside rows. It puts focus back in the same task when the list remounts, so there is no window where focus is on `<body>`. A click on empty space clears the memory, so a later render does not pull focus back. Repaints of results, status and the panels compare markup and leave identical content alone, so quiet refreshes and polls no longer replace the DOM or move layout when nothing changed. The kept-row and in-place behaviour is unchanged.
+
+**Evidence** (serial, `TMPDIR=/tmp/bbfacets`, `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome`):
+
+- Probe (scratch, not committed): with `requestAnimationFrame` delayed 0 or 400 ms, focus sampled at the moment "Unmark N/A" flips was `<body>` on `f4ec8af` and on `69ee73d`, and the toggle after the fix.
+- New regression test `recent-actions.synthetic` "N/A save and pill save never drop focus, with a late frame and a delayed refresh". Setup: a 400 ms late animation frame and `/api/recent-reports` delayed 1.5 s after the save, with focus sampled every 10 ms through the N/A save and a keyboard Severity pill save. It **fails on `f4ec8af`** ("focus stayed on the toggle"; only `recent-reports.js` swapped back) and **passes on `a1a0985`**.
+- `recent-actions.synthetic`, interleaved with the base under the same load (the base runs its own copy of the file, 9 tests; the branch has 10):
+
+| Run | Branch `a1a0985` | Load | Base `69ee73d` | Load |
+| --- | --- | --- | --- | --- |
+| 1 | 10/10 | 24.6 | 9/9 | 28.5 |
+| 2 | 10/10 | 21.1 | 9/9 | 22.4 |
+| 3 | 10/10 | 18.6 | 9/9 | 21.6 |
+| 4 | 10/10 | 24.5 | 9/9 | 23.5 |
+| 5 | 10/10 | 19.3 | 9/9 | 19.3 |
+
+- After the fix, once each: `report-links-recent` **7/7**, `dashboard-coverage` **2/2**, `finding-actions` **13/13**, `recent-facets` **6/6**.
+  - `recent-facets` first went 5/6. Its "No longer matches" test checked the stale row's resting opacity right after the pill save. It had relied on focus being lost: focus now stays on the row's pill, which lifts the dimming through `:focus-within`. The test now blurs before measuring (`8d1ad7c`); intent unchanged.
+
 ## Screenshots
 
 `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome node static/tests/tools/recent-facets-screenshots.cjs $TMPDIR/screens` (fixture `tests/recent_actions_fixture.py`, read-only) wrote to `/tmp/bbfacets/screens/`:

@@ -146,7 +146,9 @@ test('A pill edit keeps the row in place as "No longer matches" across polls unt
   await until(()=>finding('orchard','F001').submission?.state==='submitted','F001 submitted');
   await until(async()=>(await row.getAttribute('data-stale'))==='true','row dimmed');
   assert.match(await row.innerText(),/No longer matches/);
-  await page.mouse.move(5,5);await page.locator('h1').focus().catch(()=>{});
+  // Focus stays on the row's pill after the save (fix round 2), which lifts the dimming on
+  // :focus-within; move the pointer and focus away to see the resting look.
+  await page.mouse.move(5,5);await page.evaluate(()=>document.activeElement?.blur());
   assert.ok(Number(await row.locator('td').first().evaluate(n=>getComputedStyle(n).opacity))<0.7,'dimmed');
   // A quiet reload (the 30 s poll path) keeps the row in its place; the count drops.
   await page.evaluate(()=>window.dispatchEvent(new CustomEvent('board-report-na',{detail:{}})));
