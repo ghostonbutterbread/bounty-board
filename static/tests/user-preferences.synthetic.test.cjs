@@ -24,7 +24,11 @@ async function start(root, config, port=0) {
 }
 async function stop(child) { if(child && child.exitCode===null && child.signalCode===null) { child.kill('SIGTERM'); await once(child, 'exit'); } }
 async function waitSaved(page) {
-  await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith('bounty-board-preferences-pending:v1:')));
+  try { await page.waitForFunction(() => !window.BoardPreferences.hasPending(),null,{timeout:10000}); }
+  catch(error) {
+    const state=await page.evaluate(()=>({alert:document.querySelector('#preferences-save-error')?.textContent,records:Object.keys(localStorage).filter(k=>k.startsWith('bounty-board-preferences-edit:v2:')).map(k=>JSON.parse(localStorage.getItem(k)))}));
+    throw new Error(`preferences did not settle: ${JSON.stringify(state)}`,{cause:error});
+  }
 }
 
 test('draft write guard rejects report endpoints and draft content in preference payloads', () => {
@@ -43,7 +47,7 @@ async function withEmptyBoard(initial, run) {
   try {
     const running=await start(root,config); child=running.child;
     browser=await chromium.launch({executablePath:process.env.CHROME_BIN,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
-    await run({browser,base:`http://127.0.0.1:${running.port}`,config});
+    await run({browser,base:`http://127.0.0.1:${running.port}`,config,root});
   } finally { if(browser)await browser.close(); await stop(child); fs.rmSync(dir,{recursive:true,force:true}); }
 }
 
@@ -63,7 +67,7 @@ test('failed older same-key edit does not overwrite a newer device', {timeout:60
   assert.equal(await a.locator('#preferences-save-error').isVisible(),true,'conflict remains visible');
   await a.reload();
   await a.locator('#preferences-save-error').waitFor();
-  assert.equal(await a.evaluate(()=>localStorage.getItem('bounty-board-preferences-pending:v1:bounty-board-theme')),'dusk');
+  assert.equal(await a.evaluate(()=>Object.keys(localStorage).some(k=>k.startsWith('bounty-board-preferences-edit:v2:') && JSON.parse(localStorage.getItem(k)).value==='dusk')),true);
   assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark','reload retains the unsent conflict');
 }));
 
@@ -84,22 +88,152 @@ test('same-origin tabs retain their own failed same-key edit across reload', {ti
   assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark');
 }));
 
-test('failed bootstrap retries the read and hydrates before clearing alert', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark'},async({browser,base})=>{
+test('a tab opened after a failed edit cannot consume another tab pending edit', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const context=await browser.newContext(), a=await context.newPage();
+  await a.goto(base);
+  await a.route('**/api/user-preferences',r=>r.request().method()==='POST'?r.abort('failed'):r.continue());
+  await a.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dusk'));
+  await a.locator('#preferences-save-error').waitFor();
+  const b=await context.newPage(); await b.goto(base);
+  await b.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dark'));
+  await waitSaved(b);
+  await a.unroute('**/api/user-preferences');
+  await a.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await a.waitForTimeout(700); await a.reload();
+  await a.locator('#preferences-save-error').waitFor({timeout:4000});
+  assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark');
+  assert.equal(await a.evaluate(()=>Object.keys(localStorage).some(k=>k.startsWith('bounty-board-preferences-edit:v2:') && JSON.parse(localStorage.getItem(k)).value==='dusk')),true);
+}));
+
+test('cloned reload cannot claim or erase a live tab pending edit', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const context=await browser.newContext(), a=await context.newPage(), b=await context.newPage();
+  await a.goto(base); await b.goto(base);
+  await a.route('**/api/user-preferences',r=>r.request().method()==='POST'?r.abort('failed'):r.continue());
+  await a.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dusk'));
+  await a.locator('#preferences-save-error').waitFor();
+  const owner=await a.evaluate(()=>sessionStorage.getItem('bounty-board-preferences-owner:v2'));
+  await b.evaluate(owner=>sessionStorage.setItem('bounty-board-preferences-owner:v2',owner),owner);
+  await b.reload();
+  await b.waitForFunction(owner=>sessionStorage.getItem('bounty-board-preferences-owner:v2')!==owner,owner);
+  await b.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dark')); await waitSaved(b);
+  await a.unroute('**/api/user-preferences'); await a.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await a.waitForTimeout(700); await a.reload(); await a.locator('#preferences-save-error').waitFor({timeout:4000});
+  assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark');
+  assert.equal(await a.evaluate(()=>Object.keys(localStorage).some(k=>k.startsWith('bounty-board-preferences-edit:v2:') && JSON.parse(localStorage.getItem(k)).value==='dusk')),true);
+}));
+
+test('without Web Locks a recovered pending edit remains visible and is not replayed', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const context=await browser.newContext();
+  await context.addInitScript(()=>Object.defineProperty(navigator,'locks',{value:undefined}));
+  const page=await context.newPage(); await page.goto(base);
+  await page.route('**/api/user-preferences',r=>r.request().method()==='POST'?r.abort('failed'):r.continue());
+  await page.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dusk'));
+  await page.locator('#preferences-save-error').waitFor();
+  await page.unroute('**/api/user-preferences'); await page.reload();
+  await page.locator('#preferences-save-error').waitFor();
+  assert.equal(await page.evaluate(()=>window.BoardPreferences.get('bounty-board-theme')),'dusk');
+  assert.equal(fs.existsSync(config),false);
+  await page.reload(); await page.locator('#preferences-save-error').waitFor();
+  assert.equal(await page.evaluate(()=>window.BoardPreferences.get('bounty-board-theme')),'dusk');
+  assert.equal(fs.existsSync(config),false);
+}));
+
+test('multiple failed edits to one key remain visible and retained on reload', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
+  const page=await browser.newPage(); await page.goto(base);
+  await page.route('**/api/user-preferences',r=>r.request().method()==='POST'?r.abort('failed'):r.continue());
+  await page.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dusk'));
+  await page.locator('#preferences-save-error').waitFor();
+  await page.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dark'));
+  await page.reload(); await page.locator('#preferences-save-error').waitFor();
+  assert.equal(await page.evaluate(()=>window.BoardPreferences.get('bounty-board-theme')),'dark','latest unsent choice remains displayed');
+  const values=await page.evaluate(()=>Object.keys(localStorage).filter(k=>k.startsWith('bounty-board-preferences-edit:v2:')).map(k=>JSON.parse(localStorage.getItem(k)).value).sort());
+  assert.deepEqual(values,['dark','dusk']);
+}));
+
+test('corrupt initial snapshot recovers without overwriting the file', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  fs.mkdirSync(path.dirname(config),{recursive:true}); fs.writeFileSync(config,'{broken');
+  const page=await browser.newPage(); await page.goto(base);
+  await page.locator('#preferences-save-error').waitFor(); assert.equal(fs.readFileSync(config,'utf8'),'{broken');
+  fs.writeFileSync(config,JSON.stringify({'bounty-board-theme':'dark'}));
+  await page.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
+  await page.waitForFunction(()=>!document.querySelector('#preferences-save-error'));
+}));
+
+test('failed bootstrap retries the read and hydrates before clearing alert', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'light'},async({browser,base,config})=>{
   const page=await browser.newPage();
   await page.route('**/api/user-preferences',r=>r.request().method()==='GET'?r.abort('failed'):r.continue());
   await page.goto(base); await page.locator('#preferences-save-error').waitFor();
+  fs.writeFileSync(config,JSON.stringify({'bounty-board-theme':'dark'}));
   await page.unroute('**/api/user-preferences');
   await page.evaluate(()=>window.dispatchEvent(new Event('online')));
   await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark',null,{timeout:4000});
   await page.waitForFunction(()=>!document.querySelector('#preferences-save-error'));
 }));
 
-test('server theme is applied when browser storage is blocked', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark'},async({browser,base})=>{
+test('late recovery does not dismiss an open theme menu', {timeout:60000}, () => withEmptyBoard({'bounty-board-show-archived':'false'},async({browser,base,config})=>{
+  const page=await browser.newPage();
+  await page.route('**/api/user-preferences',r=>r.request().method()==='GET'?r.abort('failed'):r.continue());
+  await page.goto(base); await page.locator('#preferences-save-error').waitFor();
+  await page.evaluate(()=>window.registerBoardModule({name:'test-render-seam',afterRender:ctx=>{window.__testRender=ctx.render;}}));
+  await page.getByRole('button',{name:'Theme',exact:true}).click();
+  await page.getByRole('menuitemradio',{name:'Dusk',exact:true}).waitFor();
+  fs.writeFileSync(config,JSON.stringify({'bounty-board-show-archived':'true','bounty-board-theme':'dark'}));
+  await page.unroute('**/api/user-preferences'); await page.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
+  await page.evaluate(()=>window.__testRender());
+  await page.getByRole('menuitemradio',{name:'Dusk',exact:true}).click();
+  assert.equal(await page.locator('html').getAttribute('data-theme'),'dusk');
+}));
+
+test('late recovery updates terminal Settings', {timeout:60000}, () => withEmptyBoard({'terminal.dock':'bottom'},async({browser,base,config})=>{
+  const page=await browser.newPage();
+  await page.route('**/api/user-preferences',r=>r.request().method()==='GET'?r.abort('failed'):r.continue());
+  await page.goto(base+'/#/settings'); await page.locator('#preferences-save-error').waitFor();
+  await page.locator('[data-set-dock="bottom"]').waitFor();
+  fs.writeFileSync(config,JSON.stringify({'terminal.dock':'right','terminal.ctrlVPaste':'false'}));
+  await page.unroute('**/api/user-preferences');
+  await page.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await page.waitForFunction(()=>document.querySelector('[data-set-dock="right"]')?.getAttribute('aria-pressed')==='true');
+  assert.equal(await page.locator('[data-term-pref="ctrlVPaste"]').isChecked(),false);
+}));
+
+test('late recovery updates an untouched recent list', {timeout:60000}, () => withEmptyBoard({'list.recent.order':'"newest"'},async({browser,base,config})=>{
+  const page=await browser.newPage();
+  await page.route('**/api/user-preferences',r=>r.request().method()==='GET'?r.abort('failed'):r.continue());
+  await page.goto(base+'/#/recent'); await page.locator('#preferences-save-error').waitFor();
+  await page.locator('#recent-order').waitFor();
+  fs.writeFileSync(config,JSON.stringify({'list.recent.order':'"oldest"'}));
+  await page.unroute('**/api/user-preferences'); await page.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await page.waitForFunction(()=>document.querySelector('#recent-order')?.value==='oldest');
+}));
+
+test('late recovery preserves an active report draft and focus', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'light'},async({browser,base,config,root})=>{
+  const reports=path.join(root,'web_bounty','fictional','web','reports');
+  fs.mkdirSync(reports,{recursive:true}); fs.writeFileSync(path.join(reports,'example.md'),'# original');
+  const page=await browser.newPage();
+  await page.route('**/api/user-preferences',r=>r.request().method()==='GET'?r.abort('failed'):r.continue());
+  await page.goto(base+'/#/programs/web_bounty%2Ffictional/web/reports');
+  await page.locator('.CodeMirror textarea').waitFor(); await page.locator('#preferences-save-error').waitFor();
+  await page.locator('.CodeMirror textarea').focus(); await page.keyboard.press('Control+A'); await page.keyboard.insertText('draft survives recovery');
+  fs.writeFileSync(config,JSON.stringify({'bounty-board-theme':'dark'}));
+  await page.unroute('**/api/user-preferences'); await page.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
+  assert.match(await page.locator('.CodeMirror').innerText(),/draft survives recovery/);
+  assert.equal(await page.locator('.CodeMirror textarea').evaluate(e=>e===document.activeElement),true);
+  assert.equal(fs.readFileSync(path.join(reports,'example.md'),'utf8'),'# original');
+}));
+
+test('server theme is applied when browser storage is blocked', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark','bounty-board-sidebar-collapsed':'true','terminal.dock':'left','terminal.ctrlVPaste':'false'},async({browser,base})=>{
   const context=await browser.newContext();
   await context.addInitScript(()=>{Storage.prototype.setItem=function(){throw new DOMException('blocked','SecurityError');};});
-  const page=await context.newPage(); await page.goto(base);
+  const page=await context.newPage(); await page.goto(base+'/#/settings');
   await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark',null,{timeout:4000});
   assert.equal(await page.locator('#preferences-save-error').isVisible(),true,'blocked fallback is visible');
+  assert.equal(await page.locator('#shell').evaluate(e=>e.classList.contains('sidebar-collapsed')),true);
+  await page.locator('[data-set-dock="left"]').waitFor();
+  assert.equal(await page.locator('[data-set-dock="left"]').getAttribute('aria-pressed'),'true');
+  assert.equal(await page.locator('[data-term-pref="ctrlVPaste"]').isChecked(),false);
 }));
 
 test('preferences GET cannot block DOMContentLoaded indefinitely', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark'},async({browser,base})=>{
@@ -110,6 +244,56 @@ test('preferences GET cannot block DOMContentLoaded indefinitely', {timeout:6000
   const finished=await Promise.race([navigation.then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),1200))]);
   release(); await navigation;
   assert.equal(finished,true,'DOMContentLoaded must not await the preference server');
+}));
+
+test('never completing preference GET times out without blocking the page', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
+  const page=await browser.newPage(); let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  await page.route('**/api/user-preferences',async route=>{if(route.request().method()==='GET')await gate; await route.continue().catch(()=>{});});
+  try {
+    await page.goto(base,{waitUntil:'domcontentloaded',timeout:5000});
+    await page.locator('#preferences-save-error').waitFor({timeout:6000});
+    assert.equal(await page.getByRole('button',{name:'Theme',exact:true}).isVisible(),true);
+  } finally {release();}
+}));
+
+test('an edit made while migration is in flight is not a false conflict', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const context=await browser.newContext();
+  await context.addInitScript(()=>localStorage.setItem('bounty-board-terminal:v1',JSON.stringify({dock:'left'})));
+  const page=await context.newPage(); let release, seen;
+  const gate=new Promise(resolve=>{release=resolve;}), entered=new Promise(resolve=>{seen=resolve;});
+  await page.route('**/api/user-preferences',async route=>{
+    const req=route.request();
+    if(req.method()!=='POST' || !JSON.parse(req.postData()).migrate)return route.continue();
+    const response=await route.fetch(); seen(); await gate; await route.fulfill({response}).catch(()=>{});
+  });
+  try {
+    await page.goto(base,{waitUntil:'domcontentloaded'}); await entered;
+    await page.evaluate(()=>window.BoardPreferences.set('terminal.dock','right'));
+    release(); await waitSaved(page);
+    assert.equal(JSON.parse(fs.readFileSync(config))['terminal.dock'],'right');
+  } finally { release(); }
+}));
+
+test('a stale delayed read cannot roll back a completed edit', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const page=await browser.newPage(); let release, seen;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const entered=new Promise(resolve=>{seen=resolve;});
+  await page.route('**/api/user-preferences',async route=>{
+    if(route.request().method()!=='GET')return route.continue();
+    seen(); await gate; await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({preferences:{},revisions:{}})}).catch(()=>{});
+  });
+  try {
+    await page.goto(base,{waitUntil:'domcontentloaded'}); await entered;
+    await page.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dark'));
+    await waitSaved(page);
+    release();
+    await page.waitForTimeout(500);
+    await page.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dusk'));
+    await waitSaved(page);
+    assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dusk');
+    assert.equal(await page.locator('#preferences-save-error').count(),0);
+  } finally { release(); }
 }));
 
 test('reports insertion and stale rerender do not save the details default', {timeout:60000}, async () => {
@@ -175,6 +359,18 @@ test('server preferences migrate, survive reload/new device/restart, and report 
     assert.equal(await page.locator('html').getAttribute('data-theme'),'dusk');
     assert.equal(await page.locator('#shell').evaluate(e=>e.classList.contains('sidebar-collapsed')),true);
     assert.equal(await page.evaluate(()=>window.BoardTerminal.prefs.dock),'left');
+    await new Promise((resolve,reject)=>{
+      const deadline=Date.now()+10000;
+      function check() {
+        try {
+          const saved=JSON.parse(fs.readFileSync(config));
+          if(saved['terminal.dock']==='left' && saved['list.recent.order']==='"severity"')return resolve();
+        } catch(error) { if(error.code!=='ENOENT')return reject(error); }
+        if(Date.now()>deadline)return reject(new Error('migration did not reach the config file'));
+        setTimeout(check,50);
+      }
+      check();
+    });
     let saved=JSON.parse(fs.readFileSync(config));
     assert.equal(saved['terminal.copyOnSelect'],'false');
     assert.equal(saved['terminal.dock'],'left');
@@ -240,16 +436,21 @@ test('server preferences migrate, survive reload/new device/restart, and report 
     assert.equal(await afterRestart.locator('[data-term-pref="ctrlVPaste"]').isChecked(),false);
 
     // Corruption never gets overwritten; UI visibly keeps the browser fallback.
+    // Fence the failed save until after reload, so it cannot commit while the
+    // original page is unloading and create an intentionally ambiguous ack.
+    await afterRestart.route('**/api/user-preferences',route=>route.request().method()==='POST'?route.abort('failed'):route.continue());
     const good=fs.readFileSync(config,'utf8'); fs.writeFileSync(config,'{broken');
     await afterRestart.reload();
     await afterRestart.locator('#preferences-save-error').waitFor();
     await afterRestart.locator('#theme-button').click();
     await afterRestart.getByRole('menuitemradio',{name:'Dusk',exact:true}).click();
-    await afterRestart.waitForFunction(()=>localStorage.getItem('bounty-board-preferences-pending:v1:bounty-board-theme')==='dusk');
+    await afterRestart.waitForFunction(()=>Object.keys(localStorage).some(k=>k.startsWith('bounty-board-preferences-edit:v2:') && JSON.parse(localStorage.getItem(k)).value==='dusk'));
     assert.equal(fs.readFileSync(config,'utf8'),'{broken');
     assert.equal(await afterRestart.locator('html').getAttribute('data-theme'),'dusk');
     fs.writeFileSync(config,good);
     await afterRestart.reload();
+    await afterRestart.unroute('**/api/user-preferences');
+    await afterRestart.evaluate(()=>window.dispatchEvent(new Event('online')));
     await waitSaved(afterRestart);
     assert.equal(await afterRestart.locator('html').getAttribute('data-theme'),'dusk');
     assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dusk');

@@ -154,15 +154,17 @@ class UserPreferences:
             fcntl.flock(lock, fcntl.LOCK_EX)
             previous, revisions = self._read(directory)
             if expected is not None and any(revisions.get(key, 0) != version for key, version in expected.items()):
-                return previous, revisions, True
+                return previous, revisions, True, []
             result = dict(previous)
             revisions = dict(revisions)
+            applied = []
             for key, value in values.items():
                 if not migrate or key not in result:
                     result[key] = value
                     revisions[key] = revisions.get(key, 0) + 1
+                    applied.append(key)
             if result == previous and migrate:
-                return result, revisions, False
+                return result, revisions, False, applied
             data = (json.dumps({**result, '__revisions': revisions}, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
             if len(data) > MAX_BYTES:
                 raise ValueError('too large')
@@ -175,7 +177,7 @@ class UserPreferences:
             os.replace(name, self.path.name, src_dir_fd=directory, dst_dir_fd=directory)
             name = None
             os.fsync(directory)
-            return result, revisions, False
+            return result, revisions, False, applied
         finally:
             if name is not None:
                 try:

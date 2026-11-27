@@ -2,7 +2,7 @@
   'use strict';
   const app = document.querySelector('#app');
   const themeButton = document.querySelector('#theme-button');
-  const state = {showArchived:(()=>{try{return localStorage.getItem('bounty-board-show-archived')==='true';}catch{return false;}})(), data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:[],class:[],status:[],submission:[],query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], metadataDrafts:new Map(), rationaleDrafts:new Map(),
+  const state = {showArchived:window.BoardPreferences?.get('bounty-board-show-archived')==='true', data:null, view:'dashboard', dashboardProgram:'', section:'findings', program:'', lane:'', filters:{severity:[],class:[],status:[],submission:[],query:''}, report:'', drafts:new Map(), loading:true, error:'', metadataPending:false, metadataErrors:[], metadataDrafts:new Map(), rationaleDrafts:new Map(),
     // Presentation state (UI redesign): persisted sort, dashboard work filter,
     // expanded breakdown row, program search, how the program was chosen.
     sort:{key:'',dir:'asc'}, dashWork:'all', dashExpanded:'', scopedExpanded:{}, programQuery:'', programOrigin:'default', highlight:''};
@@ -155,7 +155,7 @@
   // Hook for finding-actions pickers: a badge wrapped in a button when the module is loaded.
   const pickButton = (kind, label, inner) => window.BoardFindingActions ? `<button type="button" class="pick-trigger" data-${kind}-pick aria-haspopup="menu" aria-expanded="false" aria-label="${esc(label)}">${inner}</button>` : inner;
   const programLabel = p => p ? String(p.name || p.id || 'Unknown program') : 'Unknown program';
-  const readStore = (key,fallback) => {try {const raw=localStorage.getItem(key);return raw==null ? fallback : JSON.parse(raw);} catch {return fallback;}};
+  const readStore = (key,fallback) => {try {const raw=window.BoardPreferences?.get(key) ?? localStorage.getItem(key);return raw==null ? fallback : JSON.parse(raw);} catch {return fallback;}};
   const writeStore = (key,value) => {const raw=JSON.stringify(value);try {localStorage.setItem(key,raw);} catch {} window.BoardPreferences?.set(key,raw);};
 
   // ---- BoardUI: shared UI primitives for the app and feature modules ----
@@ -464,8 +464,8 @@
     themeButton.innerHTML=icon(glyph);themeButton.title=`Theme: ${label}`;
     if(persist){try { localStorage.setItem('bounty-board-theme',value); } catch {} window.BoardPreferences?.set('bounty-board-theme',value);}
   }
-  try { applyTheme(localStorage.getItem('bounty-board-theme') || 'light',false); } catch { applyTheme('light',false); }
-  themeButton.addEventListener('click', () => openMenu(themeButton,[{heading:'Theme'},...THEMES.map(([key,label,glyph])=>({label,icon:glyph,checked:document.documentElement.dataset.theme===key,onSelect:()=>applyTheme(key)}))],{label:'Theme',align:'end'}));
+  applyTheme(window.BoardPreferences?.get('bounty-board-theme') || 'light',false);
+  themeButton.addEventListener('click', () => openMenu(themeButton,[{heading:'Theme'},...THEMES.map(([key,label,glyph])=>({label,icon:glyph,checked:document.documentElement.dataset.theme===key,onSelect:()=>applyTheme(key)}))],{label:'Theme',align:'end',reanchor:()=>themeButton}));
   // Sidebar items and section tabs are links (middle-click and Ctrl/Cmd+click
   // open a new tab); a plain left click keeps the in-app behaviour.
   const plainClick = event => event.button===0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
@@ -504,6 +504,35 @@
     label.hidden=!items.length;
     box.innerHTML=items.map(p=>`<a class="side-link${state.view==='program' && String(p.id)===state.program?' current':''}" href="${esc(hrefFor({program:p.id,lane:String(p.id)===state.program ? state.lane : undefined,section:state.section}))}" data-recent-program="${esc(p.id)}" title="${esc(p.family||'')} / ${esc(programLabel(p))}">${icon(p.family==='binaries'?'cube':'globe')}<span>${esc(programLabel(p))}</span></a>`).join('');
   }
+  window.addEventListener('board-preferences-ready',()=>{
+    applyTheme(window.BoardPreferences.get('bounty-board-theme') || 'light',false);
+    setSidebar(readStore('bounty-board-sidebar-collapsed',false)===true,false);
+    const oldHide=state.reportHideNa;
+    const before=JSON.stringify([state.showArchived,state.sort,state.dashWork,state.classGroupBy,state.reportHideNa]);
+    state.showArchived=window.BoardPreferences.get('bounty-board-show-archived')==='true';
+    const sort=readStore('bounty-board-finding-sort',null);
+    if(sort && typeof sort.key==='string' && ['title','severity','class','status','id','first_seen','last_seen'].includes(sort.key) && ['asc','desc'].includes(sort.dir))state.sort=sort;
+    state.dashWork=readStore('bounty-board-dashboard-work','all')==='open'?'open':'all';
+    state.classGroupBy=readStore('bounty-board-class-group','class')==='category'?'category':'class';
+    state.reportHideNa=readStore('bounty-board-report-list-hide-na',true)!==false;
+    if(state.data) {
+      renderRecent();
+      const idle=!hasUnsaved() && !popover && !app.contains(document.activeElement);
+      let selectionChanged=false;
+      if(state.view==='dashboard' && idle && state.programOrigin==='default') {
+        const last=readStore('bounty-board-last-program',null);
+        if(last && typeof last.program==='string' && programs().some(p=>String(p.id)===last.program)) {
+          state.program=last.program; state.lane=typeof last.lane==='string'?last.lane:''; state.programOrigin='last-used'; normalizeSelection(); selectionChanged=true;
+        }
+      }
+      if(state.view==='dashboard' && idle && (selectionChanged || before!==JSON.stringify([state.showArchived,state.sort,state.dashWork,state.classGroupBy,state.reportHideNa])))render();
+      const details=app.querySelector('[data-report-browser]');
+      if(details && !details.contains(document.activeElement)) {
+        if(oldHide!==state.reportHideNa && Array.isArray(rows('reports'))) {details.outerHTML=reportBrowser(listedReports(rows('reports'))); applyReportFilter();}
+        else details.open=readStore('bounty-board-report-list-open',true)!==false;
+      }
+    }
+  });
   document.querySelector('#recent-programs')?.addEventListener('click',event=>{
     const button=event.target.closest('[data-recent-program]');if(!button || !plainClick(event))return;
     event.preventDefault();

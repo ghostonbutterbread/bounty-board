@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Bounty Board</title>
+  <!-- preferences-snapshot -->
   <script src="/modules/user-preferences.js"></script>
-  <script>/* Apply the saved theme and sidebar state before first paint. */try{var t=localStorage.getItem('bounty-board-theme');if(t==='light'||t==='dark'||t==='dusk')document.documentElement.dataset.theme=t;}catch(e){}</script>
+  <script>/* Apply the saved theme before first paint. */try{var t=window.BoardPreferences.get('bounty-board-theme');if(t==='light'||t==='dark'||t==='dusk')document.documentElement.dataset.theme=t;}catch(e){}</script>
   <link rel="stylesheet" href="/vendor/font-awesome/css/font-awesome.min.css">
   <link rel="stylesheet" href="/vendor/easymde/easymde.min.css">
   <link rel="stylesheet" href="/style.css">

@@ -19,8 +19,10 @@
   const pendingBasePrefix = 'bounty-board-preferences-base:v1:';
   const revisionsKey = 'bounty-board-preferences-revisions:v1';
   const allowed = new Set([...keys, ...fields.map(f => `terminal.${f}`), ...Object.keys(lists).flatMap(n => listFields.map(f => `list.${n}.${f}`))]);
-  const read = key => { try { return localStorage.getItem(key); } catch { return null; } };
-  const put = (key, value) => { try { localStorage.setItem(key, value); return true; } catch { return false; } };
+  const memory = new Map();
+  let cacheFailed = false;
+  const read = key => { if(memory.has(key))return memory.get(key); try { return localStorage.getItem(key); } catch { cacheFailed=true; return null; } };
+  const put = (key, value) => { memory.set(key,value); try { localStorage.setItem(key, value); return true; } catch { cacheFailed=true; return false; } };
   const parse = (raw, fallback) => { try { return JSON.parse(raw) ?? fallback; } catch { return fallback; } };
   function validLegacy(key, raw) {
     if (new TextEncoder().encode(raw).length > 8192) return false;
@@ -37,11 +39,34 @@
     }
     return false;
   }
-  // One localStorage record per preference: two tabs cannot erase each other's
-  // unrelated unsent changes by replacing a shared pending object.
-  const pending = {}, pendingBases = {}, conflicts = new Set();
+  // Each write has an immutable unique identity, so one tab's acknowledgement
+  // can never delete another tab's edit, even if sessionStorage was cloned.
+  const recordPrefix = 'bounty-board-preferences-edit:v2:';
+  const ownerKey = 'bounty-board-preferences-owner:v2';
+  let owner;
+  try {
+    owner = performance.getEntriesByType('navigation')[0]?.type === 'reload' ? sessionStorage.getItem(ownerKey) : null;
+    if (!owner) owner=crypto.randomUUID();
+    sessionStorage.setItem(ownerKey,owner);
+  } catch { owner=crypto.randomUUID(); cacheFailed=true; }
+  const created = new Set();
+  let ownerClaimed=false, ownershipFailed=false;
+  const pending = {}, pendingBases = {}, pendingIds = {}, pendingStamps = {}, conflicts = new Set();
+  let nextStamp=Date.now()*1000;
   let observed = parse(read(revisionsKey), null);
+  let serverCache = {};
+  try {
+    const records=Object.keys(localStorage).filter(k=>k.startsWith(recordPrefix)).map(name=>({name,entry:parse(localStorage.getItem(name),null)})).sort((a,b)=>(b.entry?.stamp || 0)-(a.entry?.stamp || 0));
+    for (const {name,entry} of records) {
+      if (!entry || entry.owner !== owner || !allowed.has(entry.key) || typeof entry.value !== 'string') continue;
+      if(Number.isSafeInteger(entry.stamp))nextStamp=Math.max(nextStamp,entry.stamp);
+      if(Object.hasOwn(pending,entry.key)){conflicts.add(entry.key);continue;}
+      pending[entry.key]=entry.value; pendingIds[entry.key]=name; pendingStamps[entry.key]=entry.stamp || 0;
+      if (Number.isSafeInteger(entry.base) && entry.base>=0) pendingBases[entry.key]=entry.base; else conflicts.add(entry.key);
+    }
+  } catch { cacheFailed=true; }
   for (const key of allowed) {
+    if (Object.hasOwn(pending,key)) continue;
     const value = read(pendingPrefix + key);
     if (value !== null) {
       pending[key] = value;
@@ -50,34 +75,28 @@
       else conflicts.add(key);
     }
   }
-  let failed = false, readFailed = false, inflight = false;
+  window.addEventListener('storage',event=>{
+    if(event.key===terminalKey && !fields.some(field=>Object.hasOwn(pending,`terminal.${field}`))) memory.delete(terminalKey);
+  });
+  let failed = false, readFailed = false, inflight = false, migrating = false;
   const notice = () => {
     const paint = () => {
       let node = document.getElementById('preferences-save-error');
       if (!failed) { node?.remove(); return; }
       if (!node && document.body) {
         node = document.createElement('div'); node.id = 'preferences-save-error'; node.setAttribute('role', 'alert');
-        node.style.cssText = 'position:fixed;z-index:9999;bottom:1rem;left:1rem;max-width:28rem;padding:.75rem 1rem;background:#8b2525;color:white;border-radius:.5rem';
+        node.style.cssText = 'position:fixed;z-index:9999;bottom:1rem;left:1rem;max-width:28rem;padding:.75rem 1rem;background:#8b2525;color:white;border-radius:.5rem;pointer-events:none';
         document.body.appendChild(node);
       }
-      if (node) node.textContent = conflicts.size ? 'A preference changed on another device. Your unsent choice remains in this browser; review it before retrying.' : 'Preferences could not be saved to the server. Changes remain in this browser; retrying.';
+      if (node) node.textContent = conflicts.size || ownershipFailed ? 'A preference needs recovery. Your unsent choices remain in this browser; review them before retrying.' : cacheFailed ? 'Browser storage is unavailable; unsaved preferences may be lost after reload.' : 'Preferences could not be saved to the server. Changes remain in this browser; retrying.';
     };
     if (document.body) paint(); else document.addEventListener('DOMContentLoaded', paint, {once: true});
   };
   const setFailed = value => { failed = value; notice(); };
 
-  const syncRequest = (method, payload) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(method, '/api/user-preferences', false);
-    if (payload) { xhr.setRequestHeader('Content-Type', 'application/json'); xhr.setRequestHeader('X-Requested-With', 'Bounty-Board'); }
-    xhr.send(payload ? JSON.stringify(payload) : null);
-    if (xhr.status !== 200) throw new Error('preferences unavailable');
-    return JSON.parse(xhr.responseText);
-  };
-  try {
-    let snapshot = syncRequest('GET'), server = snapshot.preferences;
+  function legacyValues() {
+    const legacy = {};
     if (read(marker) !== '1') {
-      const legacy = {};
       for (const key of keys) {
         const value = read(key);
         if (value !== null && !Object.hasOwn(pending, key) && validLegacy(key, value)) legacy[key] = value;
@@ -103,11 +122,20 @@
           if (!Object.hasOwn(pending, `terminal.${field}`)) legacy[`terminal.${field}`] = field === 'dock' ? v : JSON.stringify(field === 'shortcut' ? {ctrl:v.ctrl, alt:v.alt, shift:v.shift, code:v.code} : v);
         }
       }
-      if (Object.keys(legacy).length) { snapshot = syncRequest('POST', {migrate: legacy}); server = snapshot.preferences; }
-      put(marker, '1');
     }
-    observed = snapshot.revisions;
-    if (!observed || typeof observed !== 'object') throw new Error('missing revisions');
+    return legacy;
+  }
+  const legacy = legacyValues();
+  function hydrate(snapshot) {
+    if (!snapshot.preferences || typeof snapshot.preferences !== 'object' || Array.isArray(snapshot.preferences)) throw new Error('missing preferences');
+    const server = {...snapshot.preferences}, revisions = {...snapshot.revisions};
+    if (!snapshot.revisions || typeof snapshot.revisions !== 'object') throw new Error('missing revisions');
+    // An older GET may arrive after a successful POST. Never move a key's
+    // observed revision backwards or repaint it with that older response.
+    for (const key of allowed) if ((observed?.[key] || 0) > (revisions[key] || 0) && Object.hasOwn(serverCache,key)) {
+      revisions[key]=observed[key]; server[key]=serverCache[key];
+    }
+    observed = revisions; serverCache=server;
     put(revisionsKey, JSON.stringify(observed));
     for (const key of keys) if (Object.hasOwn(server, key) && !Object.hasOwn(pending, key)) put(key, server[key]);
     for (const [name, key] of Object.entries(lists)) {
@@ -128,51 +156,120 @@
     }
     put(terminalKey, JSON.stringify(terminal));
     for (const key of keys) if (Object.hasOwn(pending, key)) put(key, pending[key]);
-    if (conflicts.size) setFailed(true);
-  } catch { readFailed = true; setFailed(true); }
+    if (conflicts.size || cacheFailed) setFailed(true);
+  }
+  let initial;
+  try { initial=JSON.parse(document.getElementById('preferences-snapshot')?.textContent || 'null'); if(initial?.error)throw new Error('unavailable'); hydrate(initial); }
+  catch { readFailed=true; setFailed(true); }
 
   async function flush() {
     const key = Object.keys(pending).find(k => !conflicts.has(k));
-    if (inflight || !key) return;
+    if (inflight || migrating || !key || !ownerClaimed) return;
     if (!Number.isSafeInteger(pendingBases[key])) { conflicts.add(key); setFailed(true); return; }
     inflight = true;
-    const value = pending[key], base = pendingBases[key];
+    const value = pending[key], base = pendingBases[key], id = pendingIds[key];
+    const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),3000);
     let retryImmediately = true;
     try {
-      const response = await fetch('/api/user-preferences', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}, body: JSON.stringify({set: {[key]:value}, expected: {[key]:base}})});
+      const response = await fetch('/api/user-preferences', {method: 'POST', signal:controller.signal, headers: {'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}, body: JSON.stringify({set: {[key]:value}, expected: {[key]:base}})});
       if (response.status === 409) { conflicts.add(key); setFailed(true); return; }
       if (!response.ok) throw new Error('save failed');
       const result = await response.json();
       observed = {...observed, [key]:result.revisions[key]};
+      serverCache[key]=value;
       put(revisionsKey, JSON.stringify(observed));
-      if (pending[key] === value) {
-        delete pending[key]; delete pendingBases[key];
-        try { if (read(pendingPrefix + key) === value) { localStorage.removeItem(pendingPrefix + key); localStorage.removeItem(pendingBasePrefix + key); } } catch {}
+      if (id) { try { localStorage.removeItem(id); } catch { cacheFailed=true; } }
+      if (pendingIds[key] === id && pending[key] === value) {
+        delete pending[key]; delete pendingBases[key]; delete pendingIds[key]; delete pendingStamps[key];
+        try { if (!id && read(pendingPrefix + key) === value) { localStorage.removeItem(pendingPrefix + key); localStorage.removeItem(pendingBasePrefix + key); } } catch {}
       } else {
         pendingBases[key] = observed[key];
-        put(pendingBasePrefix + key, JSON.stringify(observed[key]));
+        if (pendingIds[key]) put(pendingIds[key], JSON.stringify({owner,key,value:pending[key],base:observed[key],stamp:pendingStamps[key]}));
       }
-      setFailed(readFailed || conflicts.size > 0);
+      setFailed(readFailed || cacheFailed || ownershipFailed || conflicts.size > 0 || (failed && Object.keys(pending).length>0));
     } catch { retryImmediately = false; setFailed(true); }
-    finally { inflight = false; }
+    finally { clearTimeout(timeout); inflight = false; }
     if (retryImmediately && !readFailed && Object.keys(pending).some(k => !conflicts.has(k))) flush();
   }
   function set(key, value) {
     if (!allowed.has(key) || typeof value !== 'string') return;
+    memory.set(key,value);
     if (!Object.hasOwn(pending, key)) {
       if (observed && typeof observed === 'object') {
         pendingBases[key] = observed[key] || 0;
-        put(pendingBasePrefix + key, JSON.stringify(pendingBases[key]));
       } else conflicts.add(key);
     }
     pending[key] = value;
-    if (!put(pendingPrefix + key, value)) setFailed(true);
+    const id=recordPrefix+crypto.randomUUID(); pendingIds[key]=id; created.add(id);
+    pendingStamps[key]=nextStamp=Math.max(nextStamp+1,Date.now()*1000);
+    if (!put(id,JSON.stringify({owner,key,value,base:pendingBases[key] ?? null,stamp:pendingStamps[key]}))) setFailed(true);
     if (conflicts.has(key)) setFailed(true);
     flush();
   }
-  window.BoardPreferences = Object.freeze({set, terminal: (field, value) => set(`terminal.${field}`, field === 'dock' ? value : JSON.stringify(value)),
+  async function refresh() {
+    if (refresh.busy) return;
+    refresh.busy=true;
+    try {
+      async function jsonRequest(options={}) {
+        const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),3000);
+        try {
+          const response=await fetch('/api/user-preferences',{...options,signal:controller.signal});
+          if(!response.ok)throw new Error('preferences unavailable');
+          return await response.json();
+        } finally {clearTimeout(timeout);}
+      }
+      let snapshot=await jsonRequest();
+      if(read(marker)!=='1') {
+        const migrate=Object.fromEntries(Object.entries(legacy).filter(([key])=>!Object.hasOwn(pending,key)));
+        if(Object.keys(migrate).length) {
+          const bases={...observed}; migrating=true;
+          try {
+            snapshot=await jsonRequest({method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({migrate})});
+            if(!Array.isArray(snapshot.migrated))throw new Error('missing migration receipt');
+            for(const key of snapshot.migrated) if(Object.hasOwn(pending,key) && pendingBases[key]===(bases[key] || 0)) {
+              pendingBases[key]=snapshot.revisions[key];
+              if(pendingIds[key])put(pendingIds[key],JSON.stringify({owner,key,value:pending[key],base:pendingBases[key],stamp:pendingStamps[key]}));
+            }
+          } finally {migrating=false;}
+        }
+        put(marker,'1');
+      }
+      hydrate(snapshot); readFailed=false;
+      setFailed(cacheFailed || ownershipFailed || conflicts.size>0 || (failed && Object.keys(pending).length>0));
+      window.dispatchEvent(new Event('board-preferences-ready'));
+      flush();
+    } catch { readFailed=true; setFailed(true); }
+    finally { refresh.busy=false; }
+  }
+  window.BoardPreferences = Object.freeze({set, get:read, cache:put, hasPending:()=>Object.keys(pending).length>0, terminal: (field, value) => set(`terminal.${field}`, field === 'dock' ? value : JSON.stringify(value)),
     list: (name, field, value) => set(`list.${name}.${field}`, JSON.stringify(value))});
-  window.addEventListener('online', flush);
-  setInterval(() => { if (failed) flush(); }, 10000);
-  if (Object.keys(pending).length) flush();
+  async function claimOwner() {
+    let acquired=null;
+    if(navigator.locks) acquired=await new Promise(resolve=>{
+      navigator.locks.request('bounty-board-preferences:'+owner,{ifAvailable:true},async lock=>{
+        resolve(!!lock); if(lock)await new Promise(()=>{});
+      }).catch(()=>resolve(null));
+    });
+    if(acquired===null) {
+      ownershipFailed=Object.values(pendingIds).some(id=>id && !created.has(id));
+      if(ownershipFailed){setFailed(true);return;}
+    }
+    if(acquired===false) {
+      owner=crypto.randomUUID();
+      try { sessionStorage.setItem(ownerKey,owner); } catch { cacheFailed=true; }
+      for(const key of Object.keys(pending)) {
+        const id=pendingIds[key];
+        if(id && !created.has(id)) {delete pending[key];delete pendingIds[key];delete pendingBases[key];delete pendingStamps[key];conflicts.delete(key);}
+        else if(id) put(id,JSON.stringify({owner,key,value:pending[key],base:pendingBases[key] ?? null,stamp:pendingStamps[key]}));
+      }
+      if(initial?.preferences) {hydrate(initial);window.dispatchEvent(new Event('board-preferences-ready'));}
+      if(cacheFailed)setFailed(true);
+    }
+    ownerClaimed=true;
+    flush();
+  }
+  window.addEventListener('online', () => { if(readFailed)refresh(); else flush(); });
+  setInterval(() => { if(readFailed)refresh(); else if (failed) flush(); }, 10000);
+  claimOwner();
+  refresh();
 })();

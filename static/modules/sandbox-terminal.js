@@ -91,7 +91,7 @@
   const isToggleKey = e => isFixedToggle(e) || matches(e, prefs.shortcut);
 
   function readStored() {
-    try { const value = JSON.parse(localStorage.getItem(STORE) || '{}'); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; }
+    try { const value = JSON.parse(window.BoardPreferences?.get(STORE) ?? localStorage.getItem(STORE) ?? '{}'); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; }
   }
   function cleanPrefs(raw) {
     const size = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) && v >= 1 ? Math.round(v) : fallback);
@@ -794,14 +794,15 @@
   }
   const notifyPrefs = () => prefListeners.forEach(fn => { try { fn(prefs); } catch (error) { console.error('Terminal settings listener failed:', error); } });
   // Another tab changed the preferences: apply everything except the open state.
-  window.addEventListener('storage', event => {
-    if (event.key !== STORE && event.key !== null) return;
+  function reloadPreferences() {
     const {open, ...next} = cleanPrefs(readStored());
     // A new default never moves an open drawer that follows it: pin its position first.
     if (!current && drawer && !drawer.hidden && next.dock !== prefs.dock) { current = {dock: prefs.dock, maximized: false}; saveCurrent(); }
     Object.assign(prefs, next);
     layout(); paintTitles(); notifyPrefs();
-  });
+  }
+  window.addEventListener('storage', event => { if (event.key === STORE || event.key === null) reloadPreferences(); });
+  window.addEventListener('board-preferences-ready', reloadPreferences);
 
   function paint() {
     if (!drawer) return;

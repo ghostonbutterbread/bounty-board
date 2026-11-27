@@ -93,6 +93,34 @@ class UserPreferencesTests(unittest.TestCase):
         status, body = self.request('POST', {'migrate': {'bounty-board-theme': 'light', 'terminal.dock': 'left'}})
         self.assertEqual(status, 200)
         self.assertEqual(body['preferences'], {'bounty-board-theme': 'dark', 'terminal.dock': 'left'})
+        self.assertEqual(body['migrated'], ['terminal.dock'])
+
+    def test_index_snapshot_escapes_html_and_never_caches(self):
+        value = json.dumps({'program': '</script><script>bad()</script>&\u2028\u2029', 'lane': 'web'}, ensure_ascii=False)
+        self.assertEqual(self.request('POST', {'set': {'bounty-board-last-program': value}})[0], 200)
+        conn = HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
+        conn.request('GET', '/')
+        response = conn.getresponse(); body = response.read().decode(); conn.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader('Cache-Control'), 'no-store')
+        start = body.index('<script id="preferences-snapshot" type="application/json">')
+        snapshot = body[start:].split('>', 1)[1].split('</script>', 1)[0]
+        self.assertNotIn('<', snapshot)
+        self.assertNotIn('&', snapshot)
+        self.assertNotIn('\u2028', snapshot)
+        self.assertNotIn('\u2029', snapshot)
+        self.assertEqual(json.loads(snapshot)['preferences']['bounty-board-last-program'], value)
+
+    def test_index_snapshot_corruption_is_error_not_replacement(self):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text('{broken')
+        conn = HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
+        conn.request('GET', '/')
+        response = conn.getresponse(); body = response.read().decode(); conn.close()
+        self.assertEqual(response.getheader('Cache-Control'), 'no-store')
+        snapshot = body.split('<script id="preferences-snapshot" type="application/json">', 1)[1].split('</script>', 1)[0]
+        self.assertEqual(json.loads(snapshot), {'error': 'preferences_unavailable'})
+        self.assertEqual(self.config.read_text(), '{broken')
 
     def test_conditional_edit_rejects_stale_revision(self):
         status, body = self.request('GET')

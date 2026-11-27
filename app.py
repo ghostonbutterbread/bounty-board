@@ -1845,11 +1845,21 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 relative = unquote(url.path).lstrip('/') or 'index.html'
                 try:
                     data = read_file(self.server.static_root, relative)
+                    if relative == 'index.html':
+                        try:
+                            preferences, revisions = user_preferences.read()
+                            snapshot = {'preferences': preferences, 'revisions': revisions}
+                        except (OSError, ValueError, UnicodeError):
+                            snapshot = {'error': 'preferences_unavailable'}
+                        payload = json.dumps(snapshot, ensure_ascii=True).replace('<', '\\u003c').replace('&', '\\u0026')
+                        element = ('<script id="preferences-snapshot" type="application/json">' + payload + '</script>').encode('utf-8')
+                        data = data.replace(b'<!-- preferences-snapshot -->', element, 1)
                     self.send_response(200)
                     self.send_header('Content-Type', mimetypes.guess_type(relative)[0] or 'application/octet-stream')
                     self.send_header('Content-Length', str(len(data)))
                     self.send_header('X-Content-Type-Options', 'nosniff')
                     if relative == 'index.html':
+                        self.send_header('Cache-Control', 'no-store')
                         # The page may be opened from other sites; never inside
                         # their frames, and without a handle back to the opener.
                         self.send_header('X-Frame-Options', 'DENY')
@@ -1884,11 +1894,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                     self.close_connection = True
                     return self.reply(400, {'error': 'invalid_request'})
                 try:
-                    result, revisions, conflict = user_preferences.update(values, migrate=migrate, expected=expected)
+                    result, revisions, conflict, applied = user_preferences.update(values, migrate=migrate, expected=expected)
                 except (OSError, ValueError, UnicodeError):
                     self.close_connection = True
                     return self.reply(503, {'error': 'preferences_unavailable'})
                 return self.reply(409 if conflict else 200, {'preferences': result, 'revisions': revisions,
+                                                             **({'migrated': applied} if migrate else {}),
                                                              **({'error': 'preferences_conflict'} if conflict else {})})
             if urlsplit(self.path).path == '/api/report-artifact-upload':  # feat/board-artifact-uploads
                 return self.artifact_upload()
