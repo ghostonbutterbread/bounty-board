@@ -1,9 +1,9 @@
-# Sandbox preview ports (phase 1: backend)
+# Sandbox preview ports (backend and UI)
 
-- Branch: `feat/board-terminal-ports`; base `18089f4` (origin/beta). Commits: `1aa50ea`, `efa5e83`, `0632c25`, review round 1 `53b9c3a` (+ this dossier update).
-- Owner surfaces: `terminal_ports.py` (new), `terminal_sandbox.py`, `terminal_service.py`, `sandbox/bbterm-ports.py` (new), `sandbox/Dockerfile`, `sandbox/Dockerfile.test`, `tests/test_terminal_ports.py` (new), `tests/test_terminal_service.py`, `tests/test_terminal_docker.py`.
+- Branch: `feat/board-terminal-ports`; base `18089f4` (origin/beta). Commits: `1aa50ea`, `efa5e83`, `0632c25`, review round 1 `53b9c3a`, `7493c3c`; merged terminal UX `ba02227`; review round 2 `12bef96`; UI `4ed50b8` (+ this dossier update).
+- Owner surfaces: `terminal_ports.py` (new), `terminal_sandbox.py`, `terminal_service.py`, `sandbox/bbterm-ports.py` (new), `sandbox/Dockerfile`, `sandbox/Dockerfile.test`, `tests/test_terminal_ports.py` (new), `tests/test_terminal_service.py`, `tests/test_terminal_docker.py`; phase 2: `static/modules/sandbox-ports.js|css` (new), `static/index.html` tags, `static/tests/sandbox-ports.synthetic.test.cjs` (new, in `npm test`), `tests/terminal_browser_fixture.py` (`ports` mode).
 - Ryu's request, short: a PoC server started in a report's sandbox (`python3 -m http.server 8000`, a small Flask app, a websocket server) must open in his browser on another tailnet machine. Bind to localhost always, and to the Tailscale address when a terminal setting says so.
-- Phase 2 (after `feat/board-terminal-ux` lands): a ports chip in the drawer header and the Tailscale toggle on the Settings page, built against the contract below. No `static/` changes in this phase.
+- Phase 2 (done, on top of the terminal UX work): a ports pill in the drawer header and the Tailscale switch on the Settings page, built on `window.BoardTerminal` and `window.BoardSettings` (see "UI" below).
 
 ## How it works
 
@@ -62,14 +62,26 @@ Newline-delimited JSON, each line at most 4 KiB, exact key sets, integers checke
 | agent → host, control | `{"t":"ports","ports":[…]}` (≤ 64 unique ints 1-65535), `{"t":"fail","id":…}` |
 | host → agent, control | `{"t":"open","id":…,"port":…}` |
 
-Limits (the agent is untrusted: any process in the sandbox can kill it and speak this): 8 forwarded ports per session (existing ones kept first, then lowest new), 32 forwarded connections per session, 128 in total, 16 per browser IP across sessions, 16 opens waiting, an open not answered in 5 s closes the browser connection and kills the id, ids valid once, 5 s total deadline for the first line (a trickle does not extend it), 8 connections that have not identified themselves, 10 control connections per minute per session, 10 `ports` reports per 5 s per control connection (the real agent sends at most one a second; nesting too deep for the parser counts as malformed) (a new control replaces the old one; losing the control connection withdraws its ports until the agent reports again), a kernel send timeout on the control socket so an agent that stops reading cannot hold a sender. Any malformed line closes that connection only. A `fail` for an unknown id is ignored (it may have timed out). Forwarded bytes are never parsed.
+Limits (the agent is untrusted: any process in the sandbox can kill it and speak this): 8 forwarded ports per session (existing ones kept first, then lowest new), 32 forwarded connections per session, 128 in total, 48 per browser IP across sessions (one browser with several PoC tabs and websockets shares one tailnet IP; review round 2, N3), 16 opens waiting, an open not answered in 5 s closes the browser connection and kills the id, ids valid once, 5 s total deadline for the first line (a trickle does not extend it), 8 connections that have not identified themselves, 10 control connections per minute per session, 10 `ports` reports per 5 s per control connection (the real agent sends at most one a second; nesting too deep for the parser counts as malformed) (a new control replaces the old one; losing the control connection withdraws its ports until the agent reports again), a kernel send timeout on the control socket so an agent that stops reading cannot hold a sender. A refused connection (any cap) logs one stderr line naming the cap and the client IP: the first refusal, then at most one a minute per cap with a count. Any malformed line closes that connection only. A `fail` for an unknown id is ignored (it may have timed out). Forwarded bytes are never parsed.
 
 ### Lifecycle
 
-- Fair use of the global cap (review R3): when all 128 slots are used, a new connection to a session holding fewer than its fair share (128 divided by the sessions with connections) closes the longest-idle connection of the session holding the most, so one client cannot starve other sessions' previews. A connection with no bytes either way for 10 minutes is closed while more than 75% of the global cap is in use (checked every 30 s).
+- Fair use of the global cap (review R3, round 2): the per-IP cap (48) keeps one client from filling the global cap; a connection with no bytes either way for 10 minutes is closed while more than 75% of the global cap is in use (checked every 30 s). There is no eviction of live connections (the fair-share eviction of round 1 was dropped, N1).
 
 - Host numbers are reserved per session and sandbox port for the session's life (pause included), at most 16 remembered per session (oldest inactive dropped first). When the range is full, a number that another session only remembers for a port that stopped listening is reused (that port gets a new number if it comes back); a listening forward is never taken. Released on removal, reset (a reset is a new sandbox with no ports) and service stop. If another host process holds a number, the next free one is used. When the range is full the port is not listed and stderr says `no free host port in LO-HI for sandbox port P`.
 - Pause: a new inbound connection to a paused sandbox runs `docker unpause` first (idempotent). Forwarded traffic counts as activity for the pause timer (checked at most every 5 s while bytes flow), so a PoC page in use does not freeze after 5 min. It does **not** count for removal: removal stays 4 h after the last terminal viewer left. Lock order stays session lock, then manager lock; the ports lock is never held while calling into a session.
+
+## UI (phase 2, `static/modules/sandbox-ports.js|css`)
+
+- **Drawer pill** in `window.BoardTerminal.slot('ports')`: hidden when the server has `preview_ports: false` or the session has no ports; otherwise a Board-style pill "1 port" / "3 ports" (plug icon, accent tint, tooltip listing the sandbox ports). Works in every dock, in the two-line side header and on the phone sheet. The slot never starts a drag (the drag code ignores slots; tested for all four docks).
+- **Popover** (a `role="dialog"` appended to `<body>`, fixed and clamped to the viewport): focus moves into it and stays inside on Tab; Esc closes and returns focus to the pill; a click outside closes. Each sandbox port shows `:8000` and its URL(s):
+  - Tailscale on and bound: the Tailscale URL first (it works from another machine), then the 127.0.0.1 one labelled "on the server";
+  - off: only the local URL and a muted "Only reachable on the server. Turn on Tailscale in Settings." with `Settings` a real `<a href="#/settings">`; on but no address: "Tailscale is on, but the server has no Tailscale address right now.";
+  - each URL: the URL itself and Open are `<a target="_blank" rel="noopener noreferrer">`; Copy writes it to the clipboard (hidden-textarea fallback) and shows "Copied" for 1.6 s ("Copy blocked by the browser" when both fail);
+  - a paused sandbox: muted "paused, opens on first visit".
+  - only URLs of the form `http://<127.x.y.z or 100.64.0.0/10 IPv4>:<host_port>/` become links or Copy values (rebuilt from the parsed host and the item's `host_port`); anything else the service sends is shown as text with "unexpected address, not linked" (review round 3, P1).
+- **Live updates**: `BoardTerminal.on('session')` fetches `GET <terminal_url>api/ports?<selector>` on attach and reset (and clears on null); `BoardTerminal.on('message')` applies `{"type":"ports"}` pushes and refetches the flags. No reload is needed when a server starts or stops, or when another tab switches Tailscale.
+- **Settings**: `window.BoardSettings.register({id: 'terminal-ports', group: 'terminal', title: 'Sandbox ports', order: 50})` inside the Terminal card. "Saved on the server."; switch "Open sandbox ports over Tailscale" (`POST api/settings {ports_tailscale}`, JSON, `X-Requested-With: Bounty-Board`, same-origin); the port range and the Tailscale address ("Tailscale address 100.x.y.z", "No Tailscale address found on the server right now", or "The Tailscale address is detected when you turn this on"); the note "While this is on, anyone on your tailnet allowed by your ACLs can open sandbox ports. They are plain http." Errors: 409 `tailscale_not_found` → "No Tailscale address found on the server."; 409 `preview_ports_disabled` → the "Not enabled" line; 500 `settings_failed` → "Could not save the setting."; 401 → "Sign in to the terminal" linking to `/terminal/login?next=<this page>`. The switch always shows the server's answer (on error the section reloads the settings). Flag off: "Not enabled on this server. Start the terminal service with --preview-ports."
 
 ## Threat model
 
@@ -96,12 +108,17 @@ The tunnel only reaches the container's own loopback:
 4. `tailscale_reason` is `disabled` whenever the setting is off (no detection runs then), even if an address exists; the Settings page can still offer the switch, and switching on answers 409 `tailscale_not_found` when there is no address.
 5. A corrupt `settings.json` is set aside at the first write, not at read; reading never changes the file.
 6. With the setting on at start and no address found, the setting stays on, `tailscale_reason` is `not_found`, and the 60 s check binds as soon as the address appears.
-7. Forwarded connections have no idle timeout while there is room (a websocket PoC may idle). They are closed when idle 10 min while the global cap is over 75% used, or by fair-share eviction at the cap (review R3); otherwise they end with the client, the sandbox server, a reset/removal, or switching Tailscale off (for tailnet ones).
+7. Forwarded connections have no idle timeout while there is room (a websocket PoC may idle). They are closed when idle 10 min while the global cap is over 75% used (review R3); otherwise they end with the client, the sandbox server, a reset/removal, or switching Tailscale off (for tailnet ones).
 8. The agent includes any loopback address (127.0.0.0/8, ::1) or the unspecified address; a server on `127.0.0.2` only is listed but the agent connects to 127.0.0.1/::1, so the open fails and the browser connection closes.
 9. GET `/api/settings` with the flag off reports `ports_tailscale: false` and does not create `settings.json`.
 10. The agent runs as a supervised thread in the forwarder process (review round 1). Killing the forwarder already ends the container, so a second process gave no extra robustness, and one process saves about 6 MiB per idle sandbox.
 11. `settings_unreadable` answers 500 (a server-side fault the user cannot fix from the browser); the contract's two 409s are unchanged.
-12. R3 fair-share eviction goes beyond the per-IP cap and idle rule the brief named: the reviewer's repro scales the caps down (2 per session, 4 total) with every client on 127.0.0.1 idle for milliseconds, so neither of those two rules alone could let the third session in. Eviction only takes from the session holding the most, and only for a session below its fair share.
+12. (Round 1 added fair-share eviction at the full cap; round 2 dropped it, N1: it could close another session's live connection.) The round-1 repro class `R3_OneClientStarvesOtherSessions` only passes with that eviction, so it now fails by design; `test_r3_one_client_at_its_cap_leaves_room_for_another_client` replaces it (the per-IP cap with two client IPs).
+13. The agent supervisor in `bbterm-forward` restarts the agent after 1 s, doubling to 30 s, back to 1 s after the agent stayed up 60 s; the agent's exception is caught in its thread (no thread traceback in the container log) and logged once, then at most one line a minute with a count (N2).
+14. UI: the pill shows only when the server has `preview_ports` and the report's session has at least one port. The Tailscale URL is the main one when present (it works from another machine); the 127.0.0.1 one is labelled "on the server". The switch shows the server's answer: on a failed POST the section reloads the settings and shows the plain error. Other tabs update through the ports push the server sends when the Tailscale listeners change; the drawer then refetches `api/ports` for the flag.
+15. UI: the popover is appended to `<body>` (fixed position, clamped to the viewport) instead of living in the header slot, so the header's clipping, wrapping and drag handling are untouched; the slot holds only the pill button, which the drag code already ignores.
+16. No change to `sandbox-terminal.js` was needed: the module reads the terminal URL from the Board context (`capabilities.terminal_url`) like the drawer does, so no `base()` accessor was added.
+17. The browser fixture's Tailscale address is a TEST-ONLY file (`BBTERM_TEST_TAILSCALE_FILE`, a loopback alias, empty = no address), honoured only with `--backend local-test-only` (which already needs `BBTERM_ALLOW_LOCAL_BACKEND=1` and a root under TMPDIR); the Docker backend never reads it.
 
 ## Evidence
 
@@ -164,13 +181,63 @@ About 6.2 MiB less per idle sandbox (about 75 MiB at 12 sandboxes).
 
 Round 1 suite runs (`TMPDIR=/tmp/bbt-ports`, `-W error::ResourceWarning`): `test_terminal_ports` 44 OK, `test_terminal_service` 29 OK, `test_terminal_sandbox` 47 OK, `test_terminal_proxy` 36 OK, `test_terminal_ws` 38 OK, `test_terminal_docker` (`BBTERM_TEST_IMAGE=bbterm-test-image-ports:latest BBTERM_DOCKER_TESTS=1`) 13 OK in 2 of 3 runs (84 s, 55 s; the first failed only my new `docker top` assertion, which needed a pid column and was fixed before the two green runs), repro file 4 OK. No `bbterm-test-*` container remained.
 
+### Review round 2 (7493c3c) and fixes (12bef96)
+
+The reviewer returned ACCEPT with three minors. Red/green proof: only `terminal_ports.py`, `sandbox/bbterm-forward.py` and `sandbox/bbterm-ports.py` were swapped back to `7493c3c`, the new tests run, the files restored.
+
+| # | Finding | Fix | Regression test | On 7493c3c → now |
+| --- | --- | --- | --- | --- |
+| N1 | Fair-share eviction could close another session's live connection (no idle minimum). | Eviction removed; the per-IP cap and the 10-minute idle rule remain. At the full cap new connections are refused (logged). | `ReviewRound2Tests.test_n1_active_connections_of_another_session_are_never_evicted` (the reviewer's repro, plus the refusal log); `test_r3_one_client_at_its_cap_leaves_room_for_another_client` replaces the fair-share test | FAIL (`refused at the global cap`: a live connection was evicted instead) → OK; the replacement passes on both |
+| N2 | The agent supervisor restarted every 1 s and logged every crash (a pids-limit crash loop floods the container log). | Delay 1 s doubling to 30 s, back to 1 s after 60 s up; the agent's exception is caught in its thread; log the first failure, then at most one line a minute with a count. | `test_n2_supervisor_backs_off_and_rate_limits_its_log` (sleeps `[1, 2, 4, 8, 16, 30, …]`, 3 lines over 10 crashes, reset after a long run); `ForwarderAgentTests.test_supervisor_restarts_a_dead_agent` updated | ERROR (no backoff parameters) → OK |
+| N3 | 16 per client IP is tight for one browser with several tabs and websockets; refusals were silent. | Cap 48; every refusal (session, client, pending, total cap) logs `preview port connection from <ip> refused: <cap> cap of <n> reached`, first then at most one a minute per cap with a count. | `test_n3_per_ip_cap_is_48_and_refusals_are_logged_rate_limited` | FAIL (`16 != 48`) → OK |
+
+Reviewer repros now: `ports-r2/test_repro_r2_builder.py` 1 FAIL on `7493c3c` → 1 OK; `ports-r1/test_repro_builder.py` 3 OK and `R3_OneClientStarvesOtherSessions` FAIL by design (it needs the eviction N1 removed; see decision 12).
+
+### Review round 3 (6c6fa73, phase 2) and fixes
+
+The reviewer returned ACCEPT (fix P1): N1-N3 confirmed, R3 holds on the per-IP cap plus idle rule, no markup injection, the Settings switch and sign-in link correct, the test-only Tailscale override unreachable in production, drawer integration clean. Fixed by the orchestrator; red/green by swapping only the changed source file back to `6c6fa73`.
+
+| # | Finding | Fix | Regression test | 6c6fa73 → now |
+| --- | --- | --- | --- | --- |
+| P1 (should-fix) | Popover links and Copy used the service's URLs without checking scheme or host (`javascript:` or a foreign host would become a link). | `safeUrl()`: only `http:` to a 127.0.0.0/8 or 100.64.0.0/10 IPv4, path `/`, no credentials, query or fragment, and the port equal to the item's `host_port`; the link is rebuilt from those parts; anything else is shown as text, no Open or Copy. | `sandbox-ports.synthetic` "popover links only http URLs to loopback or a Tailscale address on the host port (review P1)" (`javascript:`, foreign host, wrong port, extra path all unlinked; valid Tailscale and local URLs linked and copyable) | FAIL (`only the valid URLs are links`) → pass |
+| P2 (nit) | At the pids limit `Thread.start` raised `RuntimeError` in the agent's reader and `forward()`, printing a traceback per open. | Both catch `RuntimeError` (the host times the open out). | `AgentThreadLimitTests` (reader and forward with `Thread.start` failing) | 2 ERROR (`RuntimeError: can't start new thread`) → OK |
+
+### Phase 2 evidence
+
+Run on Ghost, `TMPDIR=/tmp/bbt-ports`, synthetic data only, each file alone and serially (`-W error::ResourceWarning` for Python; browser with `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome node --test --test-concurrency=1`). Branch includes the terminal UX merge `ba02227`.
+
+| Run | Result |
+| --- | --- |
+| `tests.test_terminal_ports` | 47 OK |
+| `tests.test_terminal_service` | 29 OK |
+| `tests.test_terminal_sandbox` | 47 OK |
+| `tests.test_terminal_proxy` | 36 OK |
+| `tests.test_terminal_ws` | 38 OK |
+| `tests.test_terminal_docker` (`BBTERM_TEST_IMAGE=bbterm-test-image-ports:latest BBTERM_DOCKER_TESTS=1`, image rebuilt for the supervisor change) | 13 OK (89 s); no `bbterm-test-*` container left |
+| `repros/ports-r1/test_repro_builder.py` | 3 OK, 1 FAIL by design (R3, see above) |
+| `repros/ports-r2/test_repro_r2_builder.py` | 1 OK |
+| `static/tests/sandbox-terminal-filter.test.cjs` | 5 pass |
+| `static/tests/sandbox-terminal.synthetic.test.cjs` | 18 pass |
+| `static/tests/sandbox-ports.synthetic.test.cjs` (new) | 4 pass |
+
+`sandbox-ports.synthetic.test.cjs` (fixture mode `tailnet,ports`; the fake agent forwards with the real agent's `forward()` to a synthetic HTTP server):
+- no pill without ports; a port appears by push → "1 port", its host port is in the range and serves the synthetic page; popover with Tailscale off (one local URL, Open and the URL with `target="_blank" rel="noopener noreferrer"`, the Settings hint with `href="#/settings"`), focus inside, Copy writes the URL and shows "Copied", Esc returns focus to the pill, click outside closes;
+- Settings: off, "Saved on the server.", the ACL note; with no Tailscale address the switch answers "No Tailscale address found on the server." and stays off; on → "Tailscale address 127.0.0.2" (test alias), confirmed by `GET api/settings`;
+- back in the report: the Tailscale URL first (reachable on 127.0.0.2), local "on the server", Copy writes the Tailscale URL; another tab switches it off → this drawer's items lose the Tailscale URL by push, the flag updates, the tailnet listener refuses, the hint returns;
+- the popover stays inside the viewport docked right, left, top and bottom, and a drag started on the pill never starts a drawer drag (no `term-dragging`, no drop preview, dock unchanged);
+- the server stops listening → the pill goes away by push; phone sheet (390×844): pill and popover fit; flag off: no pill, Settings shows "Not enabled on this server. Start the terminal service with --preview-ports."; password mode, not signed in: "Sign in to the terminal" links to `/terminal/login?next=%2F%23%2Fsettings` on the same origin.
+
+Screenshots (synthetic, looked at): `/tmp/bbt-ports/screens-ports/ports-popover-bottom-off-{light,dark}.png`, `ports-popover-bottom-on-{light,dark}.png`, `ports-popover-right-{light,dark}.png`, `ports-settings-off-{light,dark}.png`, `ports-settings-on-{light,dark}.png`, `ports-phone-{light,dark}.png`.
+
 ## Gaps
 
 - Not built: the production `sandbox/Dockerfile` (no network here). The real-container tests use `sandbox/Dockerfile.test` built as `bbterm-test-image-ports:latest`. Rebuild the production image on Hoster to get the agent; an old image simply never connects (no ports listed).
 - UDP is not forwarded; only TCP.
 - The Tailscale listeners have no auth of their own (by design; see threat model).
 - A port open on `127.0.0.2` only inside the sandbox is listed but cannot be reached (decision 8).
-- Phase 2 UI (drawer chip, Settings toggle) is not built; no screenshots.
+- The round-1 repro class `R3_OneClientStarvesOtherSessions` fails by design after N1 (it needs eviction of live connections).
+- The UI was tested with the test-only local backend and a fake agent (real forwarding code); the full chain with Docker is covered by `test_terminal_docker` `test_068`, not by a browser test.
+- A popover open while the drawer is resized or re-docked by keyboard follows the pill on window resize and scroll only; re-docking closes it on the next click.
 - After a failed save of "off", the file still says on: the running service stays off, but a restart turns Tailscale on again until a save succeeds (logged as the 500 answer).
 - Fair-share eviction can close an idle websocket PoC of a busy session when the global cap is full.
 - `test_terminal_docker` `test_065` (existing pause timing) failed once under load and passed in the two later runs.
@@ -182,13 +249,25 @@ Round 1 suite runs (`TMPDIR=/tmp/bbt-ports`, `-W error::ResourceWarning`): `test
 2. A server that stops keeps its host port for the session's life (max 16 per session), so the URL survives restarts. A full range lets other sessions take those idle numbers.
 3. A full range leaves the extra port out of the list (logged), so the contract keeps only `open` and `paused` states. Would you rather see it listed as "no free port"?
 4. `tailscale_reason` reads `disabled` whenever the switch is off, even when an address exists. Detection only runs when you switch it on.
-5. (Changed in review round 1) the agent is now a supervised thread in the forwarder process.
-7. At the full global cap, a session below its fair share closes the longest-idle connection of the busiest session (needed for the reviewer's starvation repro). Keep, or rely only on the per-IP cap and the 10 min idle rule?
-6. Default range 9100-9199 and at most 8 ports per sandbox: keep these?
+5. Default range 9100-9199, at most 8 ports per sandbox, 48 connections per client IP: keep these?
+6. The pill says "1 port" / "3 ports" and sits next to the status pill; the popover lists ports by sandbox number (`:8000`). Wording or place OK?
+7. The Settings card header still says "Saved in this browser." (it belongs to the terminal's own controls); the ports section adds "Saved on the server." under its title. Fine, or should the card note move into each section?
 
-## Deployment (orchestrator)
+## Deployment on Hoster (orchestrator)
 
-1. Rebuild the image (adds `/usr/local/bin/bbterm-ports`, loaded by the forwarder, and the new CMD): `docker build -t bbterm-sandbox:latest --build-arg UID=$(id -u) --build-arg GID=$(id -g) sandbox/`.
-2. Add `--preview-ports` to the terminal service unit (optionally `--ports-range` / `--tailscale-address`) and restart it (this drops paused sessions, as before).
-3. Verify: open a report's terminal, `python3 -m http.server 8000`, then `curl -s "http://127.0.0.1:9011/api/ports?…"` is not needed: on Hoster `curl -s http://127.0.0.1:9100/` lists the folder. Switch Tailscale on (`POST /terminal/api/settings {"ports_tailscale": true}` from the Board origin, or the phase 2 toggle), then from another tailnet machine open `http://<hoster tailscale ip>:9100/`. `ss -ltn` must show `127.0.0.1:9100` and `100.x.y.z:9100`, never `0.0.0.0:9100` or `[::]:9100`.
+Do these as the Board's user; do not change Serve.
+
+1. Rebuild the production image (the forwarder now runs the ports agent; the CMD passes `/run/bbterm/ports.sock`):
+   ```sh
+   cd ~/path/to/bounty-board
+   docker build -t bbterm-sandbox:latest --build-arg UID=$(id -u) --build-arg GID=$(id -g) sandbox/
+   ```
+2. Add `--preview-ports` to `ExecStart` of `~/.config/systemd/user/bounty-board-terminal.service` (optionally `--ports-range 9100-9199` and `--tailscale-address auto`), then `systemctl --user daemon-reload && systemctl --user restart bounty-board-terminal`. A restart drops paused sessions (files stay).
+3. On-host checks:
+   - Open a report's terminal and run `python3 -m http.server 8000`. The drawer shows "1 port"; `curl -s http://127.0.0.1:9100/` lists the report folder.
+   - `ss -ltnp | grep -E ':91[0-9][0-9] '` shows only `127.0.0.1:9100` (and, once Tailscale is on, `100.x.y.z:9100`), never `0.0.0.0:9100`, `*:9100` or `[::]:9100`.
+   - `stat -c '%a %U' ~/.local/state/bounty-board/terminal/proxy/*/ports.sock` prints `600 <board user>`; `docker inspect bbterm-<id> --format '{{.HostConfig.NetworkMode}} {{len .Mounts}}'` prints `none 2`.
+   - Settings, Terminal card, "Sandbox ports": turn on "Open sandbox ports over Tailscale". It shows "Tailscale address 100.x.y.z". From another tailnet device (your PC), open the drawer's pill, click Open on the main URL `http://100.x.y.z:9100/`: the listing appears.
+   - Turn the switch off: the page on the PC stops loading (`curl -m 5 http://100.x.y.z:9100/` from the PC fails), `ss` shows only `127.0.0.1:9100` again, and the drawer's popover says "Only reachable on the server."
+   - Inside the sandbox: `curl -s http://127.0.0.1:9100/` (through the proxy, `NO_PROXY=` cleared) prints "Blocked by sandbox egress policy".
 4. Check the tailnet ACLs allow exactly the peers that should reach 9100-9199.

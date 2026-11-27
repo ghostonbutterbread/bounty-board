@@ -32,8 +32,9 @@ ROOT = Path(__file__).resolve().parents[1]
 OPEN = []  # sockets opened by the test side, closed in tearDown
 
 
-def tcp(host, port):
-    sock = socket.create_connection((host, port), timeout=10)
+def tcp(host, port, source=None):
+    """source: a loopback alias to connect from, so the hub sees a different client IP."""
+    sock = socket.create_connection((host, port), timeout=10, source_address=(source, 0) if source else None)
     OPEN.append(sock)
     return sock
 
@@ -708,17 +709,19 @@ class ReviewRound1Tests(HubCase):
             out.append(c)
         return out
 
-    def test_r3_idle_hog_on_two_sessions_does_not_lock_out_a_third(self):
+    def test_r3_one_client_at_its_cap_leaves_room_for_another_client(self):
+        """Rewritten in round 2 (fair-share eviction dropped, N1): the per-IP cap is what keeps a
+        hog from filling the global cap; another client (another IP) still gets in."""
         hogs = self.open_hogs(2)
-        server, agent, item = self.forward()  # the victim session
-        with mock.patch.object(tp, 'MAX_SESSION_CONNS', 2), mock.patch.object(tp, 'MAX_TOTAL_CONNS', 4):
-            held = [c for host_port in hogs for c in self.held(host_port, 2)]
-            victim = tcp('127.0.0.1', item['host_port'])
-            victim.sendall(b'v')
-            victim.settimeout(5)
-            self.assertEqual(victim.recv(1), b'v', "another session's idle connections must not lock this one out")
-            self.assertEqual(sum(1 for c in held if closed_by_peer(c, timeout=1)), 1, 'exactly one idle hog closed')
-            self.assertLessEqual(self.hub.total_conns, 4)
+        server, agent, item = self.forward()  # another session, another client
+        with mock.patch.object(tp, 'MAX_CLIENT_CONNS', 3), mock.patch.object(tp, 'MAX_TOTAL_CONNS', 4):
+            held = self.held(hogs[0], 2) + self.held(hogs[1], 1)
+            refused = tcp('127.0.0.1', hogs[1])
+            self.assertTrue(closed_by_peer(refused, timeout=3), 'the hog is at its per-IP cap')
+            other = tcp('127.0.0.1', item['host_port'], source='127.0.0.5')
+            other.sendall(b'v')
+            self.assertEqual(other.recv(1), b'v', 'another client still gets in')
+            self.assertFalse(any(closed_by_peer(c, timeout=0.2) for c in held), 'nothing was evicted')
 
     def test_r3_per_client_cap_across_sessions(self):
         hogs = self.open_hogs(2)
@@ -805,11 +808,112 @@ class ForwarderAgentTests(HubCase):
             'def main():\n'
             '    COUNTER.write_text(str(int(COUNTER.read_text() or 0) + 1) if COUNTER.exists() else "1")\n'
             '    raise RuntimeError("agent crashed")\n')
-        threading.Thread(target=forwarder.supervise_agent, args=(str(fake), str(self.sock_path), 3128, 0.05),
-                         daemon=True).start()
+        threading.Thread(target=forwarder.supervise_agent, args=(str(fake), str(self.sock_path), 3128),
+                         kwargs={'sleep': lambda s: time.sleep(0.02), 'log': lambda line: None}, daemon=True).start()
         wait(lambda: counter.exists() and int(counter.read_text()) >= 3, message='agent not restarted')
         agent = forwarder.load_agent(str(ROOT / 'sandbox/bbterm-ports.py'), '/run/bbterm/ports.sock', 3128)
         self.assertEqual((agent.SOCKET, agent.EXCLUDE), ('/run/bbterm/ports.sock', {3128}))
+
+
+class AgentThreadLimitTests(unittest.TestCase):
+    """Phase 2 review P2: at the sandbox pids limit, Thread.start raises RuntimeError; the
+    agent's reader and forward() must absorb it instead of dying or printing tracebacks."""
+
+    def setUp(self):
+        self.agent = load_agent('/nonexistent/ports.sock')
+        self.no_threads = mock.patch.object(self.agent.threading.Thread, 'start',
+                                            side_effect=RuntimeError("can't start new thread"))
+
+    def test_reader_survives_thread_start_failure(self):
+        host, control = socket.socketpair()
+        stop = threading.Event()
+        try:
+            host.sendall(b'{"t": "open", "id": "x1", "port": 8000}\n')
+            host.shutdown(socket.SHUT_WR)
+            with self.no_threads:
+                self.agent.reader(control, threading.Lock(), stop)   # must return, not raise
+            self.assertTrue(stop.is_set())
+        finally:
+            host.close()
+            control.close()
+
+    def test_forward_survives_thread_start_failure(self):
+        server = socket.create_server(('127.0.0.1', 0))
+        up_host, up_agent = socket.socketpair()
+        ctl_host, ctl_agent = socket.socketpair()
+        try:
+            with self.no_threads, mock.patch.object(self.agent, 'dial_host', return_value=up_agent):
+                self.agent.forward(ctl_agent, threading.Lock(), 'x2', server.getsockname()[1])   # must return
+            self.assertEqual(up_agent.fileno(), -1, 'upstream closed')
+        finally:
+            for s in (server, up_host, up_agent, ctl_host, ctl_agent):
+                s.close()
+
+
+class ReviewRound2Tests(HubCase):
+    """Regression tests for the re-review of 7493c3c (N1-N3)."""
+
+    def test_n1_active_connections_of_another_session_are_never_evicted(self):
+        path = self.base / 'busy.sock'
+        busy_sp = self.hub.open_session(str(path), FakeOwner())
+        server = self.server()
+        AutoAgent(path).ports([server.port])
+        busy_port = wait(lambda: busy_sp.items() and busy_sp.items()[0])['host_port']
+        _, _, item = self.forward()  # the other client's session
+        with mock.patch.object(tp, 'MAX_TOTAL_CONNS', 4):
+            live = [tcp('127.0.0.1', busy_port) for _ in range(4)]
+            for c in live:
+                c.sendall(b'a')
+                self.assertEqual(c.recv(1), b'a')
+            for _ in range(3):  # the other session's client keeps reconnecting at the full cap
+                attacker = tcp('127.0.0.1', item['host_port'], source='127.0.0.6')
+                self.assertTrue(closed_by_peer(attacker, timeout=3), 'refused at the global cap')
+            for c in live:  # every live connection still works
+                c.sendall(b'b')
+                self.assertEqual(c.recv(1), b'b')
+            wait(lambda: any('total cap of 4 reached' in line for line in self.logs))
+
+    def test_n2_supervisor_backs_off_and_rate_limits_its_log(self):
+        forwarder = ForwarderAgentTests.load_forwarder(self)
+        fake = self.base / 'crashing-agent'
+        fake.write_text('def main():\n    raise RuntimeError("cannot start new thread")\n')
+        now, sleeps, lines = [0.0], [], []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+        forwarder.supervise_agent(str(fake), str(self.sock_path), 3128, sleep=sleep, clock=lambda: now[0],
+                                  log=lines.append, rounds=10)
+        self.assertEqual(sleeps, [1, 2, 4, 8, 16, 30, 30, 30, 30, 30])
+        self.assertEqual(len(lines), 3, lines)  # at 0 s, then at most one a minute
+        self.assertIn('cannot start new thread', lines[0])
+        self.assertNotIn('times since', lines[0])
+        self.assertIn('times since the last report', lines[1])
+        # An agent that stayed up for a minute restarts quickly again.
+        long_lived = self.base / 'long-agent'
+        long_lived.write_text('def main():\n    pass\n')
+        sleeps.clear()
+        clock = iter([0, 61, 61, 62, 62, 63]).__next__
+        forwarder.supervise_agent(str(long_lived), str(self.sock_path), 3128, sleep=sleeps.append, clock=clock,
+                                  log=lambda line: None, rounds=3)
+        self.assertEqual(sleeps, [1, 2, 4])
+
+    def test_n3_per_ip_cap_is_48_and_refusals_are_logged_rate_limited(self):
+        self.assertEqual(tp.MAX_CLIENT_CONNS, 48)
+        server, agent, item = self.forward()
+        with mock.patch.object(tp, 'MAX_CLIENT_CONNS', 1):
+            first = tcp('127.0.0.1', item['host_port'])
+            first.sendall(b'x')
+            self.assertEqual(first.recv(1), b'x')
+            for _ in range(3):
+                self.assertTrue(closed_by_peer(tcp('127.0.0.1', item['host_port']), timeout=3))
+        lines = [line for line in self.logs if 'refused' in line]
+        self.assertEqual(lines, ['preview port connection from 127.0.0.1 refused: per-client-IP cap of 1 reached'])
+        with mock.patch.object(tp, 'MAX_CLIENT_CONNS', 1), mock.patch.object(tp, 'REFUSAL_LOG_EVERY', 0):
+            self.assertTrue(closed_by_peer(tcp('127.0.0.1', item['host_port']), timeout=3))
+        lines = [line for line in self.logs if 'refused' in line]
+        self.assertEqual(lines[-1], 'preview port connection from 127.0.0.1 refused: per-client-IP cap of 1 reached '
+                                    '(3 refused since the last report)')
 
 
 class BackendOrderTests(unittest.TestCase):

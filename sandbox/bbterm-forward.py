@@ -77,18 +77,46 @@ def load_agent(path, sock, exclude):
     return module
 
 
-def supervise_agent(path, sock, exclude, delay=1):
-    """Run the preview-ports agent in a thread; start it again if it ever ends."""
-    while True:
+def supervise_agent(path, sock, exclude, *, sleep=time.sleep, clock=time.monotonic, log=None, rounds=None):
+    """Run the preview-ports agent in a thread; start it again if it ever ends.
+
+    The restart delay grows from 1 s, doubling up to 30 s, and drops back to 1 s
+    after the agent stayed up for 60 s. Failures are logged once, then at most
+    one line a minute with a count, so a sandbox that keeps the agent crashing
+    (for example at the pids limit) cannot flood the container log.
+    """
+    log = log or (lambda line: print(line, file=sys.stderr, flush=True))
+    delay, last_log, failures = 1, None, 0
+    while rounds is None or rounds > 0:
+        if rounds is not None:
+            rounds -= 1
+        started = clock()
+        failed = []
+
+        def run(main):
+            try:
+                main()
+            except BaseException as error:  # reported by the supervisor, not the thread excepthook
+                failed.append(error)
         try:
             agent = load_agent(path, sock, exclude)
             agent.EXCLUDE = agent.EXCLUDE | {MODEL_PORT}  # never offer the model relay port as a preview
-            worker = threading.Thread(target=agent.main, name='bbterm-ports-agent', daemon=True)
+            worker = threading.Thread(target=run, args=(agent.main,), name='bbterm-ports-agent', daemon=True)
             worker.start()
             worker.join()
+            reason = (str(failed[0]) or type(failed[0]).__name__) if failed else 'ended'
         except Exception as error:  # a broken agent must never take the proxy forwarder down
-            print(f'bbterm-forward: ports agent stopped: {error}', file=sys.stderr, flush=True)
-        time.sleep(delay)
+            reason = str(error) or type(error).__name__
+        now = clock()
+        if now - started >= 60:
+            delay = 1
+        failures += 1
+        if last_log is None or now - last_log >= 60:
+            more = f' ({failures} times since the last report)' if failures > 1 else ''
+            log(f'bbterm-forward: ports agent stopped: {reason}{more}; restarting in {delay} s')
+            last_log, failures = now, 0
+        sleep(delay)
+        delay = min(delay * 2, 30)
 
 
 def model_relay(port=MODEL_PORT, path=None, delay=10):
