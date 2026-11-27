@@ -76,14 +76,12 @@ window.BoardTerminal.on('message', message => { if (message.type === 'ports') {}
 window.BoardTerminal.off('session', handler);
 window.BoardTerminal.selector();                  // {family, program, lane, path} or null
 window.BoardTerminal.session();                   // the hello `session` object while the drawer is open, else null
-const line = window.BoardTerminal.strip('ports'); // stable [data-term-strip="ports"] under the header
 window.BoardTerminal.on('terminal', term => {});  // the xterm instance (replayed to late subscribers)
 ```
 
 - `slot(name)` (`[a-z][a-z0-9-]*`, up to 32 chars) returns the same element every time, created on first use and placed between the status text and the dock picker; it is hidden while empty (`:empty`).
 - `session` fires `{selector, session}` on hello (attach) and on a sandbox reset, and `{selector: null, session: null}` once when the drawer closes or the report changes.
 - `message` fires with every parsed server text message object (after the drawer's own handling), so a later module can handle new types such as `{"type": "ports", ...}` without editing this file.
-- `strip(name)` (same name rule) returns the same full-width element every time, placed under the header (outside it, so it never starts a drag) in every dock and on the phone sheet; hidden while empty. Used by the preview ports "Port 8000 is live" line.
 - `terminal` fires once with the xterm instance when the first session attaches, and immediately for a listener added later. Modules may add xterm link providers or decorations; nothing may type into the terminal except through this file's paste/type filter.
 - `on` returns an unsubscribe function; a throwing listener is logged and does not affect others.
 - The other `BoardTerminal` members (`term`, `status`, `checks`, `prefs`, `unsafeText`, `unsafePaste`, `shortcutProblem`, ...) are for tests and diagnostics only.
