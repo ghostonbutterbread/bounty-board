@@ -1,10 +1,12 @@
 """Facet keys for a finding: submission bucket, severity key and class key.
 
-One mapping, two sides: the Recent view filters server-side with this module
-(search_index.py), the Submissions view filters client-side with
-static/modules/filter-bar.js (`BoardFilterBar.keys`). Both run the shared
-cases in static/tests/facet-cases.json, so "Duplicate" or "Not submitted"
-means the same thing in both views. Display only: nothing here writes a ledger.
+One mapping, two sides: GET /api/recent-reports (the Recent and Submissions
+lists) filters server-side with this module (search_index.py); the browser
+uses static/modules/filter-bar.js (`BoardFilterBar.keys`) to tell, right after
+a pill edit, whether a row still matches the list's filter. Both run the
+shared cases in static/tests/facet-cases.json, so "Duplicate" or "Not
+submitted" means the same thing on both sides. Display only: nothing here
+writes a ledger.
 """
 import taxonomy
 

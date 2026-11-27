@@ -20,11 +20,16 @@
  * menu; every row gets the N/A toggle (report-na.js). N/A rows are hidden by
  * default ("Hide N/A", hide_na=1 on the request, `na=show` in the URL when off),
  * with "N hidden · Show".
- * Facets (feat/board-recent-facets): the filters live in the shared filter rail
- * (filter-rail.js): Submission, Severity, Vulnerability class, Modified, Program,
- * Lane and Report options, with counts from the server's facets (each ignoring
- * its own filter). URL keys sub, sev, class and lane repeat; order is newest,
- * oldest, severity or class. A Class column shows the normalized category. */
+ * Facets and Submissions (feat/board-recent-facets): the view is a list factory
+ * (createList) with two instances: Recent (#/recent, #recent-reports-host) and
+ * Submissions (#/submissions, #submissions-host: reports whose finding is
+ * submitted, valid or duplicate). Each has its own state, URL, memory and
+ * defaults. Filters are dropdowns along the top (filter-bar.js): Submission,
+ * Severity, Class, Modified, Program, Lane, Options, with counts from the
+ * server's facets (each ignoring its own filter). URL keys sub, sev, class and
+ * lane repeat; order is newest, oldest, severity or class. A Class column shows
+ * the normalized category. A row a pill edit moved out of the filter stays,
+ * dimmed with "No longer matches", until a filter change or "Refresh list". */
 (() => {
   'use strict';
   const PREFS = 'bounty-board-recent-reports';
