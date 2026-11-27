@@ -6,6 +6,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class RootIdentityTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class RootIdentityTests(unittest.TestCase):
             (parent / 'alias').symlink_to(root, target_is_directory=True)
 
             def read(path):
-                server = app.make_server(path, 0)
+                server = make_test_server(path, 0)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:

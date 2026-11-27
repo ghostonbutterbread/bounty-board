@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from test_ledger_actions import FAKE_WRITER
 
 base = Path(sys.argv[1])
@@ -140,7 +141,7 @@ writer.chmod(0o700)
 os.environ['FAKE_LOG'] = str(base / 'writer.log')
 os.environ['FAKE_MODE'] = str(base / 'mode')
 
-server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=True, live_edit_dir=base / 'live')
+server = make_test_server(root, port=0, writer=writer, accept_uncoordinated_writes=True, live_edit_dir=base / 'live')
 server.live.poll_interval = 0.1
 print(server.server_port, flush=True)
 try:

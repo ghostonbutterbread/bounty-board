@@ -17,7 +17,7 @@
   'use strict';
   // Known groups. A group may only show when the Board has the feature.
   const GROUPS = {
-    terminal: {title: 'Terminal', icon: 'terminal', order: 10, note: 'Saved in this browser.',
+    terminal: {title: 'Terminal', icon: 'terminal', order: 10, note: 'Settings are saved on the Board server.',
       enabled: ctx => !!ctx?.state?.data?.capabilities?.terminal_url, off: 'The sandbox terminal is not enabled on this Board.'},
   };
   const sections = new Map();

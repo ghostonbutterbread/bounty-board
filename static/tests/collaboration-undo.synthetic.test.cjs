@@ -1,3 +1,4 @@
+require('./isolate-home.cjs'); // Standalone runs must not use the operator's HOME.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');

@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 import recon_intel as ri
 from tests.recon_intel_fixture import make_js_library, make_lane, make_large_url_index, make_url_index
 
@@ -633,7 +634,7 @@ class HttpTests(Base):
     def setUp(self):
         super().setUp()
         make_lane(self.root, js_shared=True)
-        self.server = app.make_server(self.root, port=0, artifact_root=self.base / 'absent')
+        self.server = make_test_server(self.root, port=0, artifact_root=self.base / 'absent')
         self.addCleanup(self.server.server_close)
         self.port = self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

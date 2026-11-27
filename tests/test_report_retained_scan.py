@@ -13,6 +13,7 @@ from unittest import mock
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from collaborative_engine import CollaborationStore
 
 
@@ -24,7 +25,7 @@ class ScanTests(unittest.TestCase):
         self.report.parent.mkdir(parents=True)
         self.text = 'one\ntwo\nthree\nfour\nfive\nsix\nseven\n'
         self.report.write_text(self.text)
-        self.server = app.make_server(self.root, 0, collaboration_dir=self.private, report_autosave=True)
+        self.server = make_test_server(self.root, 0, collaboration_dir=self.private, report_autosave=True)
         self.thread = threading.Thread(target=self.server.serve_forever); self.thread.start()
         self.host = f'127.0.0.1:{self.server.server_port}'
         self.query = urlencode(dict(family='web_bounty', program='example', lane='web', path='report.md', root_identity=hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()))
@@ -85,7 +86,7 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(self.report.read_text(), original)
 
     def test_store_only_editability_is_distinct_from_source_autosave(self):
-        server = app.make_server(self.root, 0, collaboration_dir=self.private / 'off')
+        server = make_test_server(self.root, 0, collaboration_dir=self.private / 'off')
         thread = threading.Thread(target=server.serve_forever); thread.start()
         try:
             def read(path):
@@ -297,7 +298,7 @@ class ScanTests(unittest.TestCase):
             payload = {'action': 'reconcile', 'base': state['revision'], 'content': state['content'], 'source_snapshot': first['content'], 'request_id': 'merge'}
             self.assertEqual(self.request('POST', payload)[1]['publication']['state'], 'published')
             self.server.shutdown(); self.thread.join(20); self.server.server_close()
-            self.server = app.make_server(self.root, 0, collaboration_dir=self.private, report_autosave=True)
+            self.server = make_test_server(self.root, 0, collaboration_dir=self.private, report_autosave=True)
             self.thread = threading.Thread(target=self.server.serve_forever); self.thread.start()
             self.host = f'127.0.0.1:{self.server.server_port}'
             with mock.patch.object(report_publisher, '_exchange', side_effect=AssertionError('retry exchanged')):

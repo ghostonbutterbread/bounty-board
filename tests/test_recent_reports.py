@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from tests.search_fixture import small_root, write_lane
 from tests.test_search import make_index
 
@@ -211,7 +212,7 @@ class IndexTests(Base):
 class APITests(Base):
     def setUp(self):
         super().setUp()
-        self.server = app.make_server(self.root, port=0)
+        self.server = make_test_server(self.root, port=0)
         self.server.search_index.interval = 0.05
         self.port = self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -468,7 +469,7 @@ class NaAPITests(Base):
     def setUp(self):
         super().setUp()
         self.state = Path(self.tmp.name) / 'state'
-        self.server = app.make_server(self.root, port=0, state_dir=self.state)
+        self.server = make_test_server(self.root, port=0, state_dir=self.state)
         self.server.search_index.interval = 0.05
         self.port = self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -672,7 +673,7 @@ class FacetAPITests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'root'
         facet_root(self.root)
-        self.server = app.make_server(self.root, port=0)
+        self.server = make_test_server(self.root, port=0)
         self.server.search_index.interval = 0.05
         self.port = self.server.server_port
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

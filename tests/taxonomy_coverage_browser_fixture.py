@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 root = Path(sys.argv[1])
 lane = root / 'web_bounty' / 'acme-demo' / 'web'
@@ -49,6 +50,6 @@ assess(18, 'xss', 'bounded_review', 'covered', 'one route', ['notes/a.txt'], fp=
 for n in range(19, 31): assess(n, 'access-control', 'no_assessment', None, None, [], days=9)
 assess(31, 'rce', 'untested', None, None, [], days=9)
 db.commit(); db.close()
-server = app.make_server(root, port=0)
+server = make_test_server(root, port=0)
 print(server.server_port, flush=True)
 server.serve_forever()

@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import app  # noqa: E402
+from tests.fixture_preferences import make_server as make_test_server
 import artifact_uploads as au  # noqa: E402
 from tests import report_artifacts_fixture as fixture  # noqa: E402
 
@@ -40,7 +41,7 @@ class Fixture(unittest.TestCase):
         self.lane = fixture.build(self.root)
         (self.lane / 'reports/ROOT.md').write_text('# flat root report\n')
         self.folder = self.lane / 'reports/F1'
-        self.server = app.make_server(self.root, port=0, artifact_uploads=self.enabled)
+        self.server = make_test_server(self.root, port=0, artifact_uploads=self.enabled)
         if self.enabled:
             self.server.artifact_uploads = au.Uploads(free_floor=0)
         self.port = self.server.server_port

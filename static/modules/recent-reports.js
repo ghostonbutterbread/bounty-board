@@ -48,7 +48,7 @@
   // Which list a row or button belongs to: the dashboard panel, the Recon reports panel or the view.
   const scopeOf = node => node.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : node.closest('#recon-reports-host') ? '#recon-reports-host' : node.closest('#submissions-host') ? '#submissions-host' : '#recent-reports-host';
   const PANEL_NA = 'bounty-board-recent-panel-show-na'; // per browser, like the view's filters
-  try { panel.showNa = localStorage.getItem(PANEL_NA) === '1'; } catch {}
+  try { panel.showNa = (window.BoardPreferences?.get(PANEL_NA) ?? localStorage.getItem(PANEL_NA)) === '1'; } catch {}
   // Rows for mapped findings that are not in the loaded workspace data yet
   // (cold start): one shared object per finding, so the view and the panel
   // show the same values after a save.
@@ -181,8 +181,8 @@
     const classOptionList = () => (FB()?.classOptions() || []).filter(([k]) => cfg.withNone || k !== FB().NONE);
     const host = () => ctx.app.querySelector(cfg.host);
     const inHost = selector => host()?.querySelector(selector) || null;
-    try {
-      const saved = JSON.parse(localStorage.getItem(cfg.prefs) || 'null');
+    function restorePrefs() { try {
+      const saved = JSON.parse(window.BoardPreferences?.get(cfg.prefs) ?? localStorage.getItem(cfg.prefs) ?? 'null');
       if (saved && typeof saved === 'object') {
         if (WINDOWS.some(([k]) => k === saved.window)) L.window = saved.window;
         if (ORDERS.some(([k]) => k === saved.order)) L.order = saved.order;
@@ -194,8 +194,17 @@
         // Facet keys are checked against the option lists once the taxonomy is ready (mount).
         L.subs = strings(saved.subs); L.sevs = strings(saved.sevs); L.classes = strings(saved.classes);
       }
-    } catch {}
-    const savePrefs = () => { try { localStorage.setItem(cfg.prefs, JSON.stringify({window: L.window, order: L.order, nav: L.nav, hideNa: L.hideNa, programs: L.programs, lanes: L.lanes, subs: L.subs, sevs: L.sevs, classes: L.classes})); } catch {} };
+    } catch {} }
+    restorePrefs();
+    const snapshot = () => ({window: L.window, order: L.order, nav: L.nav, hideNa: L.hideNa, programs: L.programs, lanes: L.lanes, subs: L.subs, sevs: L.sevs, classes: L.classes});
+    let shared = JSON.parse(JSON.stringify(snapshot()));
+    const savePrefs = () => {
+      const next = snapshot(), raw = JSON.stringify(next);
+      try { localStorage.setItem(cfg.prefs, raw); } catch {}
+      for (const [field, value] of Object.entries(next))
+        if (JSON.stringify(value) !== JSON.stringify(shared[field])) window.BoardPreferences?.list(cfg.id, field, value);
+      shared = JSON.parse(raw);
+    };
     // Drop facet values that are not options (old prefs, edited links); true when something changed.
     function validateFacets() {
       const before = JSON.stringify([L.subs, L.sevs, L.classes]);
@@ -308,7 +317,7 @@
     }
     // A filter, sort or page change, or Refresh list: kept rows leave.
     function fresh() { L.keep = false; L.retry = 0; load(); }
-    function changed() { L.offset = 0; savePrefs(); writeUrl(); paintControls(); fresh(); }
+    function changed() { L.interacted = true; L.offset = 0; savePrefs(); writeUrl(); paintControls(); fresh(); }
     const filtered = () => !!(L.programs.length || L.lanes.length || L.subs.length || L.sevs.length || L.classes.length || L.q || L.window !== cfg.defaultWindow);
 
     // ---- filter bar ------------------------------------------------------------
@@ -439,8 +448,8 @@
       }
       const linked = ctx.state[cfg.stateKey];
       const fromLink = typeof linked === 'string' && linked !== '' && linked !== queryFor();
-      if (fromLink) { applyQuery(linked); L.retry = 0; L.keep = false; }
-      else if (validateFacets()) savePrefs();
+      if (fromLink) { L.explicit = true; applyQuery(linked); L.retry = 0; L.keep = false; }
+      else validateFacets();
       writeUrl();
       el.innerHTML = `<section class="panel recent-panel" aria-label="${esc(cfg.listLabel)}" data-na-scope="${cfg.naScope}"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">${esc(cfg.footnote)} Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
       el.onclick = onClick; el.onchange = onChange; el.oninput = onInput; el.oncontextmenu = onRowMenu; el.onkeydown = onRowKey;
@@ -465,11 +474,16 @@
     }
     function onInput(event) {
       if (event.target.id !== `${P}-filter`) return;
-      L.q = event.target.value; L.offset = 0;
+      L.interacted = true; L.q = event.target.value; L.offset = 0;
       ctx.state[cfg.stateKey] = queryFor(); // the address bar follows after the debounce
       clearTimeout(L.qTimer);
-      L.qTimer = setTimeout(() => { writeUrl(); savePrefs(); paintControls(); fresh(); }, 200);
+      L.qTimer = setTimeout(() => { writeUrl(); paintControls(); fresh(); }, 200);
     }
+    window.addEventListener('board-preferences-ready',()=>{
+      if(L.interacted || L.explicit)return;
+      restorePrefs(); shared=JSON.parse(JSON.stringify(snapshot()));
+      if(ctx?.state?.view===cfg.view && host()){writeUrl();paintControls();fresh();}
+    });
     return {L, cfg, mount, load, paint, host, get data() { return L.data; }};
   }
   const SUBMITTED = ['submitted', 'valid', 'duplicate'];
@@ -590,6 +604,7 @@
     if (t.dataset.recentPanelNa) {
       panel.showNa = t.dataset.recentPanelNa === 'show'; panel.retry = 0;
       try { localStorage.setItem(PANEL_NA, panel.showNa ? '1' : '0'); } catch {}
+      window.BoardPreferences?.set(PANEL_NA, panel.showNa ? '1' : '0');
       loadPanel().then(() => ctx.app.querySelector('#dashboard-recent-host [data-recent-panel-na]')?.focus());
     }
   }

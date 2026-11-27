@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class MapDetailTests(unittest.TestCase):
@@ -22,7 +23,7 @@ class MapDetailTests(unittest.TestCase):
         body.write_text('Capability:\n- grants: observed\n', encoding='utf-8')
         self.entries = [{'path': self.path, 'title': 'Fixture', 'tags': ['gadget', 'residual'], 'status': 'archived'}]
         self.index()
-        self.server = app.make_server(self.root, port=0)
+        self.server = make_test_server(self.root, port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 

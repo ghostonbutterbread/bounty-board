@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from urllib.error import HTTPError
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class WorkspaceSummaryBarrierTests(unittest.TestCase):
@@ -37,7 +38,7 @@ class WorkspaceSummaryBarrierTests(unittest.TestCase):
             lane = root / 'web_bounty/alpha/web'
             (lane / 'ledgers').mkdir(parents=True)
             (lane / 'ledgers/ledger.json').write_text('{"findings": []}')
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             serving = threading.Thread(target=server.serve_forever)
             serving.start()
             base = f'http://127.0.0.1:{server.server_port}'
@@ -69,7 +70,7 @@ class WorkspaceSummaryBarrierTests(unittest.TestCase):
                 (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': name, 'report_path': 'reports/report.md'}]}))
                 (lane / 'reports/report.md').write_text('# ' + name)
             (root / 'web_bounty/selected/web/reports/nav.md').write_text('<!-- generated: bounty-core-report-navigation -->\n# index')
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             serving = threading.Thread(target=server.serve_forever); serving.start()
             base = f'http://127.0.0.1:{server.server_port}'
             try:
@@ -105,7 +106,7 @@ class WorkspaceSummaryBarrierTests(unittest.TestCase):
             (lane / 'reports').mkdir()
             (lane / 'ledgers/ledger.json').write_text('{"findings": []}')
             (lane / 'reports/report.md').write_text('# old')
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             serving = threading.Thread(target=server.serve_forever); serving.start()
             base = f'http://127.0.0.1:{server.server_port}'
             try:
@@ -131,7 +132,7 @@ class WorkspaceSummaryBarrierTests(unittest.TestCase):
                 lane = root / 'web_bounty' / name / 'web'
                 (lane / 'ledgers').mkdir(parents=True)
                 (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': name}]}))
-            server = app.make_server(root, port=0)
+            server = make_test_server(root, port=0)
             serving = threading.Thread(target=server.serve_forever)
             serving.start()
             base = f'http://127.0.0.1:{server.server_port}'
@@ -169,7 +170,7 @@ class WorkspaceSummaryBarrierTests(unittest.TestCase):
                 return original(lane, warnings)
 
             with patch.object(app, source, blocked):
-                server = app.make_server(root, port=0)
+                server = make_test_server(root, port=0)
                 serving = threading.Thread(target=server.serve_forever)
                 serving.start()
 

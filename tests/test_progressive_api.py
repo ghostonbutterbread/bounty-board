@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class ProgressiveAPI(unittest.TestCase):
@@ -29,7 +30,7 @@ class ProgressiveAPI(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, **kwargs):
-        self.server = app.make_server(self.root, port=0, **kwargs)
+        self.server = make_test_server(self.root, port=0, **kwargs)
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.start()
 

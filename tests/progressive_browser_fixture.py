@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 root = Path(sys.argv[1])
 lane = root / 'source/web_bounty/alpha/web'
@@ -38,7 +39,7 @@ def held_report(lane_root, relative, **kwargs):
 app.read_file = held_report
 if os.environ.get('WRITER_FIXTURE'):
     app.writer_available = lambda writer: True
-server = app.make_server(root / 'source', port=0, **(
+server = make_test_server(root / 'source', port=0, **(
     {'writer': root / 'fake-writer', 'accept_uncoordinated_writes': True}
     if os.environ.get('WRITER_FIXTURE') else {}))
 print(server.server_port, flush=True)

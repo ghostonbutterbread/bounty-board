@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class ProgramIdentityTests(unittest.TestCase):
@@ -25,7 +26,7 @@ class ProgramIdentityTests(unittest.TestCase):
             (outside / 'web/reports/report.md').write_text('outside secret')
             (root / 'web_bounty' / 'link').symlink_to(outside, target_is_directory=True)
             root_id = hashlib.sha256(str(root.resolve()).encode()).hexdigest()
-            server = app.make_server(root, 0, collaboration_dir=Path(tmp) / 'private')
+            server = make_test_server(root, 0, collaboration_dir=Path(tmp) / 'private')
             thread = threading.Thread(target=server.serve_forever); thread.start()
             def get(program, view=''):
                 conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)

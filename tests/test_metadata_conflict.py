@@ -6,6 +6,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class MetadataConflictTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class MetadataConflictTests(unittest.TestCase):
             writer = root / 'bbh'
             writer.write_text('#!/bin/sh\nif [ "$2" = "--help" ]; then echo "--edit-finding --patch-file --root --family --lane"; else touch "' + str(marker) + '"; fi\n')
             writer.chmod(0o700)
-            server = app.make_server(root, 0, writer=writer, accept_uncoordinated_writes=True)
+            server = make_test_server(root, 0, writer=writer, accept_uncoordinated_writes=True)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             def request(method, path, payload=None):

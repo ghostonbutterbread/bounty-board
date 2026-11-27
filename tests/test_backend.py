@@ -6,13 +6,14 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class BackendTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.server = app.make_server(self.root, port=0)
+        self.server = make_test_server(self.root, port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.port = self.server.server_port
@@ -40,7 +41,7 @@ class BackendTests(unittest.TestCase):
         return {**payload, 'root_instance': data['root_instance'], 'expected_revision': finding['metadata_revision']}
 
     def test_missing_writer_disables_writes_but_read_endpoint_works(self):
-        server = app.make_server(self.root, port=0, writer=self.root / 'missing-bbh', accept_uncoordinated_writes=True)
+        server = make_test_server(self.root, port=0, writer=self.root / 'missing-bbh', accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -65,7 +66,7 @@ class BackendTests(unittest.TestCase):
         ledger = lane / 'ledgers/ledger.json'
         before = json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]})
         ledger.write_text(before)
-        server = app.make_server(self.root, port=0, writer=writer)
+        server = make_test_server(self.root, port=0, writer=writer)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -88,7 +89,7 @@ class BackendTests(unittest.TestCase):
         writer = self.root / 'fake-bbh'
         writer.write_text('#!/bin/sh\nprintf "%s\\n" "--edit-finding --patch-file --root --family --lane"\n')
         writer.chmod(0o700)
-        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
+        server = make_test_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -123,7 +124,7 @@ class BackendTests(unittest.TestCase):
         (lane / 'reports').mkdir()
         ledger = lane / 'ledgers/ledger.json'
         ledger.write_text(json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]}))
-        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
+        server = make_test_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -147,7 +148,7 @@ class BackendTests(unittest.TestCase):
         (lane / 'ledgers').mkdir(parents=True)
         (lane / 'reports').mkdir()
         (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01', 'severity': 'LOW'}]}))
-        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
+        server = make_test_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -175,7 +176,7 @@ class BackendTests(unittest.TestCase):
         (lane / 'reports').mkdir()
         (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01'}]}))
         (lane / 'context').symlink_to(self.root, target_is_directory=True)
-        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
+        server = make_test_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -208,7 +209,7 @@ class BackendTests(unittest.TestCase):
         (lane / 'ledgers').mkdir(parents=True)
         (lane / 'reports').mkdir()
         (lane / 'ledgers/ledger.json').write_text(json.dumps({'findings': [{'fid': 'F01', 'status': 'dormant', 'current': {'status': 'raw'}}]}))
-        server = app.make_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
+        server = make_test_server(self.root, port=0, writer=writer, accept_uncoordinated_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         old_server, old_port = self.server, self.port
         self.server, self.port = server, server.server_port
@@ -251,7 +252,7 @@ class BackendTests(unittest.TestCase):
         before = json.loads(ledger.read_text())['findings'][0]
         report_before = report.read_bytes()
         with patch.dict(os.environ, env, clear=True):
-            server = app.make_server(data_root, port=0, writer=bbh, accept_uncoordinated_writes=True)
+            server = make_test_server(data_root, port=0, writer=bbh, accept_uncoordinated_writes=True)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             old_server, old_port = self.server, self.port

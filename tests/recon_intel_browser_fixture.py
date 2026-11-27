@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from tests.recon_intel_fixture import make_lane, make_url_index
 from tests.scope_check_fixture import make_scope, write_fake_bbh
 
@@ -32,7 +33,7 @@ db.commit()
 db.close()
 make_scope(root, 'globex-demo', include=['*.example.test'], exclude=['shop.example.test', 'https://cdn.example.test/private/*'])
 bbh = write_fake_bbh(root.parent / 'fake-bbh')
-server = app.make_server(root, port=0, artifact_root=root.parent / 'no-artifact-mount')
+server = make_test_server(root, port=0, artifact_root=root.parent / 'no-artifact-mount')
 server.recon.scope.bbh = bbh
 print(server.server_port, flush=True)
 server.serve_forever()

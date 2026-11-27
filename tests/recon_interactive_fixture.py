@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from tests.recon_intel_fixture import make_lane
 from tests.test_ledger_actions import FAKE_WRITER
 from tests.test_recon_urls import FAKE_RECON_WRITER
@@ -64,6 +65,6 @@ if mode == 'writer':
     os.environ['FAKE_MODE'] = str(base / 'mode')
     os.environ['FAKE_HELP'] = ('--edit-finding --patch-file --root --family --lane --from-file --set-submission --submission-state '
                                '--submission-result --submission-report --delete-finding')
-server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None)
+server = make_test_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None)
 print(server.server_port, flush=True)
 server.serve_forever()

@@ -1,3 +1,4 @@
+require('./isolate-home.cjs'); // Standalone runs must not use the operator's HOME.
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -5,6 +6,7 @@ const path = require('node:path');
 const {spawn} = require('node:child_process');
 const {once} = require('node:events');
 const {chromium} = require('playwright');
+const {assertPreferencesOnly} = require('./preference-write-check.cjs');
 
 // The theme switcher is a menu button; filters are multi-select popovers.
 async function setTheme(page,name){await page.getByRole('button',{name:'Theme',exact:true}).click();await page.getByRole('menuitemradio',{name:name[0].toUpperCase()+name.slice(1),exact:true}).click();}
@@ -27,8 +29,10 @@ test('real EasyMDE saves a browser draft across reload without writing the sourc
     const base=`http://127.0.0.1:${Number(chunk.toString().trim())}`;
     browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_BIN || '/usr/bin/google-chrome'});
     const page=await browser.newPage();page.setDefaultTimeout(4000);page.on('dialog',dialog=>dialog.accept());const external=[];const writes=[];
+    const capture=p=>p.on('request',r=>{if(!['GET','HEAD'].includes(r.method())) writes.push({method:r.method(),url:r.url(),body:r.postData()});});
+    capture(page);
     await page.route('**/*',route=>route.request().url().startsWith(base+'/') ? route.continue() : route.abort());
-    page.on('request',r=>{if(!r.url().startsWith(base+'/')) external.push(r.url()); if(!['GET','HEAD'].includes(r.method())) writes.push(r.url());});
+    page.on('request',r=>{if(!r.url().startsWith(base+'/')) external.push(r.url());});
     const open=async()=>{await page.getByRole('link',{name:'Programs',exact:true}).click();await page.getByLabel('Program').selectOption('web_bounty/fictional');await page.getByLabel('Lane').selectOption('web');await page.getByRole('link',{name:'Reports',exact:true}).click();await page.locator('.CodeMirror').waitFor();};
     await page.goto(base);await open();
     const editor=page.locator('.CodeMirror textarea');await editor.focus();await page.keyboard.press('Control+A');await page.keyboard.insertText('# Synthetic edited draft');
@@ -74,8 +78,9 @@ test('real EasyMDE saves a browser draft across reload without writing the sourc
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,theme);
     }
     assert.equal(fs.readFileSync(file,'utf8'),'# Changed synthetic source');assert.equal(fs.readFileSync(second,'utf8'),'# Other synthetic report');
-    assert.deepEqual(writes,[]);assert.deepEqual(external,[]);
-    const bad=await browser.newPage();bad.setDefaultTimeout(4000);
+    const drafts=['# Synthetic edited draft','API draft','Different program draft','conflicting draft','must not overwrite'];
+    assertPreferencesOnly(writes,base,drafts);assert.deepEqual(external,[]);
+    const bad=await browser.newPage();capture(bad);bad.setDefaultTimeout(4000);
     await bad.route('**/*',route=>route.request().url().startsWith(base+'/') ? route.continue() : route.abort());
     const identity=await page.evaluate(async()=> (await (await fetch('/api/data')).json()).root_identity);
     const key='bounty-board-report-draft-v2:'+JSON.stringify([identity,'web_bounty/fictional','web','example.md']);
@@ -86,7 +91,7 @@ test('real EasyMDE saves a browser draft across reload without writing the sourc
     assert.equal(await bad.evaluate(key=>localStorage.getItem(key),key),'{invalid');
     assert.match(await bad.locator('#report-status').innerText(),/not overwritten/);
     await bad.close();
-    const fail=await browser.newPage();fail.setDefaultTimeout(4000);
+    const fail=await browser.newPage();capture(fail);fail.setDefaultTimeout(4000);
     await fail.route('**/*',route=>route.request().url().startsWith(base+'/') ? route.continue() : route.abort());
     await fail.addInitScript(()=>{const set=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key.startsWith('bounty-board-report-draft-v2:'))throw new DOMException('quota','QuotaExceededError');return set.call(this,key,value);};});
     await fail.goto(base);await fail.getByRole('link',{name:'Programs',exact:true}).click();await fail.getByRole('link',{name:'Reports',exact:true}).click();
@@ -94,7 +99,7 @@ test('real EasyMDE saves a browser draft across reload without writing the sourc
     assert.match(await fail.locator('#report-status').innerText(),/storage unavailable/i);
     assert.equal(await fail.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),true);
     await fail.close();
-    const readFail=await browser.newPage();readFail.setDefaultTimeout(4000);
+    const readFail=await browser.newPage();capture(readFail);readFail.setDefaultTimeout(4000);
     await readFail.route('**/*',route=>route.request().url().startsWith(base+'/') ? route.continue() : route.abort());
     await readFail.addInitScript(()=>{const get=Storage.prototype.getItem;Storage.prototype.getItem=function(key){if(key.startsWith('bounty-board-report-draft-v2:'))throw new DOMException('blocked','SecurityError');return get.call(this,key);};});
     await readFail.goto(base);await readFail.getByRole('link',{name:'Programs',exact:true}).click();await readFail.getByRole('link',{name:'Reports',exact:true}).click();
@@ -102,12 +107,13 @@ test('real EasyMDE saves a browser draft across reload without writing the sourc
     assert.match(await readFail.locator('#report-status').innerText(),/storage unavailable/i);
     assert.equal(await readFail.evaluate(()=>Object.keys(localStorage).filter(k=>k.startsWith('bounty-board-report-draft-v2:')).length),0);
     await readFail.close();
-    const conflictFail=await browser.newPage();conflictFail.setDefaultTimeout(4000);
+    const conflictFail=await browser.newPage();capture(conflictFail);conflictFail.setDefaultTimeout(4000);
     await conflictFail.route('**/*',route=>route.request().url().startsWith(base+'/') ? route.continue() : route.abort());
     await conflictFail.addInitScript(key=>{localStorage.setItem(key,JSON.stringify({version:1,text:'conflicting draft',original:'old source',revision:'old revision'}));const set=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k===key)throw new DOMException('quota','QuotaExceededError');return set.call(this,k,v);};},key);
     await conflictFail.goto(base);await conflictFail.getByRole('link',{name:'Programs',exact:true}).click();await conflictFail.getByLabel('Program').selectOption('web_bounty/fictional');await conflictFail.getByLabel('Lane').selectOption('web');await conflictFail.getByRole('link',{name:'Reports',exact:true}).click();
     await conflictFail.getByText(/^Conflict:/).waitFor();await conflictFail.locator('.CodeMirror textarea').focus();await conflictFail.keyboard.insertText(' newer');
     assert.match(await conflictFail.locator('#report-status').innerText(),/Conflict:/);assert.match(await conflictFail.locator('#report-status').innerText(),/storage unavailable/i);
     await conflictFail.close();
+    assertPreferencesOnly(writes,base,drafts);
   } finally {if(browser)await browser.close();if(proc.exitCode===null && proc.signalCode===null){const done=once(proc,'exit');proc.kill('SIGTERM');await done;}fs.rmSync(tmp,{recursive:true,force:true});}
 });

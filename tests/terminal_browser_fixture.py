@@ -218,6 +218,7 @@ def main():
     root = fx.make_root(target)
     front, term_port = free_port(), free_port()
     board = app.make_server(root, port=0, terminal_url=None if 'noterm' in modes else '/terminal/',
+                            user_config=target / 'config' / 'user.conf',
                             **({} if 'nolive' in modes else {'live_edit_dir': target / 'live-state'}))
     threading.Thread(target=board.serve_forever, daemon=True).start()
     proc = None

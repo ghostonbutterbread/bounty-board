@@ -90,6 +90,6 @@ if mode != 'readonly':
     os.environ['FAKE_HELP'] = ('--edit-finding --patch-file --root --family --lane --from-file --set-submission '
                                '--submission-state --submission-result --submission-report --delete-finding --actor')
 server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=writer is not None,
-                         state_dir=None if mode == 'nostate' else base / 'state')
+                         state_dir=None if mode == 'nostate' else base / 'state', user_config=base / 'config' / 'user.conf')
 print(server.server_port, flush=True)
 server.serve_forever()

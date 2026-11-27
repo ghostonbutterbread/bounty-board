@@ -706,7 +706,7 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 tailnet_port=443, collaboration_dir=None, experimental_fixture_publish=False, collaboration_max_bytes=None,
                 report_autosave=False, retention_max_operations=None, retention_min_free_bytes=None,
                 live_edit_dir=None, state_dir=None, terminal_url=None, artifact_root=None, recon_query_budget=None,
-                artifact_uploads=False):
+                artifact_uploads=False, user_config=None):
     import os
     import tempfile
     import threading
@@ -736,6 +736,8 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
         tailnet_authorities = frozenset({f'{tailnet_host}:{tailnet_port}'})
         tailnet_origin = f'https://{tailnet_host}:{tailnet_port}'
     root = Path(root).absolute()
+    from user_preferences import UserPreferences, validate as validate_user_preferences, MAX_BYTES as USER_PREFERENCES_MAX_BYTES
+    user_preferences = UserPreferences(user_config if user_config is not None else Path.home() / '.config/bountyboard/user.conf', root)
 
     def root_snapshot():
         import hashlib
@@ -1607,6 +1609,12 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             if not self.trusted_request(navigation=url.path in ('/', '/index.html')):
                 self.reply(403, {'error': 'untrusted_origin'})
                 return
+            if url.path == '/api/user-preferences':
+                try:
+                    preferences, revisions = user_preferences.read()
+                except (OSError, ValueError, UnicodeError):
+                    return self.reply(503, {'error': 'preferences_unavailable'})
+                return self.reply(200, {'preferences': preferences, 'revisions': revisions})
             if url.path in ('/api/report-artifacts', '/api/report-artifact', '/api/report-artifact-media', '/api/report-artifacts.zip'):
                 return self.report_artifacts({'/api/report-artifacts': 'list', '/api/report-artifact': 'file',
                                               '/api/report-artifact-media': 'media', '/api/report-artifacts.zip': 'zip'}[url.path])
@@ -1837,11 +1845,21 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 relative = unquote(url.path).lstrip('/') or 'index.html'
                 try:
                     data = read_file(self.server.static_root, relative)
+                    if relative == 'index.html':
+                        try:
+                            preferences, revisions = user_preferences.read()
+                            snapshot = {'preferences': preferences, 'revisions': revisions}
+                        except (OSError, ValueError, UnicodeError):
+                            snapshot = {'error': 'preferences_unavailable'}
+                        payload = json.dumps(snapshot, ensure_ascii=True).replace('<', '\\u003c').replace('&', '\\u0026')
+                        element = ('<script id="preferences-snapshot" type="application/json">' + payload + '</script>').encode('utf-8')
+                        data = data.replace(b'<!-- preferences-snapshot -->', element, 1)
                     self.send_response(200)
                     self.send_header('Content-Type', mimetypes.guess_type(relative)[0] or 'application/octet-stream')
                     self.send_header('Content-Length', str(len(data)))
                     self.send_header('X-Content-Type-Options', 'nosniff')
                     if relative == 'index.html':
+                        self.send_header('Cache-Control', 'no-store')
                         # The page may be opened from other sites; never inside
                         # their frames, and without a handle back to the opener.
                         self.send_header('X-Frame-Options', 'DENY')
@@ -1858,6 +1876,31 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             self.reply(403, {'error': 'editing_disabled', 'message': 'Report writes are disabled; retain your draft.'})
 
         def do_POST(self):
+            if urlsplit(self.path).path == '/api/user-preferences':
+                try:
+                    payload = self.live_read_json(USER_PREFERENCES_MAX_BYTES)
+                    if set(payload) not in ({'set', 'expected'}, {'migrate'}):
+                        raise ValueError('invalid payload')
+                    migrate = 'migrate' in payload
+                    values = validate_user_preferences(payload['migrate' if migrate else 'set'])
+                    expected = None if migrate else payload['expected']
+                    if not migrate and (not isinstance(expected, dict) or set(expected) != set(values) or
+                                        any(type(v) is not int or v < 0 for v in expected.values())):
+                        raise ValueError('invalid revisions')
+                except PermissionError:
+                    self.close_connection = True
+                    return self.reply(403, {'error': 'untrusted_origin'})
+                except (ValueError, UnicodeError):
+                    self.close_connection = True
+                    return self.reply(400, {'error': 'invalid_request'})
+                try:
+                    result, revisions, conflict, applied = user_preferences.update(values, migrate=migrate, expected=expected)
+                except (OSError, ValueError, UnicodeError):
+                    self.close_connection = True
+                    return self.reply(503, {'error': 'preferences_unavailable'})
+                return self.reply(409 if conflict else 200, {'preferences': result, 'revisions': revisions,
+                                                             **({'migrated': applied} if migrate else {}),
+                                                             **({'error': 'preferences_conflict'} if conflict else {})})
             if urlsplit(self.path).path == '/api/report-artifact-upload':  # feat/board-artifact-uploads
                 return self.artifact_upload()
             if urlsplit(self.path).path == '/api/report-artifact-delete':  # feat/board-artifact-delete

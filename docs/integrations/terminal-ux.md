@@ -1,5 +1,11 @@
 # Terminal UX: copy and paste, toggle shortcut, docking, Settings
 
+> Preference storage update: the Settings controls (copy switches, shortcut,
+> and default dock) are persisted in the Board server user's
+> `~/.config/bountyboard/user.conf`; the browser copy is a fallback/cache.
+> The current dock remains tab-scoped. Descriptions below of preferences as
+> browser-only record the original implementation, not the current contract.
+
 - Branch: `feat/board-terminal-ux`; base `18089f4` (origin/beta).
 - Owner surfaces: `static/modules/sandbox-terminal.js|css` (drawer), new `static/modules/settings.js|css` (Settings page and registry), the `#/settings` route in `static/app.js`, `static/index.html` tags, `static/tests/sandbox-terminal*.cjs`.
 - Ryu's request, short: copying is annoying (Ctrl+Shift+C opens the inspector in Firefox on Windows), so copy on highlight; a Settings area, for the terminal first; a hotkey (Ctrl+E) to open and close the terminal; dock it right, left, top or bottom.

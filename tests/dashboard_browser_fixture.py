@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 root = Path(sys.argv[1])
 for name, findings in {
@@ -24,6 +25,6 @@ for name, findings in {
     db.execute('INSERT INTO surfaces VALUES (?,?,?,?,?,?,?,?)', ('2','endpoint','example.test','/known',None,None,None,None))
     db.execute('INSERT INTO assessments VALUES (?,?,?,?,?,?,?,?,?,?)', ('2','xss','untested',None,None,None,'[]','[]',None,None))
     db.commit(); db.close()
-server = app.make_server(root, port=0)
+server = make_test_server(root, port=0)
 print(server.server_port, flush=True)
 server.serve_forever()

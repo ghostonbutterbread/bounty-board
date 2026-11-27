@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 from tests import test_ledger_actions
 
 
@@ -20,7 +21,7 @@ class ArchiveStateTests(test_ledger_actions.LedgerActionTests):
 
     def start(self, writer=True, state=True):
         import threading
-        self.server = app.make_server(self.root, 0, writer=self.writer if writer else None, accept_uncoordinated_writes=writer,
+        self.server = make_test_server(self.root, 0, writer=self.writer if writer else None, accept_uncoordinated_writes=writer,
                                       state_dir=self.state if state else None)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -120,14 +121,14 @@ class ArchiveStateTests(test_ledger_actions.LedgerActionTests):
 
     def test_state_dir_inside_the_data_root_is_refused(self):
         with self.assertRaises(ValueError):
-            app.make_server(self.root, 0, state_dir=self.root / 'state')
+            make_test_server(self.root, 0, state_dir=self.root / 'state')
 
     def test_state_dir_symlinked_into_the_data_root_is_refused(self):
         (self.root / 'inside').mkdir()
         link = self.base / 'state-link'
         link.symlink_to(self.root / 'inside', target_is_directory=True)
         with self.assertRaises(ValueError):
-            app.make_server(self.root, 0, state_dir=link)
+            make_test_server(self.root, 0, state_dir=link)
 
 
 class ArchiveStoreReadErrorTests(unittest.TestCase):

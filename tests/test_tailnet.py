@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import app
+from tests.fixture_preferences import make_server as make_test_server
 
 
 class TailnetBoundaryTests(unittest.TestCase):
@@ -29,7 +30,7 @@ class TailnetBoundaryTests(unittest.TestCase):
             (lane / 'ledgers').mkdir(parents=True)
             (lane / 'reports').mkdir()
             (lane / 'ledgers/ledger.json').write_text('{"findings":[{"fid":"F01","severity":"LOW"}]}')
-            server = app.make_server(root, port=0, writer=writer, accept_uncoordinated_writes=True,
+            server = make_test_server(root, port=0, writer=writer, accept_uncoordinated_writes=True,
                                      tailnet_host='board.example.ts.net')
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -145,7 +146,7 @@ class TailnetBoundaryTests(unittest.TestCase):
         lane = Path(root) / 'web_bounty/example/web/ledgers'
         lane.mkdir(parents=True)
         (lane / 'ledger.json').write_text('{"findings":[{"fid":"F01","title":"synthetic"}]}')
-        server = app.make_server(Path(root), port=0, **kwargs)
+        server = make_test_server(Path(root), port=0, **kwargs)
         self._port = server.server_port
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -218,7 +219,7 @@ class TailnetBoundaryTests(unittest.TestCase):
             self.assertEqual(request('PATCH', write + [('Origin', 'https://' + authority)], '/api/finding', b'{}')[0], 503)
             self.assertEqual(request('PATCH', write + [('Origin', 'https://' + host)], '/api/finding', b'{}')[0], 403)
         with self.assertRaises(ValueError):
-            app.make_server(Path(root), port=0, tailnet_host=host, tailnet_port=0)
+            make_test_server(Path(root), port=0, tailnet_host=host, tailnet_port=0)
 
     def test_tailnet_port_is_configured_from_cli_or_config(self):
         self.assertEqual(app.parse_config(['--tailnet-host', 'board.example.ts.net']).tailnet_port, 443)
@@ -261,7 +262,7 @@ class TailnetBoundaryTests(unittest.TestCase):
 
     def test_duplicate_host_and_origin_are_rejected_by_default(self):
         with tempfile.TemporaryDirectory() as root:
-            server = app.make_server(Path(root), port=0)
+            server = make_test_server(Path(root), port=0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
