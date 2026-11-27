@@ -1,4 +1,4 @@
-/* Sandbox preview ports: drawer pill and popover, Settings section. */
+/* Sandbox preview ports: drawer pill, live line and popover, terminal link tip, Settings section. */
 .term-ports-pill{display:inline-flex;align-items:center;gap:6px;min-height:0;padding:0 10px;line-height:22px;border:1px solid transparent;border-radius:var(--radius-pill);font-size:var(--text-xs);font-weight:600;color:var(--accent);background:var(--accent-soft);box-shadow:none;cursor:pointer;white-space:nowrap}
 .term-ports-pill:hover{border-color:var(--accent)}
 .term-ports-pill:focus-visible{outline:none;box-shadow:var(--focus-ring)}
@@ -17,12 +17,34 @@
 .term-ports-link{flex:1 1 200px;min-width:0;font-family:var(--font-mono);font-size:var(--text-sm);color:var(--accent);overflow-wrap:anywhere}
 .term-ports-url.secondary .term-ports-link{color:var(--text-2)}
 .term-ports-where{flex:none;font-size:var(--text-xs);color:var(--text-3)}
-.term-ports-actions{display:inline-flex;gap:var(--space-1);flex:none}
-.term-ports-actions [data-copied="ok"]{color:var(--success)}
-.term-ports-actions [data-copied="warn"]{color:var(--warning)}
+.term-ports-copied{flex:none;font-size:var(--text-xs);font-weight:600;color:var(--success)}
+.term-ports-copied[data-tone="warn"]{color:var(--warning)}
 .term-ports-note{margin:var(--space-3) 0 0;font-size:var(--text-sm);color:var(--text-3)}
 .term-ports-note a{color:var(--accent)}
 
 .ports-acl-note{margin:var(--space-1) 0 0}
 .ports-settings-msg{margin:var(--space-2) 0 0;font-size:var(--text-sm);color:var(--warning)}
 .ports-settings-msg a{color:var(--accent)}
+
+/* Live line under the drawer header (BoardTerminal.strip('ports')). */
+.term-ports-live{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-1) var(--space-3);margin:0 var(--space-4) var(--space-2);padding:4px var(--space-3);border:1px solid var(--border);border-radius:var(--radius);background:var(--surface-2);font-size:var(--text-sm);color:var(--text-2);min-width:0;cursor:auto;-webkit-user-select:text;user-select:text}
+.term-ports-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--success);box-shadow:0 0 0 3px var(--success-soft)}
+.term-ports-live-text b{color:var(--text);font-weight:650}
+.term-ports-live-port{display:inline-flex;align-items:baseline;gap:var(--space-2);min-width:0}
+.term-ports-live-port code{font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text)}
+.term-ports-live-link{min-width:0;font-family:var(--font-mono);font-size:var(--text-sm);color:var(--accent);overflow-wrap:anywhere}
+.term-ports-live .term-ports-where{font-size:var(--text-xs)}
+.term-ports-live-note{font-size:var(--text-xs);color:var(--text-3)}
+.term-ports-live-note a{color:var(--accent)}
+.term-ports-more{min-height:0;padding:0 8px;line-height:20px;border:1px solid var(--border);border-radius:var(--radius-pill);background:transparent;color:var(--text-2);font-size:var(--text-xs);font-weight:600;box-shadow:none;cursor:pointer}
+.term-ports-more:hover{border-color:var(--accent);color:var(--accent)}
+.term-ports-more:focus-visible,.term-ports-live a:focus-visible,.term-ports-link:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:4px}
+@media (max-width:700px){.term-ports-live{margin:0 var(--space-2) var(--space-2)}}
+
+/* Hover tip for a terminal link (text only, set with textContent). */
+.term-ports-tip{position:fixed;z-index:61;max-width:min(420px,calc(100vw - 16px));padding:var(--space-2) var(--space-3);background:var(--surface-raised);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-lg);font-size:var(--text-sm);pointer-events:none}
+.term-ports-tip-title{font-weight:650}
+.term-ports-tip-url{font-family:var(--font-mono);color:var(--accent);overflow-wrap:anywhere}
+.term-ports-tip-hint{color:var(--text-3);font-size:var(--text-xs)}
+.term-ports-tip[data-tone="ok"] .term-ports-tip-hint{color:var(--success);font-weight:600}
+.term-ports-tip[data-tone="warn"] .term-ports-tip-hint{color:var(--warning);font-weight:600}

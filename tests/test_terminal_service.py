@@ -300,6 +300,26 @@ class PortsServiceTests(unittest.TestCase):
         self.assertEqual((status, payload['ports_tailscale'], payload['tailscale_reason']), (200, False, 'disabled'))
         self.assertEqual(self.request('GET', '/api/status')[2]['preview_ports'], True)
 
+    def test_ports_same_flag_reaches_the_hub(self):
+        import contextlib
+        import io
+        from unittest import mock
+        self.assertEqual(self.server.ports.same_ranges, ((1024, 8999), (10000, 65535)), 'default --ports-same')
+        seen = []
+
+        def capture(*args, **kw):
+            seen.append(kw.get('ports_same'))
+            raise ValueError('captured')
+        base = ['--allowed-origin', 'https://node.tail1.ts.net:9001', '--root', '/nonexistent', '--preview-ports']
+        with mock.patch.object(ts, 'make_service', capture):
+            for value, expected in (('', ()), ('8000-8100,20000-20010', ((8000, 8100), (20000, 20010)))):
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                    ts.main(base + ['--ports-same', value])
+                self.assertEqual(seen[-1], expected)
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                ts.main(base)
+            self.assertEqual(seen[-1], ((1024, 8999), (10000, 65535)))
+
     def test_ports_route_and_websocket_push(self):
         from tests.test_terminal_ports import AutoAgent, EchoServer, close_all, wait
         sel = fx.selector()
@@ -320,7 +340,7 @@ class PortsServiceTests(unittest.TestCase):
             pushed = [m for m in client.controls if m['type'] == 'ports'][-1]['ports']
             self.assertEqual([i['port'] for i in pushed], [echo.port])
             item = pushed[0]
-            self.assertEqual(set(item), {'port', 'host_port', 'local_url', 'tailscale_url', 'state'})
+            self.assertEqual(set(item), {'port', 'host_port', 'local_url', 'tailscale_port', 'tailscale_url', 'state'})
             self.assertEqual(item['local_url'], f'http://127.0.0.1:{item["host_port"]}/')
             status, _, payload = self.request('GET', '/terminal/api/ports?' + urlencode(sel))
             self.assertEqual((status, payload['ports']), (200, pushed))
@@ -633,7 +653,9 @@ class ConfigTests(unittest.TestCase):
         for bad in (['--max-sessions', '33'], ['--max-sessions', '0'], ['--pause-after', '600', '--remove-after', '300'],
                     ['--pause-after', '5'], ['--remove-after', '30'], ['--idle-timeout', '100', '--remove-after', '200'],
                     ['--min-free-memory', 'lots'], ['--ports-range', '80-90'], ['--ports-range', '9000-9100', '--port', '9011'],
-                    ['--tailscale-address', '0.0.0.0'], ['--tailscale-address', '192.168.1.2']):
+                    ['--tailscale-address', '0.0.0.0'], ['--tailscale-address', '192.168.1.2'],
+                    ['--ports-same', '8000'], ['--ports-same', '0-100'], ['--ports-same', '1024-70000'],
+                    ['--ports-same', '9000-8000'], ['--ports-same', '1024-8999,']):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 ts.main(base + bad)
         self.assertEqual(ts.parse_size('2G'), 2 * 1024 ** 3)

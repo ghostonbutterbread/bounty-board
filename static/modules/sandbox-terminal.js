@@ -125,14 +125,43 @@
     }
     return el;
   }
-  const listeners = {session: new Set(), message: new Set()};
-  function on(type, callback) { if (listeners[type] && typeof callback === 'function') listeners[type].add(callback); return () => off(type, callback); }
+  // strip(name): a stable, initially empty full-width element under the header
+  // (outside it, so it never starts a drag; hidden while empty). 'terminal'
+  // event: the xterm instance, once, when the first session attaches (replayed
+  // to late subscribers).
+  const strips = new Map();
+  function placeStrips() {
+    const head = drawer?.querySelector('[data-term-head]');
+    if (!head) return;
+    let host = drawer.querySelector('[data-term-strips]');
+    if (!host) { host = document.createElement('div'); host.className = 'term-strips'; host.dataset.termStrips = ''; head.after(host); }
+    strips.forEach(el => { if (el.parentNode !== host) host.appendChild(el); });
+  }
+  function strip(name) {
+    name = String(name);
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new Error(`Invalid terminal strip name: ${name}`);
+    if (!strips.has(name)) { const el = document.createElement('div'); el.className = 'term-strip'; el.dataset.termStrip = name; strips.set(name, el); }
+    placeStrips();
+    return strips.get(name);
+  }
+  let termSent = null;
+  const listeners = {session: new Set(), message: new Set(), terminal: new Set()};
+  function on(type, callback) {
+    if (!listeners[type] || typeof callback !== 'function') return () => {};
+    listeners[type].add(callback);
+    if (type === 'terminal' && termSent) { try { callback(termSent); } catch (error) { console.error('Terminal terminal listener failed:', error); } }
+    return () => off(type, callback);
+  }
   function off(type, callback) { listeners[type]?.delete(callback); }
   function emit(type, payload) {
     for (const callback of [...listeners[type]]) { try { callback(payload); } catch (error) { console.error(`Terminal ${type} listener failed:`, error); } }
   }
   let sessionLive = false;
-  function emitSession() { sessionLive = true; emit('session', {selector: sel ? {...sel} : null, session: info}); }
+  function emitSession() {
+    placeStrips();
+    if (term && term !== termSent) { termSent = term; emit('terminal', term); }
+    sessionLive = true; emit('session', {selector: sel ? {...sel} : null, session: info});
+  }
   function emitClosed() { if (sessionLive) { sessionLive = false; emit('session', {selector: null, session: null}); } }
   const esc = value => (ctx?.esc ? ctx.esc(value) : String(value ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`));
   const keyOf = s => JSON.stringify([s.family, s.program, s.lane, s.path]);
@@ -1074,5 +1103,5 @@
   // browser tests and diagnostics only.
   window.BoardTerminal = {blockKeys, sha256hex, commandText, unsafeText, unsafePaste, shortcutProblem, shortcutLabel,
     get status() { return status; }, get checks() { return checks; }, get term() { return term; }, get prefs() { return {...prefs, shortcut: {...prefs.shortcut}}; }, get dock() { return {current: currentDock(), maximized: isMaximized(), moved: !!current}; },
-    slot, on, off, selector: () => (sel ? {...sel} : null), session: () => (sel && info && drawer && !drawer.hidden ? info : null)};
+    slot, strip, on, off, selector: () => (sel ? {...sel} : null), session: () => (sel && info && drawer && !drawer.hidden ? info : null)};
 })();
