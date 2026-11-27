@@ -10,6 +10,13 @@ const {chromium} = require('playwright');
 
 const repo = path.resolve(__dirname, '../..');
 const ACME = encodeURIComponent('web_bounty/acme-cloud');
+// Filter bar helpers (feat/board-recent-facets): the Recent filters are dropdowns along the top.
+const facet = async (page, key) => { const b = page.locator(`[data-facet-open="${key}"]`); if (await b.getAttribute('aria-expanded') !== 'true') await b.click(); await page.locator('.facet-popover').waitFor(); return page.locator('.facet-popover'); };
+const closeFacet = async page => { if (await page.locator('.facet-popover').count()) { await page.locator('.facet-popover input').first().focus(); await page.keyboard.press('Escape'); } };
+const pickWindow = async (page, key) => { await facet(page, 'window'); await page.locator(`.facet-popover [data-recent-window="${key}"]`).check(); await closeFacet(page); };
+const setFacetValues = async (page, key, values) => { const pop = await facet(page, key); for (const box of await pop.locator('input[data-facet-input]').evaluateAll(n => n.map(i => i.value))) { const input = pop.locator(`input[data-facet-input][value="${box}"]`); if ((await input.isChecked()) !== values.includes(box)) await input.setChecked(values.includes(box)); } await closeFacet(page); };
+const setOption = async (page, id, on) => { await facet(page, 'opts'); await page.locator(id).setChecked(on); await closeFacet(page); };
+const facetText = (page, key) => page.locator(`[data-facet-open="${key}"]`).innerText();
 const reportRoute = (program, lane, report) => `#/programs/${encodeURIComponent(program)}/${lane}/reports/${encodeURIComponent(report)}`;
 
 async function withFixture(run, env = {}) {
@@ -180,7 +187,7 @@ test('Recent reports view: newest first across programs, filters, sort, links; d
   const titles = () => page.locator('.recent-table a.recent-link').allInnerTexts();
   const rowsSettled = async expected => page.waitForFunction(want => JSON.stringify([...document.querySelectorAll('.recent-table a.recent-link')].map(a => a.textContent)) === JSON.stringify(want), expected);
   await rowsSettled(['Globex SQLi report', 'Stored XSS report', 'Initech APK notes', 'Invoice IDOR report']);
-  await page.locator('[data-recent-window="all"]').click();
+  await pickWindow(page, 'all');
   await rowsSettled(['Globex SQLi report', 'Stored XSS report', 'Initech APK notes', 'Invoice IDOR report', 'API token report', 'Acme working notes', 'Globex old draft']);
   assert.match(await page.locator('.recent-status').innerText(), /Showing 1 to 7 of 7 reports/);
   const row = page.locator('tr[data-recent-row][data-path="confirmed/stored xss.md"]');
@@ -188,39 +195,39 @@ test('Recent reports view: newest first across programs, filters, sort, links; d
   assert.ok(await row.locator('time').getAttribute('title'), 'absolute time on hover');
   assert.equal(await row.locator('a.recent-link').getAttribute('href'), reportRoute('web_bounty/acme-cloud', 'web', 'confirmed/stored xss.md'));
   // Time windows.
-  await page.locator('[data-recent-window="1d"]').click();
+  await pickWindow(page, '1d');
   await rowsSettled(['Globex SQLi report', 'Stored XSS report']);
-  await page.locator('[data-recent-window="7d"]').click();
+  await pickWindow(page, '7d');
   await rowsSettled(['Globex SQLi report', 'Stored XSS report', 'Initech APK notes', 'Invoice IDOR report']);
-  await page.locator('[data-recent-window="all"]').click();
+  await pickWindow(page, 'all');
   // Program multi-select.
-  await page.locator('[data-recent-programs]').click();
-  await page.getByLabel('Search programs to filter').fill('glob');
-  await page.locator('.recent-program-list label.option', {hasText: 'globex'}).locator('input').check();
+  await facet(page, 'program');
+  await page.getByLabel('Filter Program options').fill('glob');
+  await page.locator('.facet-popover label.option', {hasText: 'globex'}).locator('input').check();
   await rowsSettled(['Globex SQLi report', 'Globex old draft']);
-  await page.getByLabel('Search programs to filter').fill('');
-  assert.equal(await page.locator('.recent-program-list label.option', {hasText: 'globex'}).locator('.count').innerText(), '2');
-  await page.locator('.recent-program-list label.option', {hasText: 'initech'}).locator('input').check();
+  await page.getByLabel('Filter Program options').fill('');
+  assert.equal(await page.locator('.facet-popover label.option', {hasText: 'globex'}).locator('.count').innerText(), '2');
+  await page.locator('.facet-popover label.option', {hasText: 'initech'}).locator('input').check();
   await rowsSettled(['Globex SQLi report', 'Initech APK notes', 'Globex old draft']);
   await page.getByRole('button', {name: 'Done'}).click();
-  await page.getByRole('button', {name: 'Remove program filter initech'}).click();
+  await page.getByRole('button', {name: 'Remove filter Program initech'}).click();
   await rowsSettled(['Globex SQLi report', 'Globex old draft']);
   await page.locator('[data-recent-clear]').first().click();
-  assert.equal(await page.locator('[data-recent-window="7d"]').getAttribute('aria-pressed'), 'true', 'Clear filters returns to the 7-day default');
-  await page.locator('[data-recent-window="all"]').click();
+  assert.match(await facetText(page, 'window'), /7 days/, 'Clear filters returns to the 7-day default');
+  await pickWindow(page, 'all');
   // Lane, text filter and sort.
-  await page.locator('#recent-lane').selectOption('api');
+  await setFacetValues(page, 'lane', ['api']);
   await rowsSettled(['API token report']);
-  await page.locator('#recent-lane').selectOption('');
+  await setFacetValues(page, 'lane', []);
   await page.getByLabel('Filter recent reports by title or path').fill('invoice');
   await rowsSettled(['Invoice IDOR report']);
   await page.getByLabel('Filter recent reports by title or path').fill('');
-  await page.locator('[data-recent-order]').click();
+  await page.locator('#recent-order').selectOption('oldest');
   await rowsSettled(['Globex old draft', 'Acme working notes', 'API token report', 'Invoice IDOR report', 'Initech APK notes', 'Stored XSS report', 'Globex SQLi report']);
-  await page.locator('[data-recent-order]').click();
-  await page.getByLabel('Include generated and _meta files').check();
+  await page.locator('#recent-order').selectOption('newest');
+  await setOption(page, '#recent-nav', true);
   await page.waitForFunction(() => document.querySelector('.recent-table tr[data-recent-row]')?.dataset.path === 'index/xss.md');
-  await page.getByLabel('Include generated and _meta files').uncheck();
+  await setOption(page, '#recent-nav', false);
   await rowsSettled(['Globex SQLi report', 'Stored XSS report', 'Initech APK notes', 'Invoice IDOR report', 'API token report', 'Acme working notes', 'Globex old draft']);
   // Links: modified click opens a new tab; plain click navigates in-app and Back returns here.
   const fromView = await openedInNewTab(context, () => page.locator('.recent-table a.recent-link', {hasText: 'Initech APK notes'}).click({button: 'middle'}), 'apk-notes.md');
@@ -258,22 +265,22 @@ test('Recent view: 7-day default, every filter round-trips through the URL with 
   // First visit: no saved preference, no window in the link.
   await page.goto(`${url}#/recent`);
   await recentSettled(page, ['Globex SQLi report', 'Stored XSS report', 'Initech APK notes', 'Invoice IDOR report']);
-  assert.equal(await page.locator('[data-recent-window="7d"]').getAttribute('aria-pressed'), 'true');
+  assert.match(await facetText(page, 'window'), /7 days/);
   assert.equal(hashOf(page), '#/recent?within=7d&order=newest');
   assert.equal(await page.locator('[data-recent-clear]').count(), 0, 'the default window is not a filter');
   // Every filter change replaces the URL; history does not grow.
   const before = await historyLength(page);
-  await page.locator('[data-recent-window="all"]').click();
+  await pickWindow(page, 'all');
   await recentSettled(page, ['Globex SQLi report', 'Stored XSS report', 'Initech APK notes', 'Invoice IDOR report', 'API token report', 'Acme working notes', 'Globex old draft']);
   assert.equal(hashOf(page), '#/recent?within=all&order=newest');
-  await page.locator('[data-recent-programs]').click();
-  await page.locator('.recent-program-list label.option', {hasText: 'acme-cloud'}).locator('input').check();
-  await page.locator('.recent-program-list label.option', {hasText: 'globex'}).locator('input').check();
+  await facet(page, 'program');
+  await page.locator('.facet-popover label.option', {hasText: 'acme-cloud'}).locator('input').check();
+  await page.locator('.facet-popover label.option', {hasText: 'globex'}).locator('input').check();
   await page.getByRole('button', {name: 'Done'}).click();
-  await page.locator('#recent-lane').selectOption('web');
+  await setFacetValues(page, 'lane', ['web']);
   await page.getByLabel('Filter recent reports by title or path').pressSequentially('report', {delay: 30});
-  await page.locator('[data-recent-order]').click();
-  await page.getByLabel('Include generated and _meta files').check();
+  await page.locator('#recent-order').selectOption('oldest');
+  await setOption(page, '#recent-nav', true);
   await recentSettled(page, FULL_ROWS);
   await page.waitForFunction(want => location.hash === want, FULL);
   assert.equal(await historyLength(page), before, 'filters and typing use replaceState');
@@ -289,12 +296,12 @@ test('Recent view: 7-day default, every filter round-trips through the URL with 
   await cold.goto(`${url}${FULL}`);
   await recentSettled(cold, FULL_ROWS);
   assert.equal(hashOf(cold), FULL);
-  assert.equal(await cold.locator('[data-recent-window="all"]').getAttribute('aria-pressed'), 'true');
-  assert.equal(await cold.locator('#recent-lane').inputValue(), 'web');
+  assert.match(await facetText(cold, 'window'), /All/);
+  assert.equal(await facetText(cold, 'lane'), 'Lane: web');
   assert.equal(await cold.getByLabel('Filter recent reports by title or path').inputValue(), 'report');
-  assert.equal(await cold.locator('#recent-nav').isChecked(), true);
-  assert.match(await cold.locator('[data-recent-order]').innerText(), /Oldest first/);
-  assert.equal(await cold.locator('.chips [data-recent-remove-program]').count(), 2);
+  assert.equal(await facetText(cold, 'opts'), 'Options: generated');
+  assert.equal(await cold.locator('#recent-order').inputValue(), 'oldest');
+  assert.equal(await cold.locator('[data-facet-chip="program"]').count(), 2);
   // Unknown and invalid values fall back to the defaults without errors.
   await cold.goto(`${url}#/recent?within=bogus&program=nope%2Fnope&lane=zzz&q=%00&order=sideways&nav=yes&page=-3&extra=1`);
   await cold.reload();
@@ -352,7 +359,7 @@ test('Recent view paging: page in the URL, Next pushes history, Back returns, co
   await page.getByRole('button', {name: 'Next'}).click();
   await page.locator('.recent-status', {hasText: 'Showing 51 to 64'}).waitFor();
   const atPage2 = await historyLength(page);
-  await page.locator('[data-recent-order]').click();
+  await page.locator('#recent-order').selectOption('oldest');
   await page.locator('.recent-status', {hasText: 'Showing 1 to 50 of 64 reports'}).waitFor();
   assert.equal(hashOf(page), '#/recent?within=7d&order=oldest');
   assert.equal(await historyLength(page), atPage2);

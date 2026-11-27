@@ -38,6 +38,13 @@ async function withBoard(mode,run,{viewport={width:1360,height:900},theme}={}){
   }
 }
 const until=async(fn,label='condition',ms=10000)=>{const end=Date.now()+ms;let last;while(Date.now()<end){try{if(await fn())return;}catch(e){last=e;}await new Promise(r=>setTimeout(r,50));}throw new Error(`timed out waiting for ${label}${last?`: ${last.message}`:''}`);};
+// Filter bar helpers (feat/board-recent-facets): the Recent filters are dropdowns along the top.
+const facet = async (page, key) => { const b = page.locator(`[data-facet-open="${key}"]`); if (await b.getAttribute('aria-expanded') !== 'true') await b.click(); await page.locator('.facet-popover').waitFor(); return page.locator('.facet-popover'); };
+const closeFacet = async page => { if (await page.locator('.facet-popover').count()) { await page.locator('.facet-popover input').first().focus(); await page.keyboard.press('Escape'); } };
+const pickWindow = async (page, key) => { await facet(page, 'window'); await page.locator(`.facet-popover [data-recent-window="${key}"]`).check(); await closeFacet(page); };
+const setFacetValues = async (page, key, values) => { const pop = await facet(page, key); for (const box of await pop.locator('input[data-facet-input]').evaluateAll(n => n.map(i => i.value))) { const input = pop.locator(`input[data-facet-input][value="${box}"]`); if ((await input.isChecked()) !== values.includes(box)) await input.setChecked(values.includes(box)); } await closeFacet(page); };
+const setOption = async (page, id, on) => { await facet(page, 'opts'); await page.locator(id).setChecked(on); await closeFacet(page); };
+const facetText = (page, key) => page.locator(`[data-facet-open="${key}"]`).innerText();
 const panel=page=>page.locator('#dashboard-recent-host');
 const panelRow=(page,file)=>panel(page).locator(`li[data-recent-row][data-path$="${file}"]`);
 const pillNames=menu=>menu.getByRole('menuitemradio').evaluateAll(items=>items.map(i=>[i.textContent.trim(),i.getAttribute('aria-checked'),i.disabled]));
@@ -57,9 +64,9 @@ test('Recent pills save severity and submission through BBH, update every row of
   // Packet _meta/ files are hidden like generated navigation, shown with the same toggle.
   assert.equal(await page.locator('.recent-table tr[data-path$="/_meta/notes.md"]').count(),0);
   assert.equal(await panel(page).count(),0);
-  await page.getByLabel('Include generated and _meta files').check();
+  await setOption(page,'#recent-nav',true);
   await page.locator('.recent-table tr[data-path="F001-stored-xss/_meta/notes.md"]').waitFor();
-  await page.getByLabel('Include generated and _meta files').uncheck();
+  await setOption(page,'#recent-nav',false);
   await until(async()=>await page.locator('.recent-table tr[data-path$="/_meta/notes.md"]').count()===0,'_meta hidden again');
   await page.getByRole('link',{name:'Dashboard',exact:true}).click();
   await panelRow(page,REPORT).waitFor();
@@ -170,16 +177,16 @@ test('N/A toggle: strikethrough and opacity, Hide N/A filter in the URL, hidden 
   await page.locator('.recent-table tr[data-recent-row]').first().waitFor();
   assert.equal(await page.locator(`.recent-table tr[data-path="${REPORT2}"]`).count(),0);
   await page.locator('[data-recent-status]').getByText('1 N/A hidden').waitFor();
-  assert.equal(await page.locator('#recent-hide-na').isChecked(),true);
+  assert.equal(await facetText(page,'opts'),'Options');
   await page.locator('[data-recent-show-na]').click();
   await until(()=>page.evaluate(()=>location.hash.includes('na=show')),'na=show in the hash');
   const viewRow=page.locator(`.recent-table tr[data-path="${REPORT2}"]`);await viewRow.waitFor();
   assert.equal(await viewRow.evaluate(n=>getComputedStyle(n).opacity),'0.45');
-  assert.equal(await page.locator('#recent-hide-na').isChecked(),false);
+  assert.equal(await facetText(page,'opts'),'Options: N/A shown');
   // A link with na=show opens with N/A shown; a plain filter link hides them.
   await page.goto(`${url}#/recent?within=all&order=newest&na=show`);await page.reload();
   await page.locator(`.recent-table tr[data-path="${REPORT2}"]`).waitFor();
-  await page.locator('#recent-hide-na').check();
+  await setOption(page,'#recent-hide-na',true);
   await until(async()=>await page.locator(`.recent-table tr[data-path="${REPORT2}"]`).count()===0,'hidden again');
   assert.ok(!(await page.evaluate(()=>location.hash)).includes('na='));
   // Unmark by keyboard from the view (Show first), Undo re-marks.
@@ -280,3 +287,39 @@ test('phone width: pills under the title, icons on the right, no overflow; dark 
   aligned(boxes,b=>b.links.left,'icon column left');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth)<=375,'no horizontal overflow');
 },{viewport:{width:375,height:812},theme:'dark'}));
+
+// Fix round 2 (feat/board-recent-facets): a saved N/A mark and a pill save
+// re-render the page; the Recent list must put focus back in the same task, so
+// focus is never on <body> while the user is on a row control, even with a late
+// animation frame (a loaded machine) and a delayed background refresh landing after.
+test('N/A save and pill save never drop focus, with a late frame and a delayed refresh',{timeout:120000},()=>withBoard('writer',async({page,url,finding})=>{
+  await page.goto(`${url}#/recent?within=all&order=newest&na=show`);
+  const row=page.locator(`.recent-table tr[data-path="${REPORT2}"]`);await row.waitFor();
+  await page.evaluate(()=>{const raf=window.requestAnimationFrame.bind(window);window.requestAnimationFrame=cb=>raf(()=>setTimeout(()=>cb(performance.now()),400));});
+  let slow=false;
+  await page.route('**/api/recent-reports?*',async route=>{if(slow)await new Promise(r=>setTimeout(r,1500));await route.continue();});
+  const sample=()=>page.evaluate(()=>{window.__focus=[];clearInterval(window.__focusTimer);window.__focusTimer=setInterval(()=>{const a=document.activeElement;window.__focus.push(a===document.body||!a?'BODY':(a.getAttribute('aria-label')||a.tagName));},10);});
+  const samples=()=>page.evaluate(()=>{clearInterval(window.__focusTimer);return window.__focus;});
+  // N/A by keyboard: Enter on the toggle, the save re-renders, the delayed refresh lands later.
+  slow=true;
+  const toggle=row.locator('[data-na-toggle]');await toggle.focus();
+  await sample();await page.keyboard.press('Enter');
+  await until(async()=>(await toggle.getAttribute('aria-pressed'))==='true','marked');
+  await page.waitForTimeout(2600); // the delayed refresh has landed and repainted
+  let seen=await samples();
+  assert.ok(seen.length>50,'sampled');
+  assert.deepEqual(seen.filter(s=>!/N\/A: IDOR on invoice export$/.test(s)),[],'focus stayed on the toggle');
+  assert.match(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),/^Unmark N\/A/);
+  // Pill save: Severity on F001, picked with the keyboard; focus returns to the pill and stays.
+  const pill=page.locator(`.recent-table tr[data-path="${REPORT}"] [data-recent-pick="sev"]`);
+  await pill.focus();await page.keyboard.press('Enter');
+  const menu=page.getByRole('menu',{name:'Change severity'});await menu.waitFor();
+  await menu.getByRole('menuitemradio',{name:'Low'}).focus();
+  await sample();await page.keyboard.press('Enter');
+  await until(()=>finding('orchard','F001').severity==='LOW','F001 saved');
+  await page.waitForTimeout(2600);
+  seen=await samples();
+  const lost=seen.indexOf('BODY');
+  assert.equal(lost,-1,`focus dropped to <body> at sample ${lost}: ${seen.slice(Math.max(0,lost-3),lost+3).join(' | ')}`);
+  assert.match(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')||''),/^Severity LOW/);
+}));

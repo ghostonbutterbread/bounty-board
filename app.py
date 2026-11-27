@@ -1546,14 +1546,24 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             Served from the search index (file modification time, title, owners);
             bounded page size and filter sizes, same trust checks as every GET.
             """
+            import finding_facets
             from search_index import MAX_QUERY
             lanes = set().union(*FAMILIES.values())
+            # Repeatable filters: name -> (allowed values, most repeats).
+            repeatable = {'program': (None, 100), 'lane': (lanes, len(lanes)),
+                          'severity': ({k for k, _ in finding_facets.SEVERITIES}, len(finding_facets.SEVERITIES)),
+                          'class': ({k for k, _ in finding_facets.class_options()}, len(finding_facets.class_options())),
+                          'submission': ({k for k, _ in finding_facets.SUBMISSIONS}, len(finding_facets.SUBMISSIONS))}
             try:
                 params = parse_qs(url.query, keep_blank_values=True, strict_parsing=bool(url.query),
-                                  encoding='utf-8', errors='strict', max_num_fields=110)
-                allowed = {'limit', 'offset', 'within', 'program', 'lane', 'q', 'order', 'nav', 'hide_na'}
-                if not set(params) <= allowed or any(len(v) != 1 for k, v in params.items() if k != 'program'):
+                                  encoding='utf-8', errors='strict', max_num_fields=200)
+                allowed = {'limit', 'offset', 'within', 'q', 'order', 'nav', 'hide_na', *repeatable}
+                if not set(params) <= allowed or any(len(v) != 1 for k, v in params.items() if k not in repeatable):
                     raise ValueError('invalid parameters')
+                for name, (values, most) in repeatable.items():
+                    given = params.get(name, [])
+                    if len(given) > most or (values is not None and any(v not in values for v in given)):
+                        raise ValueError('invalid ' + name)
 
                 def number(name, default, low, high):
                     if name not in params:
@@ -1566,18 +1576,15 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
                 offset = number('offset', 0, 0, 1_000_000)
                 within = number('within', None, 1, 20 * 365 * 86400)
                 programs = params.get('program', [])
-                if len(programs) > 100 or any(not p or len(p) > 200 or '\0' in p for p in programs):
+                if any(not p or len(p) > 200 or '\0' in p for p in programs):
                     raise ValueError('invalid program')
-                lane = params.get('lane', [None])[0]
-                if lane is not None and lane not in lanes:
-                    raise ValueError('invalid lane')
                 query = params.get('q', [''])[0]
                 if len(query) > MAX_QUERY or '\0' in query:
                     raise ValueError('invalid query')
                 order = params.get('order', ['newest'])[0]
                 nav = params.get('nav', ['0'])[0]
                 hide_na = params.get('hide_na', ['0'])[0]
-                if order not in ('newest', 'oldest') or nav not in ('0', '1') or hide_na not in ('0', '1'):
+                if order not in ('newest', 'oldest', 'severity', 'class') or nav not in ('0', '1') or hide_na not in ('0', '1'):
                     raise ValueError('invalid order')
             except (ValueError, UnicodeError):
                 return self.reply(400, {'error': 'invalid_recent_reports', 'message': 'Invalid recent report parameters.'})
@@ -1586,8 +1593,10 @@ def make_server(root, port=9001, writer=None, accept_uncoordinated_writes=False,
             try:
                 na_keys, _ = report_na_flags(self.server.report_na)
                 return self.reply(200, search_index.recent(limit=limit, offset=offset, within=within, programs=programs,
-                                                           lane=lane, query=query, order=order, include_navigation=nav == '1',
-                                                           na_keys=na_keys, hide_na=hide_na == '1'))
+                                                           lanes=params.get('lane', []), query=query, order=order,
+                                                           include_navigation=nav == '1', na_keys=na_keys, hide_na=hide_na == '1',
+                                                           severities=params.get('severity', []), classes=params.get('class', []),
+                                                           submissions=params.get('submission', [])))
             finally:
                 search_slots.release()
 
