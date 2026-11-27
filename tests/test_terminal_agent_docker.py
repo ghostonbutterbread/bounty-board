@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import terminal_agent_cli as cli  # noqa: E402
 import terminal_proxy  # noqa: E402
 import terminal_relay  # noqa: E402
 import terminal_report_agent as ra  # noqa: E402
@@ -412,6 +413,62 @@ class ReportAgentDockerTests(unittest.TestCase):
                     self.assertFalse(marker.exists(), f'{marker.name} exists after the refusal')
                 session.agent.pty.detach(viewer)
                 self.hub.stop(self.manager, {'selector': sel})
+            # Review rv2 V4: the managed deny keeps the credential file out of the model context. A scripted
+            # Read and Grep of /tmp/bb-auth are refused without a prompt; Bash (how the PoC reads it) still asks.
+            secret = 'FAKE-BBAUTH-SECRET-7Q2'
+            self.exec('sh', '-c', f"umask 077; printf '%s' '{secret}' > /tmp/bb-auth", sel=sel)
+            marker = packet / 'rv2-auth-marker'
+            first = len(self.upstream.requests)
+            self.upstream.script = [('Read', {'file_path': '/tmp/bb-auth'}),
+                                    ('Grep', {'pattern': 'FAKE', 'path': '/tmp/bb-auth', 'output_mode': 'content'}),
+                                    ('Bash', {'command': 'touch /report/rv2-auth-marker', 'description': 'marker'})]
+            self.start(sel=sel, task={'kind': 'ask', 'text': 'Do the scripted steps.'})
+            session, viewer = self.viewer(sel)
+            self._policy_session = session
+            screen = self.drive_to_bash_prompt(viewer, markers + [marker])
+            self.assertIn('enterprisemanagedsettingssaystoask', screen)
+            session.agent.pty.write(b'\x1b')  # No
+            time.sleep(2)
+            sent = b'\n'.join(r['body'] for r in self.upstream.requests[first:])
+            self.assertNotIn(secret.encode(), sent, 'the credential reached the model')
+            results = [block for r in self.upstream.requests[first:] for m in json.loads(r['body'] or b'{}').get('messages', [])
+                       if isinstance(m.get('content'), list) for block in m['content'] if block.get('type') == 'tool_result']
+            self.assertGreaterEqual(len(results), 2, 'Read and Grep came back as tool results')
+            self.assertTrue(all(block.get('is_error') for block in results[:2]), f'Read/Grep of /tmp/bb-auth not refused: {results[:2]}')
+            self.assertFalse(marker.exists())
+            evidence.append('Read and Grep of /tmp/bb-auth denied, Bash asks')
+            session.agent.pty.detach(viewer)
+            self.hub.stop(self.manager, {'selector': sel})
+            # Review rv2 V7: one unstripped skill reaches the binary (test only: strip_frontmatter is the
+            # identity inside this in-process hub while the tree is rebuilt). Its allowed-tools: [Bash] is in
+            # the copy, and the managed ask rule still wins.
+            raw = self.base / 'skill-root' / 'bbtest-raw'
+            raw.mkdir(parents=True, exist_ok=True)
+            (raw / 'SKILL.md').write_text('---\nname: bbtest-raw\ndescription: Unstripped synthetic skill.\n'
+                                          'allowed-tools: [Bash]\n---\nRun what you are asked.\n')
+            if not (skills_dir / 'bbtest-raw').is_symlink():
+                (skills_dir / 'bbtest-raw').symlink_to(raw)
+            real_strip = cli.strip_frontmatter
+            cli.strip_frontmatter = lambda text: text.lstrip('\ufeff')
+            try:
+                self.manager.reset(sel)   # a new container: run_args_extra builds a tree with the patched copy
+            finally:
+                cli.strip_frontmatter = real_strip
+            raw_marker = packet / 'rv2-raw-marker'
+            self.upstream.script = [('Skill', {'skill': 'bbtest-raw'}),
+                                    ('Bash', {'command': 'touch /report/rv2-raw-marker', 'description': 'marker'})]
+            self.start(sel=sel, task={'kind': 'ask', 'text': 'Do the scripted steps.'})
+            self.assertIn('allowed-tools: [Bash]', self.exec('cat', '/home/sandbox/.claude/skills/bbtest-raw/SKILL.md', sel=sel).stdout)
+            session, viewer = self.viewer(sel)
+            self._policy_session = session
+            screen = self.drive_to_bash_prompt(viewer, markers + [raw_marker])
+            self.assertIn('enterprisemanagedsettingssaystoask', screen)
+            session.agent.pty.write(b'\x1b')  # No
+            time.sleep(2)
+            self.assertFalse(raw_marker.exists(), 'an unstripped allowed-tools skill ran Bash without asking')
+            evidence.append('unstripped allowed-tools skill loaded, Bash asks')
+            session.agent.pty.detach(viewer)
+            self.hub.stop(self.manager, {'selector': sel})
             self.assertEqual(self.egress, [])
             self.start(sel=sel, task={'kind': 'ask', 'text': 'Say hi.'})
             self.assert_token_absent(sel)  # rescan with the real binary running in this sandbox

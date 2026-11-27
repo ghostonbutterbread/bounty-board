@@ -423,13 +423,16 @@ class ReportAgentHub:
     def managed_dir(self):
         return self.agent_root / 'managed'
 
-    def skill_sources(self):
+    def skill_sources(self, identities=None):
         """{name: source dir}: every skill of the skills dir, then the explicit --report-agent-skill
-        folders (an explicit skill wins a name clash)."""
-        sources = cli.discover_skills(self.skills_dir, self.root, self.log) if self.skills_dir else {}
+        folders (an explicit skill wins a name clash). ``identities`` gets {name: (dev, ino)} as
+        checked, which copy_skill compares with the folder it opens."""
+        identities = {} if identities is None else identities
+        sources = cli.discover_skills(self.skills_dir, self.root, self.log, identities) if self.skills_dir else {}
         for name, path in sorted(self.skills.items()):
             try:
-                cli.check_skill_dir(path)
+                info = cli.check_skill_dir(path)
+                identities[name] = (info.st_dev, info.st_ino)
             except cli.CliError as error:
                 self.log(f'skill {name!r} not used: {error}')
                 continue
@@ -438,7 +441,7 @@ class ReportAgentHub:
             sources[name] = path
         return sources
 
-    def skills_tree(self):
+    def skills_tree(self, user=None):
         """(path, names) of the one read-only tree of stripped skill copies, or (None, []).
 
         The tree is ``<state>/report-agent/skills-tree-<digest>/``, built whole in a temp folder
@@ -446,65 +449,76 @@ class ReportAgentHub:
         and a walk of every source, so any change makes a new tree. Trees that no live container
         mounts are removed. Over TREE_MAX_BYTES or TREE_MAX_FILES the tree is refused (logged)."""
         with self.tree_lock:
-            sources = self.skill_sources()
-            parts = []
-            if self.skills_dir:
-                try:
-                    listing = sorted(os.listdir(self.skills_dir))
-                    parts.append([(n, os.readlink(os.path.join(self.skills_dir, n))
-                                   if os.path.islink(os.path.join(self.skills_dir, n)) else '') for n in listing])
-                except OSError:
-                    parts.append(None)
-            for name, path in sorted(sources.items()):
-                try:
-                    parts.append((name, path, cli.skill_signature(path)))
-                except OSError:
-                    self.log(f'skill {name!r} not used: it changed while it was read')
-                    sources.pop(name)
-            if not sources:
-                self.tree = None
-                self._gc_trees()
-                return None, []
-            digest = hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
-            if self.tree is not None and self.tree[0] == digest and os.path.isdir(self.tree[1]):
-                return self.tree[1], list(self.tree[2])
-            if self.tree_refused == digest:
-                return None, []
-            target = self.agent_root / f'skills-tree-{digest}'
-            if not target.is_dir():
-                tmp = self.agent_root / f'.skills-tree-{secrets.token_hex(6)}'
-                try:
-                    os.mkdir(tmp, 0o755)
-                    total = files = skipped = 0
-                    for name, path in sorted(sources.items()):
-                        try:
-                            size, count = cli.copy_skill(path, tmp / name)
-                        except (cli.CliError, OSError) as error:
-                            shutil.rmtree(tmp / name, ignore_errors=True)
-                            skipped += 1
-                            self.log(f'skill {name!r} not copied: {error}')
-                            continue
-                        total += size
-                        files += count
-                        if total > cli.TREE_MAX_BYTES or files > cli.TREE_MAX_FILES:
-                            self.log(f'skills tree refused: more than {cli.TREE_MAX_BYTES // (1024 * 1024)} MiB or '
-                                     f'{cli.TREE_MAX_FILES} files ({len(sources)} skills); no skills are mounted')
-                            shutil.rmtree(tmp, ignore_errors=True)
-                            self.tree_refused, self.tree = digest, None
-                            self._gc_trees()
-                            return None, []
-                    os.chmod(tmp, 0o755)
-                    os.replace(tmp, target)
-                    self.log(f'skills tree built: {len(sources) - skipped} skills, {skipped} skipped, '
-                             f'{files} files, {total // 1024} KiB')
-                except BaseException:
-                    shutil.rmtree(tmp, ignore_errors=True)
-                    raise
-            names = sorted(os.listdir(target))
-            self.tree = (digest, str(target), names)
-            self.tree_refused = None
+            path, names = self._skills_tree_locked()
+            # The tree is in use before the lock is released, so a concurrent rebuild's cleanup can
+            # never remove it between here and docker run (review rv2 V3). session_destroyed releases it,
+            # also when docker run fails (DockerBackend.create destroys the session).
+            if path is not None and user is not None:
+                self.tree_users[user] = path
+            return path, names
+
+    def _skills_tree_locked(self):
+        """skills_tree's work, with tree_lock held: (path, names) or (None, [])."""
+        identities = {}
+        sources = self.skill_sources(identities)
+        parts = []
+        if self.skills_dir:
+            try:
+                listing = sorted(os.listdir(self.skills_dir))
+                parts.append([(n, os.readlink(os.path.join(self.skills_dir, n))
+                               if os.path.islink(os.path.join(self.skills_dir, n)) else '') for n in listing])
+            except OSError:
+                parts.append(None)
+        for name, path in sorted(sources.items()):
+            try:
+                parts.append((name, path, cli.skill_signature(path)))
+            except OSError:
+                self.log(f'skill {name!r} not used: it changed while it was read')
+                sources.pop(name)
+        if not sources:
+            self.tree = None
             self._gc_trees()
-            return str(target), names
+            return None, []
+        digest = hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
+        if self.tree is not None and self.tree[0] == digest and os.path.isdir(self.tree[1]):
+            return self.tree[1], list(self.tree[2])
+        if self.tree_refused == digest:
+            return None, []
+        target = self.agent_root / f'skills-tree-{digest}'
+        if not target.is_dir():
+            tmp = self.agent_root / f'.skills-tree-{secrets.token_hex(6)}'
+            try:
+                os.mkdir(tmp, 0o755)
+                total = files = skipped = 0
+                for name, path in sorted(sources.items()):
+                    try:
+                        size, count = cli.copy_skill(path, tmp / name, expect=identities.get(name), log=self.log)
+                    except (cli.CliError, OSError) as error:
+                        shutil.rmtree(tmp / name, ignore_errors=True)
+                        skipped += 1
+                        self.log(f'skill {name!r} not copied: {error}')
+                        continue
+                    total += size
+                    files += count
+                    if total > cli.TREE_MAX_BYTES or files > cli.TREE_MAX_FILES:
+                        self.log(f'skills tree refused: more than {cli.TREE_MAX_BYTES // (1024 * 1024)} MiB or '
+                                 f'{cli.TREE_MAX_FILES} files ({len(sources)} skills); no skills are mounted')
+                        shutil.rmtree(tmp, ignore_errors=True)
+                        self.tree_refused, self.tree = digest, None
+                        self._gc_trees()
+                        return None, []
+                os.chmod(tmp, 0o755)
+                os.replace(tmp, target)
+                self.log(f'skills tree built: {len(sources) - skipped} skills, {skipped} skipped, '
+                         f'{files} files, {total // 1024} KiB')
+            except BaseException:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise
+        names = sorted(os.listdir(target))
+        self.tree = (digest, str(target), names)
+        self.tree_refused = None
+        self._gc_trees()
+        return str(target), names
 
     def _gc_trees(self):
         """Remove generated trees that are neither current nor mounted by a live container (tree_lock held)."""
@@ -620,14 +634,12 @@ class ReportAgentHub:
         args += ['--mount', f'type=bind,source={self.managed_dir.absolute()},target={cli.MANAGED_DIR},readonly']
         # Every skill in one generated read-only tree; ~/.claude/skills links to it.
         try:
-            tree, skills = self.skills_tree()
+            tree, skills = self.skills_tree(user=getattr(session, 'id', None) or id(session))
         except OSError as error:
             self.log(f'skills tree not built: {type(error).__name__}')
             tree, skills = None, []
         if tree is not None:
             args += ['--mount', f'type=bind,source={tree},target={cli.SKILLS_DIR},readonly']
-            with self.tree_lock:
-                self.tree_users[getattr(session, 'id', None) or id(session)] = tree
         session.agent_mounts = {'clis': mounted, 'skills': skills, 'skills_tree': tree}
         return args
 

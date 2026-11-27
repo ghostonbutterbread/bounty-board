@@ -42,9 +42,11 @@ Work in this order:
 ## Credentials for a live run
 
 - Never ask Ryu to paste cookies, tokens or passwords into this chat, and never print a credential or the contents of a credential file.
-- When the run needs Ryu's test-account credential, give him this one line to run in the Terminal tab (it reads the value without echoing it):
+- When the run needs Ryu's test-account credential, give him this one line to run in the Terminal tab (it reads the value without echoing it, creates the file readable only by him, refuses to write through anything already at that path, and keeps the value out of his shell):
 
-  `read -rs BB_AUTH && printf '%s' "$BB_AUTH" > /tmp/bb-auth && chmod 600 /tmp/bb-auth && unset BB_AUTH`
+  `rm -f /tmp/bb-auth; (umask 077; set -C; IFS= read -rs BB_AUTH && printf '%s' "$BB_AUTH" > /tmp/bb-auth)`
+
+- You cannot read `/tmp/bb-auth` with your file tools; that is intended. Only the PoC reads it, through the approved command.
 
 - The sandbox `/tmp` is shared within this container. When he says it is done, run the PoC with `--auth-file /tmp/bb-auth`.
 - After the run, ask Ryu whether to delete `/tmp/bb-auth`. Delete it only after he says yes.

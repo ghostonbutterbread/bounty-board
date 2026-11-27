@@ -80,10 +80,16 @@ async function oneLineHints(page){
 // request URLs, headers and bodies; response headers and bodies; console messages; page errors;
 // the DOM and every field value; local and session storage; the URL. `allowed` lists the request
 // bodies that may carry a token (the login POSTs), each exactly once.
-function tokenCapture(page){
-  const cap={requests:[],responses:[],console:[],errors:[],pending:[]};
+// WebSocket frames, sent and received, come from CDP (Network.webSocketFrameSent/Received, review rv2 V7).
+async function tokenCapture(page){
+  const cap={requests:[],responses:[],console:[],errors:[],pending:[],frames:[],unreadable:[]};
   page.on('request',r=>cap.requests.push({url:r.url(),body:r.postData()||'',headers:JSON.stringify(r.headers())}));
-  page.on('response',r=>cap.pending.push((async()=>{let body='';try{body=await r.text();}catch{}cap.responses.push({url:r.url(),body,headers:JSON.stringify(await r.allHeaders().catch(()=>({})))});})()));
+  page.on('response',r=>cap.pending.push((async()=>{let body='';try{body=await r.text();}catch{cap.unreadable.push(`${r.status()} ${r.url()}`);}cap.responses.push({url:r.url(),body,headers:JSON.stringify(await r.allHeaders().catch(()=>({})))});})()));
+  const cdp=await page.context().newCDPSession(page);
+  await cdp.send('Network.enable');
+  cdp.on('Network.webSocketCreated',e=>cap.frames.push({dir:'created',data:e.url}));
+  cdp.on('Network.webSocketFrameSent',e=>cap.frames.push({dir:'sent',data:e.response.payloadData}));
+  cdp.on('Network.webSocketFrameReceived',e=>cap.frames.push({dir:'received',data:e.response.payloadData}));
   page.on('console',m=>cap.console.push(m.text()));
   page.on('pageerror',e=>cap.errors.push(String(e)));
   cap.scan=async(label,mark,allowed=[])=>{
@@ -94,10 +100,13 @@ function tokenCapture(page){
     for(const r of cap.responses)assert.doesNotMatch(r.url+r.body+r.headers,mark,`${label}: token in the response of ${r.url}`);
     assert.doesNotMatch(cap.console.join('\n'),mark,`${label}: token in the console`);
     assert.doesNotMatch(cap.errors.join('\n'),mark,`${label}: token in a page error`);
+    for(const f of cap.frames)assert.doesNotMatch(f.data,mark,`${label}: token in a WebSocket frame (${f.dir})`);
+    // A body Playwright cannot read is said, not skipped silently; the Board's and the service's API bodies must be readable.
+    assert.deepEqual(cap.unreadable.filter(u=>/\/api\//.test(u)),[],`${label}: unreadable API response bodies`);
     const carrying=cap.requests.filter(r=>mark.test(r.url+r.body+r.headers));
     assert.deepEqual(carrying.map(r=>r.body).sort(),allowed.map(a=>JSON.stringify(a)).sort(),`${label}: only the login POST bodies carry a token`);
     for(const r of carrying){assert.match(r.url,/\/terminal\/api\/agent\/login$/);assert.doesNotMatch(r.url+r.headers,mark);}
-    return {requests:cap.requests.length,responses:cap.responses.length,console:cap.console.length};
+    return {requests:cap.requests.length,responses:cap.responses.length,console:cap.console.length,frames:cap.frames.length,unreadable:cap.unreadable.length};
   };
   return cap;
 }
@@ -188,7 +197,7 @@ test('settings: sandbox login saved from Settings; Replace, Remove; the token ne
   const MARK=/SENTINEL|FAKEFAKEFAKE|Z8q|W3k/;
   await withFixture('nologin',async({base,newPage,token})=>{
     const page=await newPage();
-    const cap=tokenCapture(page);
+    const cap=await tokenCapture(page);
     const requests=cap.requests;
     await page.goto(`${base}/#/settings`);
     const row=page.locator('[data-agent-login-row]');
@@ -366,6 +375,7 @@ test('popover start, Agent tab output and typing through the filter, status dot,
   await withFixture('',async({base,newPage,dir})=>{
     const marker=path.join(dir,'pasted-marker');
     const page=await newPage();
+    const wsCap=await tokenCapture(page);
     await openReport(page,base);
     const button=agentButton(page);
     await page.waitForFunction(()=>document.querySelector('[data-agent-toggle]')&&!document.querySelector('[data-agent-toggle]').disabled,null,{timeout:15000});
@@ -414,6 +424,9 @@ test('popover start, Agent tab output and typing through the filter, status dot,
     // Typing goes to the agent.
     await typeInTab(page,'agent','hello-agent\n');
     await waitTab(page,'agent',/ECHO hello-agent/,'typed input');
+    // The token scan's WebSocket capture sees the terminal frames both ways (review rv2 V7).
+    assert.ok(wsCap.frames.some(f=>f.dir==='sent'&&/"t":"in"/.test(f.data)),'sent frames captured');
+    assert.ok(wsCap.frames.some(f=>f.dir==='received'),'received frames captured');
     // The paste guard applies: unsafe clipboard text is refused, nothing reaches the CLI.
     const refused=await page.evaluate(marker=>{
       const area=document.querySelector('[data-term-tab-screen="agent"] textarea');

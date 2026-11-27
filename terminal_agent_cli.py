@@ -43,7 +43,11 @@ CLAUDE_MANAGED_ALLOW = [f'Read(/{AGENT_DIR}/**)']
 # The agent's own Claude Code config in the writable HOME: writes there would ask (outside the
 # working dirs), but an approved one could still set non-permission settings (apiKeyHelper, env).
 # Edit rules cover every file-editing tool (review r2 N3).
-CLAUDE_MANAGED_DENY = [f'Edit(/{SANDBOX_HOME}/.claude/**)', f'Edit(/{SANDBOX_HOME}/.claude.json)']
+CLAUDE_MANAGED_DENY = [f'Edit(/{SANDBOX_HOME}/.claude/**)', f'Edit(/{SANDBOX_HOME}/.claude.json)',
+                       # Ryu's test-account credential for a live run (the prompt's one-liner writes it). Read
+                       # rules also govern Grep and Glob; the PoC reads it through Bash, which asks (review rv2 V4).
+                       'Read(//tmp/bb-auth)']
+CREDENTIAL_FILE = '/tmp/bb-auth'
 # Flags that keep project settings, project skills and MCP servers out (verified with 2.1.331:
 # /report/.claude/settings.json, /report/.claude/skills and /report/.mcp.json are ignored).
 CLAUDE_FIXED_ARGS = ['--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
@@ -272,7 +276,7 @@ def _inside(path, real_root):
     return path == real_root or path.startswith(real_root.rstrip('/') + '/')
 
 
-def discover_skills(skills_dir, root, log):
+def discover_skills(skills_dir, root, log, identities=None):
     """{name: real source directory} for every top-level entry of ``skills_dir`` that is a
     directory, or a symlink to one, with a top-level regular SKILL.md. A top-level symlink is
     resolved once; its target must be a directory owned by this user and outside ``root``.
@@ -318,6 +322,8 @@ def discover_skills(skills_dir, root, log):
             skip('no top-level SKILL.md')
             continue
         out[name] = target
+        if identities is not None:
+            identities[name] = (target_info.st_dev, target_info.st_ino)   # copy_skill re-checks this
     log(f'skills dir: {len(out)} skills found, {skipped} skipped')
     return out
 
@@ -370,52 +376,115 @@ def strip_frontmatter(text):
     return ''.join(head) + '---\n' + ''.join(lines[close + 1:])
 
 
+# Never copied into the tree, at any depth (review rv2 V1): version-control metadata (a worktree's
+# .git is a file naming a host path) and every other dot-directory. On Ghost's 208 skills the only
+# dot-directories were .git (409 files, 1 skill) and .pytest_cache (4 files, 1 skill); no skill needs one.
+VCS_NAMES = frozenset({'.git', '.hg', '.svn', '.bzr', 'CVS'})
+
+
+def skipped_entry(name, mode):
+    """True for an entry the tree never holds: VCS metadata (file or folder) or a dot-directory."""
+    return name in VCS_NAMES or (stat.S_ISDIR(mode) and name.startswith('.'))
+
+
 def skill_signature(path):
-    """What a copy depends on: every entry's relative path, type, size and mtime (symlinks not followed)."""
+    """What a copy depends on: every kept entry's relative path, type, mode, link count, size and
+    mtime (symlinks not followed; VCS metadata and dot-directories left out, as in copy_skill)."""
     entries = []
     for folder, dirs, files in os.walk(path, followlinks=False):
-        dirs.sort()
+        kept = []
         for name in sorted(dirs + files):
             full = os.path.join(folder, name)
             info = os.lstat(full)
-            entries.append((os.path.relpath(full, path), stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns))
+            if skipped_entry(name, info.st_mode):
+                continue
+            if name in dirs:
+                kept.append(name)
+            entries.append((os.path.relpath(full, path), info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns))
+        dirs[:] = [d for d in dirs if d in kept]
     info = os.lstat(path)
     return repr((info.st_ino, info.st_mtime_ns, entries))
 
 
-def copy_skill(src, dest):
-    """Copy a skill folder into ``dest`` (new): regular files and folders only, symlinks skipped
-    (never followed), SKILL.md files stripped, dirs 0755 and files 0644, size and count capped.
-    Returns (bytes, files) copied."""
-    total = count = 0
-    os.mkdir(dest, 0o755)
-    for folder, dirs, files in os.walk(src, followlinks=False):
-        rel = os.path.relpath(folder, src)
-        target = dest if rel == '.' else os.path.join(dest, rel)
-        for name in sorted(dirs):
-            if stat.S_ISDIR(os.lstat(os.path.join(folder, name)).st_mode):
-                os.mkdir(os.path.join(target, name), 0o755)
-        dirs[:] = [d for d in dirs if stat.S_ISDIR(os.lstat(os.path.join(folder, d)).st_mode)]
-        for name in sorted(files):
-            source = os.path.join(folder, name)
+def copy_skill(src, dest, expect=None, log=None):
+    """Copy a skill folder into ``dest`` (new) and return (bytes, files) copied.
+
+    Walked from a directory handle opened with O_NOFOLLOW|O_DIRECTORY whose device and inode must
+    equal ``expect`` (what discovery checked), with every open below it relative to its parent's
+    handle, so a folder swapped for a symlink after the checks is refused (review rv2 V6). Kept:
+    regular files and folders. Skipped: symlinks, FIFOs, sockets and devices (lstat first, then a
+    non-blocking open and an fstat check, so nothing can block: rv2 V2), VCS metadata and
+    dot-directories (rv2 V1), and files with more than one link or not readable by others (rv2 V6;
+    one log line each, the relative name only). SKILL.md files are stripped; dirs 0755, files 0644;
+    size and count capped."""
+    say = log or (lambda message: None)
+    skill = os.path.basename(src)
+    try:
+        root_fd = os.open(src, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise CliError(f'skill {skill}: the folder could not be opened (a symlink or gone)') from None
+    totals = [0, 0]
+    try:
+        info = os.fstat(root_fd)
+        if expect is not None and (info.st_dev, info.st_ino) != tuple(expect):
+            raise CliError(f'skill {skill}: the folder changed after it was checked')
+        os.mkdir(dest, 0o755)
+        _copy_dir(root_fd, dest, '', skill, totals, say)
+    finally:
+        os.close(root_fd)
+    return totals[0], totals[1]
+
+
+def _copy_dir(dir_fd, dest, rel, skill, totals, say):
+    for name in sorted(os.listdir(dir_fd)):
+        path = f'{rel}{name}'
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if skipped_entry(name, info.st_mode):
+            continue
+        if stat.S_ISDIR(info.st_mode):
             try:
-                fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                sub = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
             except OSError:
-                continue  # a symlink or unreadable entry is skipped
-            with os.fdopen(fd, 'rb') as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                continue
+            try:
+                again = os.fstat(sub)
+                if (again.st_dev, again.st_ino) != (info.st_dev, info.st_ino):
                     continue
-                data = stream.read(SKILL_COPY_MAX + 1)
-            total += len(data)
-            count += 1
-            if total > SKILL_COPY_MAX or count > SKILL_FILES_MAX:
-                raise CliError(f'skill {os.path.basename(src)} is too large to copy')
-            if name == 'SKILL.md':
-                try:
-                    data = strip_frontmatter(data.decode('utf-8')).encode('utf-8')
-                except UnicodeError:
-                    raise CliError(f'skill {os.path.basename(src)} has a SKILL.md that is not UTF-8') from None
-            out = os.open(os.path.join(target, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-            with os.fdopen(out, 'wb') as stream:
-                stream.write(data)
-    return total, count
+                os.mkdir(os.path.join(dest, name), 0o755)
+                _copy_dir(sub, os.path.join(dest, name), path + '/', skill, totals, say)
+            finally:
+                os.close(sub)
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue  # symlink, FIFO, socket or device: never opened
+        if info.st_nlink > 1:
+            say(f'skill {skill!r}: skipped {path!r}: more than one hard link')
+            continue
+        if not info.st_mode & 0o004:
+            say(f'skill {skill!r}: skipped {path!r}: not readable by others')
+            continue
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        except OSError:
+            continue
+        with os.fdopen(fd, 'rb') as stream:
+            got = os.fstat(fd)
+            if (not stat.S_ISREG(got.st_mode) or (got.st_dev, got.st_ino) != (info.st_dev, info.st_ino)
+                    or got.st_nlink > 1 or not got.st_mode & 0o004):
+                continue
+            data = stream.read(SKILL_COPY_MAX + 1)
+        totals[0] += len(data)
+        totals[1] += 1
+        if totals[0] > SKILL_COPY_MAX or totals[1] > SKILL_FILES_MAX:
+            raise CliError(f'skill {skill} is too large to copy')
+        if name == 'SKILL.md':
+            try:
+                data = strip_frontmatter(data.decode('utf-8')).encode('utf-8')
+            except UnicodeError:
+                raise CliError(f'skill {skill} has a SKILL.md that is not UTF-8') from None
+        out = os.open(os.path.join(dest, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(out, 'wb') as stream:
+            stream.write(data)

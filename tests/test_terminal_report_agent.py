@@ -123,7 +123,8 @@ class TaskTests(unittest.TestCase):
             # credentials
             'also supports `--auth-file PATH`', 'Never ask Ryu to paste cookies, tokens or passwords into this chat',
             'never print a credential or the contents of a credential file',
-            "`read -rs BB_AUTH && printf '%s' \"$BB_AUTH\" > /tmp/bb-auth && chmod 600 /tmp/bb-auth && unset BB_AUTH`",
+            "`rm -f /tmp/bb-auth; (umask 077; set -C; IFS= read -rs BB_AUTH && printf '%s' \"$BB_AUTH\" > /tmp/bb-auth)`",
+            'You cannot read `/tmp/bb-auth` with your file tools',
             'The sandbox `/tmp` is shared within this container', 'run the PoC with `--auth-file /tmp/bb-auth`',
             'ask Ryu whether to delete `/tmp/bb-auth`',
             # out of scope
