@@ -287,3 +287,39 @@ test('phone width: pills under the title, icons on the right, no overflow; dark 
   aligned(boxes,b=>b.links.left,'icon column left');
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth)<=375,'no horizontal overflow');
 },{viewport:{width:375,height:812},theme:'dark'}));
+
+// Fix round 2 (feat/board-recent-facets): a saved N/A mark and a pill save
+// re-render the page; the Recent list must put focus back in the same task, so
+// focus is never on <body> while the user is on a row control, even with a late
+// animation frame (a loaded machine) and a delayed background refresh landing after.
+test('N/A save and pill save never drop focus, with a late frame and a delayed refresh',{timeout:120000},()=>withBoard('writer',async({page,url,finding})=>{
+  await page.goto(`${url}#/recent?within=all&order=newest&na=show`);
+  const row=page.locator(`.recent-table tr[data-path="${REPORT2}"]`);await row.waitFor();
+  await page.evaluate(()=>{const raf=window.requestAnimationFrame.bind(window);window.requestAnimationFrame=cb=>raf(()=>setTimeout(()=>cb(performance.now()),400));});
+  let slow=false;
+  await page.route('**/api/recent-reports?*',async route=>{if(slow)await new Promise(r=>setTimeout(r,1500));await route.continue();});
+  const sample=()=>page.evaluate(()=>{window.__focus=[];clearInterval(window.__focusTimer);window.__focusTimer=setInterval(()=>{const a=document.activeElement;window.__focus.push(a===document.body||!a?'BODY':(a.getAttribute('aria-label')||a.tagName));},10);});
+  const samples=()=>page.evaluate(()=>{clearInterval(window.__focusTimer);return window.__focus;});
+  // N/A by keyboard: Enter on the toggle, the save re-renders, the delayed refresh lands later.
+  slow=true;
+  const toggle=row.locator('[data-na-toggle]');await toggle.focus();
+  await sample();await page.keyboard.press('Enter');
+  await until(async()=>(await toggle.getAttribute('aria-pressed'))==='true','marked');
+  await page.waitForTimeout(2600); // the delayed refresh has landed and repainted
+  let seen=await samples();
+  assert.ok(seen.length>50,'sampled');
+  assert.deepEqual(seen.filter(s=>!/N\/A: IDOR on invoice export$/.test(s)),[],'focus stayed on the toggle');
+  assert.match(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),/^Unmark N\/A/);
+  // Pill save: Severity on F001, picked with the keyboard; focus returns to the pill and stays.
+  const pill=page.locator(`.recent-table tr[data-path="${REPORT}"] [data-recent-pick="sev"]`);
+  await pill.focus();await page.keyboard.press('Enter');
+  const menu=page.getByRole('menu',{name:'Change severity'});await menu.waitFor();
+  await menu.getByRole('menuitemradio',{name:'Low'}).focus();
+  await sample();await page.keyboard.press('Enter');
+  await until(()=>finding('orchard','F001').severity==='LOW','F001 saved');
+  await page.waitForTimeout(2600);
+  seen=await samples();
+  const lost=seen.indexOf('BODY');
+  assert.equal(lost,-1,`focus dropped to <body> at sample ${lost}: ${seen.slice(Math.max(0,lost-3),lost+3).join(' | ')}`);
+  assert.match(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')||''),/^Severity LOW/);
+}));

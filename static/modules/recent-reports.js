@@ -119,17 +119,54 @@
     return body;
   }
 
-  // Background refreshes repaint rows; keep keyboard focus on the same control.
-  function keepFocus(box, paint) {
+  // ---- focus across repaints -----------------------------------------------------
+  // Which control inside a list has focus, by row identity (program, lane, path)
+  // and a selector for the control in that row (or a control id outside rows).
+  const HOSTS = '#recent-reports-host, #submissions-host, #dashboard-recent-host, #recon-reports-host';
+  function focusMark(el) {
+    const host = el?.closest?.(HOSTS); if (!host) return null;
+    const row = el.closest('[data-recent-row]');
+    const which = el.matches('[data-na-toggle]') ? '[data-na-toggle]' : el.dataset.recentPick ? `[data-recent-pick="${el.dataset.recentPick}"]`
+      : el.matches('a.recent-link') ? 'a.recent-link' : el.matches('a.id-link') ? 'a.id-link'
+        : el.dataset.facetOpen ? `[data-facet-open="${CSS.escape(el.dataset.facetOpen)}"]` : el.id ? `#${CSS.escape(el.id)}`
+          : ['data-recent-refresh', 'data-recent-panel-na', 'data-recent-scoped-na', 'data-recent-show-na'].map(a => el.hasAttribute(a) ? `[${a}]` : null).find(Boolean)
+            || (el.dataset.recentPage ? `[data-recent-page="${el.dataset.recentPage}"]` : null);
+    return which ? {host: `#${host.id}`, which, row: row ? {path: row.dataset.path, program: row.dataset.program, lane: row.dataset.lane} : null} : null;
+  }
+  function findMark(box, mark) {
+    if (!box || !mark) return null;
+    if (!mark.row) return box.querySelector(mark.which);
+    const again = [...box.querySelectorAll('[data-recent-row]')].find(r => r.dataset.path === mark.row.path && r.dataset.program === mark.row.program && r.dataset.lane === mark.row.lane);
+    return again?.querySelector(mark.which) || null;
+  }
+  // render() rebuilds every list host, which drops focus to <body>. The last
+  // focused list control is remembered, and the list puts focus back in the same
+  // task when it remounts, so there is no window where focus is lost (report-na.js
+  // and the pickers restore on a later frame, which a loaded machine delays).
+  let focusMemo = null;
+  document.addEventListener('focusin', event => { focusMemo = focusMark(event.target); }, true);
+  document.addEventListener('focusout', event => {
+    const target = event.target;
+    // Focus left to nothing while the control is still on the page (a click on
+    // empty space): forget it. A control removed by a repaint keeps the memo.
+    if (!event.relatedTarget) queueMicrotask(() => { if (target.isConnected && document.activeElement !== target && focusMemo && findMark(document.querySelector(focusMemo.host), focusMemo) === target) focusMemo = null; });
+  }, true);
+  function restoreFocus(host) {
+    if (!focusMemo || !host || `#${host.id}` !== focusMemo.host) return;
     const active = document.activeElement;
-    if (!box || !active || !box.contains(active)) return paint();
-    const row = active.closest('[data-recent-row]');
-    const which = active.matches('[data-na-toggle]') ? '[data-na-toggle]' : active.dataset.recentPick ? `[data-recent-pick="${active.dataset.recentPick}"]` : active.matches('a.recent-link') ? 'a.recent-link' : null;
-    const path = row?.dataset.path, program = row?.dataset.program, lane = row?.dataset.lane;
+    if (active && active !== document.body && active !== document.documentElement) return;
+    findMark(host, focusMemo)?.focus({preventScroll: true});
+  }
+  // Repaint a box, keeping keyboard focus on the same control; identical markup is left alone.
+  function keepFocus(box, paint, html) {
+    if (!box) return;
+    if (html !== undefined && box.__html === html) return;
+    const active = document.activeElement;
+    const mark = active && box.contains(active) ? focusMark(active) : null;
     paint();
-    if (!which || path == null || box.contains(document.activeElement)) return;
-    const again = [...box.querySelectorAll('[data-recent-row]')].find(r => r.dataset.path === path && r.dataset.program === program && r.dataset.lane === lane);
-    again?.querySelector(which)?.focus();
+    if (html !== undefined) box.__html = html;
+    if (!mark || box.contains(document.activeElement)) return;
+    findMark(box, mark)?.focus({preventScroll: true});
   }
   // ---- lists: the Recent view and the Submissions view -------------------------
   // One code path, two instances with their own state, URL keys, memory and
@@ -387,10 +424,10 @@
       const order = inHost(`#${P}-order`); if (order && order.value !== L.order) order.value = L.order;
       if (m) FB().refresh(m);
     }
-    function paintStatus() { const box = inHost('[data-recent-status]'); if (box) box.innerHTML = statusHtml(); }
+    function paintStatus() { const box = inHost('[data-recent-status]'); if (box) { const html = statusHtml(); if (box.innerHTML !== html) box.innerHTML = html; } }
     function paint() {
       paintStatus();
-      const box = inHost('[data-recent-results]'); if (box) keepFocus(box, () => { box.innerHTML = resultsHtml(); });
+      const box = inHost('[data-recent-results]'); if (box) { const html = resultsHtml(); keepFocus(box, () => { box.innerHTML = html; }, html); }
       paintControls(); // counts and chips follow the server's facets
     }
     function mount(el) {
@@ -407,6 +444,7 @@
       writeUrl();
       el.innerHTML = `<section class="panel recent-panel" aria-label="${esc(cfg.listLabel)}" data-na-scope="${cfg.naScope}"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">${esc(cfg.footnote)} Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
       el.onclick = onClick; el.onchange = onChange; el.oninput = onInput; el.oncontextmenu = onRowMenu; el.onkeydown = onRowKey;
+      restoreFocus(el);
       if (fromLink || !L.data || L.source !== ctx.state.data || Date.now() - L.at > 10000) { L.retry = 0; load(); }
     }
     function onClick(event) {
@@ -479,7 +517,7 @@
       : d.na_hidden_page > 0 || (!d.items.length && d.na_hidden > 0) ? `<span class="na-hidden-note">${d.na_hidden_page || d.na_hidden} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-recent-panel-na="show">show</button></span>` : '';
     return `<section class="panel recent-dash" aria-label="Recently updated reports" data-na-scope="recent-panel"><div class="panel-head"><div><h2>Recently updated reports</h2><p class="hint">Newest first across all programs${d?.index_state === 'building' ? '; the report index is still building' : ''}.${hidden ? ' ' : ''}${hidden}</p></div><a class="button sm" href="${esc(ctx.hrefFor({view: 'recent', query: `within=${DEFAULT_WINDOW}&order=newest`}))}">${icon('clock-o')}<span>View all</span></a></div>${body}</section>`;
   }
-  function paintPanel() { const host = ctx.app.querySelector('#dashboard-recent-host'); if (host) keepFocus(host, () => { host.innerHTML = panelHtml(); }); }
+  function paintPanel() { const host = ctx.app.querySelector('#dashboard-recent-host'); if (host) { const html = panelHtml(); keepFocus(host, () => { host.innerHTML = html; }, html); } }
 
   // ---- Recon program page: reports of one program and lane -------------------
   async function loadScoped(program, lane) {
@@ -511,10 +549,11 @@
     const count = d ? (d.total > d.items.length ? `Newest ${d.items.length} of ${d.total}` : `${d.total} ${d.total === 1 ? 'report' : 'reports'}`) : 'Reports';
     return `<section class="panel recent-dash" aria-label="Reports in this lane" data-na-scope="recon-reports"><div class="panel-head"><div><h2>Reports</h2><p class="hint">${esc(count)}, newest first.${hidden ? ' ' : ''}${hidden}</p></div><a class="button sm" href="${esc(all)}">${icon('file-text-o')}<span>All reports</span></a></div>${body}</section>`;
   }
-  function paintScoped() { const host = ctx.app.querySelector('#recon-reports-host'); if (host) keepFocus(host, () => { host.innerHTML = scopedHtml(host); }); }
+  function paintScoped() { const host = ctx.app.querySelector('#recon-reports-host'); if (host) { const html = scopedHtml(host); keepFocus(host, () => { host.innerHTML = html; }, html); } }
   function mountScoped(host) {
-    host.innerHTML = scopedHtml(host);
+    host.innerHTML = host.__html = scopedHtml(host);
     host.onclick = onPanelClick; host.oncontextmenu = onRowMenu; host.onkeydown = onRowKey;
+    restoreFocus(host);
     const key = `${host.dataset.program}|${host.dataset.lane}`;
     if ((scoped.key === key && Date.now() - scoped.at < 30000) || scoped.loading) return;
     scoped.retry = 0; loadScoped(host.dataset.program, host.dataset.lane);
@@ -523,8 +562,9 @@
   // and fetches afterwards, once the workspace's own report load has settled
   // (or after 4 s at most).
   function mountPanel(host) {
-    host.innerHTML = panelHtml();
+    host.innerHTML = host.__html = panelHtml();
     host.onclick = onPanelClick; host.oncontextmenu = onRowMenu; host.onkeydown = onRowKey;
+    restoreFocus(host);
     const stale = !panel.data || panel.source !== ctx.state.data || Date.now() - panel.at > 60000;
     if (!stale || panel.loading || panel.waitTimer) return;
     const attempt = () => {
