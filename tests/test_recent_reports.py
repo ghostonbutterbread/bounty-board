@@ -390,7 +390,12 @@ class MappingTests(unittest.TestCase):
         items = self.items()
         self.assertEqual({k: v for k, v in items['F012-xss/acme.example-xss-F012.md']['finding'].items() if k != 'metadata_revision'},
                          {'fid': 'F012', 'title': 'Packet XSS', 'severity': 'HIGH', 'status': 'confirmed',
-                          'submission': {'state': 'submitted', 'result': 'valid'}, 'submission_status': 'submitted', 'match': 'packet'})
+                          'submission': {'state': 'submitted', 'result': 'valid'}, 'submission_status': 'submitted', 'match': 'packet',
+                          # feat/board-recent-facets: additive facet fields.
+                          'severity_key': 'high', 'class': {'raw': None, 'category': 'unclassified', 'subclass': None,
+                                                            'label': 'Unclassified', 'subclass_label': None}})
+        self.assertEqual(items['F012-xss/acme.example-xss-F012.md']['submission_key'], 'valid')
+        self.assertEqual(items['active.md']['submission_key'], 'none')
         self.assertIsNone(items['findings/high/F040 - Legacy title.md']['finding']['submission'])
 
     def test_duplicate_owner_maps_to_nothing(self):
@@ -505,6 +510,193 @@ class NaAPITests(Base):
         self.assertEqual(status, 200)
         self.assertTrue(lane['na_available'])
         self.assertEqual([(r['path'], r['na']) for r in lane['reports']], [('sqli.md', True)])
+
+def facet_root(root):
+    """Two programs, three lanes, every submission bucket, unmapped reports (synthetic)."""
+    now = time.time()
+    hour = 3600
+    fc = [
+        {'fid': 'F101', 'title': 'Reflected XSS', 'severity': 'HIGH', 'class_name': 'xss', 'status': 'confirmed'},
+        {'fid': 'F102', 'title': 'IDOR on orders', 'severity': 'CRITICAL', 'class_name': 'idor', 'status': 'confirmed',
+         'submission': {'state': 'submitted'}},
+        {'fid': 'F103', 'title': 'SSRF in importer', 'severity': 'MEDIUM', 'class_name': 'ssrf', 'status': 'confirmed',
+         'submission': {'state': 'submitted', 'result': 'duplicate'}},
+        {'fid': 'F104', 'title': 'Odd thing', 'severity': 'LOW', 'class_name': '', 'status': 'raw', 'submission': {'state': 'dropped'}},
+        {'fid': 'F105', 'title': 'Stored XSS', 'severity': 'MEDIUM', 'class_name': 'stored-xss', 'status': 'raw',
+         'submission': {'state': 'raw'}},
+    ]
+    write_lane(root, 'web_bounty', 'facetco', 'web', fc, {
+        'F101-xss/facetco-xss-F101.md': '# F101\n', 'F102-idor/facetco-idor-F102.md': '# F102\n',
+        'F103-ssrf/facetco-ssrf-F103.md': '# F103\n', 'F104-odd/facetco-odd-F104.md': '# F104\n',
+        'F105-xss/facetco-xss-F105.md': '# F105\n', 'notes.md': '# Notes\n'})
+    write_lane(root, 'web_bounty', 'facetco', 'api', [
+        {'fid': 'A201', 'title': 'API XSS', 'severity': 'HIGH', 'class_name': 'xss', 'submission': {'state': 'not_submitted'}}],
+        {'A201-xss/facetco-xss-A201.md': '# A201\n'})
+    write_lane(root, 'web_bounty', 'otherco', 'web', [
+        {'fid': 'O301', 'title': 'Other IDOR', 'severity': 'HIGH', 'class_name': 'idor', 'submission': {'state': 'submitted', 'result': 'valid'}}],
+        {'O301-idor/otherco-idor-O301.md': '# O301\n', 'scratch.md': '# Scratch\n'})
+    ages = {'facetco/api/reports/A201-xss/facetco-xss-A201.md': 0.5, 'facetco/web/reports/F101-xss/facetco-xss-F101.md': 1,
+            'facetco/web/reports/F102-idor/facetco-idor-F102.md': 2, 'facetco/web/reports/F103-ssrf/facetco-ssrf-F103.md': 3,
+            'facetco/web/reports/F104-odd/facetco-odd-F104.md': 4, 'facetco/web/reports/F105-xss/facetco-xss-F105.md': 5,
+            'facetco/web/reports/notes.md': 6, 'otherco/web/reports/O301-idor/otherco-idor-O301.md': 7,
+            'otherco/web/reports/scratch.md': 8}
+    for rel, age in ages.items():
+        touch(Path(root) / 'web_bounty' / rel, age * hour, now)
+    return root
+
+
+FID = {'A201': 'A201-xss/facetco-xss-A201.md', 'F101': 'F101-xss/facetco-xss-F101.md', 'F102': 'F102-idor/facetco-idor-F102.md',
+       'F103': 'F103-ssrf/facetco-ssrf-F103.md', 'F104': 'F104-odd/facetco-odd-F104.md', 'F105': 'F105-xss/facetco-xss-F105.md',
+       'notes': 'notes.md', 'O301': 'O301-idor/otherco-idor-O301.md', 'scratch': 'scratch.md'}
+PATH = {v: k for k, v in FID.items()}
+
+
+class FacetIndexTests(unittest.TestCase):
+    """feat/board-recent-facets: severity, class and submission filters, facets and orders."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='recent-facets-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'root'
+        facet_root(self.root)
+        self.index = make_index(self.root)
+        self.addCleanup(self.index.close)
+        self.index.refresh()
+
+    def ids(self, **kw):
+        return [PATH[i['path']] for i in self.index.recent(**{'limit': 200, **kw})['items']]
+
+    def test_default_order_unchanged(self):
+        self.assertEqual(self.ids(), ['A201', 'F101', 'F102', 'F103', 'F104', 'F105', 'notes', 'O301', 'scratch'])
+
+    def test_filters_or_within_and_across(self):
+        self.assertEqual(self.ids(severities=['high']), ['A201', 'F101', 'O301'])
+        self.assertEqual(self.ids(submissions=['none']), ['notes', 'scratch'])
+        self.assertEqual(self.ids(submissions=['not_submitted']), ['A201', 'F101'])
+        self.assertEqual(self.ids(submissions=['duplicate', 'valid']), ['F103', 'O301'])
+        self.assertEqual(self.ids(submissions=['other']), ['F105'])
+        self.assertEqual(self.ids(submissions=['dropped']), ['F104'])
+        self.assertEqual(self.ids(submissions=['submitted']), ['F102'])
+        self.assertEqual(self.ids(classes=['xss', 'ssrf']), ['A201', 'F101', 'F103', 'F105'])
+        self.assertEqual(self.ids(classes=['xss'], severities=['medium']), ['F105'])
+        self.assertEqual(self.ids(classes=['unclassified']), ['F104'])
+        self.assertEqual(self.ids(classes=['none'], severities=['none']), ['notes', 'scratch'])
+        self.assertEqual(self.ids(lanes=['api']), ['A201'])
+        self.assertEqual(self.ids(lanes=['web', 'api'], programs=['web_bounty/facetco'], severities=['high']), ['A201', 'F101'])
+        self.assertEqual(self.ids(lane='api'), ['A201'], 'the single lane argument still works')
+        self.assertEqual(self.ids(severities=['exceptional']), [])
+
+    def test_facets_ignore_their_own_filter(self):
+        out = self.index.recent(severities=['high'])
+        sev = {f['key']: f['count'] for f in out['facets']['severities']}
+        self.assertEqual(sev, {'exceptional': 0, 'critical': 1, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, 'unknown': 0, 'none': 2})
+        self.assertEqual([f['key'] for f in out['facets']['severities']],
+                         ['exceptional', 'critical', 'high', 'medium', 'low', 'info', 'unknown', 'none'])
+        cls = {f['key']: f['count'] for f in out['facets']['classes']}
+        self.assertEqual(cls, {'broken_access_control': 1, 'xss': 2, 'ssrf': 0, 'unclassified': 0, 'none': 0},
+                         'present classes stay listed with zero counts')
+        self.assertEqual([f['key'] for f in out['facets']['classes']], ['broken_access_control', 'xss', 'ssrf', 'unclassified', 'none'])
+        self.assertEqual(next(f for f in out['facets']['classes'] if f['key'] == 'xss')['label'], 'Cross-Site Scripting')
+        sub = {f['key']: f['count'] for f in out['facets']['submissions']}
+        self.assertEqual(sub, {'not_submitted': 2, 'submitted': 0, 'valid': 1, 'duplicate': 0, 'dropped': 0, 'other': 0, 'none': 0})
+        self.assertEqual({p['id']: p['count'] for p in out['facets']['programs']}, {'web_bounty/facetco': 2, 'web_bounty/otherco': 1})
+        self.assertEqual({l['name']: l['count'] for l in out['facets']['lanes']}, {'web': 2, 'api': 1})
+        # A selected class with no rows is still listed.
+        out = self.index.recent(classes=['csrf'])
+        self.assertEqual(next(f for f in out['facets']['classes'] if f['key'] == 'csrf')['count'], 0)
+        self.assertEqual(out['total'], 0)
+        # Lanes facet ignores the lane filter but honours the others.
+        out = self.index.recent(lanes=['api'], submissions=['not_submitted'])
+        self.assertEqual({l['name']: l['count'] for l in out['facets']['lanes']}, {'web': 1, 'api': 1})
+        self.assertEqual(out['total'], 1)
+
+    def test_orders(self):
+        self.assertEqual(self.ids(order='severity'), ['F102', 'A201', 'F101', 'O301', 'F103', 'F105', 'F104', 'notes', 'scratch'])
+        self.assertEqual(self.ids(order='class'), ['F102', 'O301', 'A201', 'F101', 'F105', 'F103', 'F104', 'notes', 'scratch'])
+        self.assertEqual(self.ids(order='severity', severities=['high'], limit=2), ['A201', 'F101'])
+        paged = [PATH[i['path']] for off in range(0, 9, 4) for i in self.index.recent(order='class', limit=4, offset=off)['items']]
+        self.assertEqual(paged, self.ids(order='class'))
+
+    def test_item_fields(self):
+        items = {PATH[i['path']]: i for i in self.index.recent(limit=200)['items']}
+        self.assertEqual(items['F105']['finding']['class'], {'raw': 'stored-xss', 'category': 'xss', 'subclass': 'stored',
+                                                            'label': 'Cross-Site Scripting', 'subclass_label': 'Stored'})
+        self.assertEqual(items['F105']['finding']['severity_key'], 'medium')
+        self.assertEqual({k: items[k]['submission_key'] for k in FID},
+                         {'A201': 'not_submitted', 'F101': 'not_submitted', 'F102': 'submitted', 'F103': 'duplicate',
+                          'F104': 'dropped', 'F105': 'other', 'notes': 'none', 'O301': 'valid', 'scratch': 'none'})
+        self.assertIsNone(items['notes']['finding'])
+
+    def test_na_hidden_with_facet_filters(self):
+        keys = {'web_bounty/facetco/web/' + FID['F101'], 'web_bounty/otherco/web/scratch.md'}
+        out = self.index.recent(na_keys=keys, hide_na=True, severities=['high'])
+        self.assertEqual(([PATH[i['path']] for i in out['items']], out['na_hidden'], out['na_hidden_page']), (['A201', 'O301'], 1, 1))
+        self.assertEqual(self.index.recent(na_keys=keys, hide_na=True, severities=['low'])['na_hidden'], 0)
+        self.assertEqual(self.index.recent(na_keys=keys, hide_na=True, submissions=['none'])['na_hidden'], 1)
+        out = self.index.recent(na_keys=keys, hide_na=True, order='severity', limit=2)
+        # Severity order: F102, A201, (F101 hidden), O301 ...: F101 falls after this page.
+        self.assertEqual(([PATH[i['path']] for i in out['items']], out['na_hidden_page']), (['F102', 'A201'], 0))
+        out = self.index.recent(na_keys=keys, hide_na=True, order='severity', limit=1, offset=2)
+        self.assertEqual(([PATH[i['path']] for i in out['items']], out['na_hidden_page']), (['O301'], 1))
+        sev = {f['key']: f['count'] for f in self.index.recent(na_keys=keys, hide_na=True)['facets']['severities']}
+        self.assertEqual((sev['high'], sev['none']), (2, 1), 'hidden N/A rows are left out of facets')
+
+    def test_normalized_once_per_ledger_change(self):
+        from unittest import mock
+        import search_index
+        with mock.patch.object(search_index.finding_facets, 'class_info', wraps=search_index.finding_facets.class_info) as spy, \
+                mock.patch.object(search_index.finding_facets, 'severity_key', wraps=search_index.finding_facets.severity_key) as sev:
+            for _ in range(3):
+                self.index.recent(severities=['high'], order='class')
+            self.index.refresh()
+            self.assertEqual((spy.call_count, sev.call_count), (0, 0), 'cached with the ledger signature')
+            ledger = self.root / 'web_bounty/otherco/web/ledgers/ledger.json'
+            data = json.loads(ledger.read_text())
+            data['findings'][0]['severity'] = 'LOW'
+            ledger.write_text(json.dumps(data) + ' ')
+            self.index.refresh()
+            self.assertEqual((spy.call_count, sev.call_count), (1, 1), 'only the changed lane')
+        self.assertEqual(self.ids(severities=['low']), ['F104', 'O301'])
+
+
+class FacetAPITests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='recent-facets-api-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'root'
+        facet_root(self.root)
+        self.server = app.make_server(self.root, port=0)
+        self.server.search_index.interval = 0.05
+        self.port = self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(lambda: (self.server.shutdown(), self.server.server_close()))
+
+    get = APITests.get
+
+    def test_filters_over_http(self):
+        status, body = self.get({'severity': ['high', 'critical'], 'class': 'broken_access_control', 'lane': ['web', 'api'],
+                                 'order': 'severity'})
+        self.assertEqual(status, 200)
+        self.assertEqual([PATH[i['path']] for i in body['items']], ['F102', 'O301'])
+        self.assertEqual(set(body['facets']), {'programs', 'lanes', 'severities', 'classes', 'submissions'})
+        status, body = self.get({'submission': 'none', 'order': 'class'})
+        self.assertEqual((status, [PATH[i['path']] for i in body['items']]), (200, ['notes', 'scratch']))
+        self.assertEqual(self.get({'lane': 'api'})[1]['total'], 1, 'single lane still accepted')
+        self.assertEqual(self.get('within=604800&order=newest')[0], 200, 'canonical link parameters unchanged')
+
+    def test_strict_parsing(self):
+        for bad in ('severity=urgent', 'severity=HIGH', 'severity=', 'class=bogus', 'class=XSS', 'submission=pending',
+                    'lane=web&lane=bogus', 'order=popular', '&'.join(['severity=high'] * 9), '&'.join(['lane=web'] * 6),
+                    '&'.join(['submission=none'] * 8), '&'.join(['class=xss'] * 20)):
+            with self.subTest(bad=bad[:60]):
+                status, body = self.get(bad)
+                self.assertEqual((status, body['error']), (400, 'invalid_recent_reports'))
+        import finding_facets
+        every = '&'.join([f'program=p{i}' for i in range(100)] + [f'severity={k}' for k, _ in finding_facets.SEVERITIES] +
+                         [f'class={k}' for k, _ in finding_facets.class_options()] +
+                         [f'submission={k}' for k, _ in finding_facets.SUBMISSIONS] +
+                         [f'lane={k}' for k in sorted(set().union(*app.FAMILIES.values()))] + ['order=class', 'q=x', 'hide_na=1'])
+        self.assertEqual(self.get(every)[0], 200, 'every option once is within the caps')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from report_evidence import is_evidence, recorded_paths, reports_relative
+import finding_facets
 from report_packets import LEGACY_NAME as _LEGACY_NAME, PACKET_DIR as _PACKET_DIR, counts_for_time, \
     is_meta, packet_folder, plan as packet_plan
 
@@ -82,6 +83,10 @@ def _title_of(text, fallback):
         if match:
             return plain(match.group(1))[:160] or fallback
     return fallback
+
+
+def sub_of(owner):
+    return owner['submission_key'] if owner is not None else finding_facets.NONE
 
 
 class SearchIndex:
@@ -228,6 +233,12 @@ class SearchIndex:
                                                       'report_path', 'evidence_path', 'submission_status',
                                                       'metadata_revision')},
                              'submission': self._submission(f.get('submission'))} for f in raw or []]
+            # Facet keys (finding_facets), normalized once per ledger change and
+            # cached with the ledger signature, never per request.
+            for f in raw_findings:
+                f['severity_key'] = finding_facets.severity_key(f)
+                f['class_info'] = finding_facets.class_info(f)
+                f['submission_key'] = finding_facets.submission_key(f)
             if 'ledger_unavailable_or_invalid' in lane_warnings:
                 warnings.add('ledger_unavailable')
         old_reports = old['reports'] if old is not None else {}
@@ -324,8 +335,10 @@ class SearchIndex:
                 entry['finding_fid'], entry['finding_match'] = main['finding']
             else:
                 entry['finding_fid'], entry['finding_match'] = self._map_finding(rel, registered, [], unique)
+        fid_counts = Counter(f.get('fid') for f in raw_findings)
+        by_fid = {f['fid']: f for f in raw_findings if isinstance(f.get('fid'), str) and fid_counts[f['fid']] == 1}
         return {'family': family, 'program': program, 'lane': name, 'ledger_sig': ledger_sig,
-                'raw_findings': raw_findings, 'findings': findings, 'reports': reports, 'evidence': evidence,
+                'raw_findings': raw_findings, 'by_fid': by_fid, 'findings': findings, 'reports': reports, 'evidence': evidence,
                 'packet_files': packet_files}
 
     @staticmethod
@@ -575,8 +588,9 @@ class SearchIndex:
                 'took_ms': round((time.perf_counter() - started) * 1000, 2)}
 
     # ---- recent reports ----------------------------------------------------
-    def recent(self, *, limit=50, offset=0, within=None, programs=(), lane=None, query='',
-               order='newest', include_navigation=False, fresh_wait=2.0, na_keys=None, hide_na=False):
+    def recent(self, *, limit=50, offset=0, within=None, programs=(), lane=None, lanes=(), query='',
+               order='newest', include_navigation=False, fresh_wait=2.0, na_keys=None, hide_na=False,
+               severities=(), classes=(), submissions=()):
         """Reports across every program and lane ordered by file modification time.
 
         One row per finding packet (report_packets): the main report, at the
@@ -584,9 +598,17 @@ class SearchIndex:
         file (packet-relative) when it is not the main report.
 
         Filters: `within` (seconds before now), `programs` (ids "family/name"),
-        `lane`, `query` (every term must occur in the title or path) and
-        generated navigation and packet `_meta/` files (excluded unless `include_navigation`). Facet
-        counts for programs and lanes each ignore their own filter.
+        `lanes` (or the older single `lane`), `query` (every term must occur in
+        the title or path), `severities`, `classes` and `submissions` (facet
+        keys from finding_facets; "none" selects reports with no linked
+        finding), and generated navigation and packet `_meta/` files (excluded
+        unless `include_navigation`). OR within a filter, AND across filters.
+        Facet counts for programs, lanes, severities, classes and submissions
+        each ignore their own filter.
+
+        `order`: newest, oldest, severity (highest first, ties newest first,
+        no linked finding last) or class (category label A to Z, Unclassified
+        then no linked finding last, ties by severity then newest).
 
         `na_keys` is the set of Board N/A marks ("family/program/lane/path"),
         or None when that store is unavailable. With `hide_na`, marked reports
@@ -600,56 +622,72 @@ class SearchIndex:
         since = now - within if within is not None else None
         terms = parse_terms(query)
         wanted = set(programs)
+        wanted_lanes = set(lanes) | ({lane} if lane is not None else set())
+        wanted_sev, wanted_cls, wanted_sub = set(severities), set(classes), set(submissions)
         marks = na_keys if na_keys is not None else frozenset()
         hiding = bool(hide_na and marks)
         matches = []
         hidden = []
-        program_counts, lane_counts, names = {}, {}, {}
+        names = {}
+        counts = {'program': {}, 'lane': {}, 'sev': {}, 'cls': {}, 'sub': {}}
+        present = set()  # class keys of rows that pass the non-facet filters
         total_reports = 0
         if self._instance is not None and snapshot is not None and snapshot[2] == self._instance:
             for l in list(self._lanes.values()):
                 pid = f"{l['family']}/{l['program']}"
                 names[pid] = (l['program'], l['family'])
                 in_program = not wanted or pid in wanted
-                in_lane = lane is None or l['lane'] == lane
-                findings = None
+                in_lane = not wanted_lanes or l['lane'] in wanted_lanes
+                by_fid = l.get('by_fid', {})
                 prefix = f"{pid}/{l['lane']}/"
                 for rel, r in l['reports'].items():
                     if (r['nav'] or r.get('meta')) and not include_navigation:
                         continue
                     na = prefix + rel in marks
-                    if na and hiding:
-                        if ((since is None or r['mtime'] >= since) and in_program and in_lane and
-                                (not terms or all(t in r['title_low'] or t in r['path_low'] for t in terms))):
-                            hidden.append((r['mtime'], pid, l['lane'], rel, None, None, True))
-                        continue
-                    total_reports += 1
+                    if not (na and hiding):
+                        total_reports += 1
                     if since is not None and r['mtime'] < since:
                         continue
                     if terms and not all(t in r['title_low'] or t in r['path_low'] for t in terms):
                         continue
-                    if in_lane:
-                        program_counts[pid] = program_counts.get(pid, 0) + 1
-                    if in_program:
-                        lane_counts[l['lane']] = lane_counts.get(l['lane'], 0) + 1
-                    if in_program and in_lane:
-                        if findings is None:
-                            counts = Counter(f.get('fid') for f in l['raw_findings'])
-                            findings = {f['fid']: f for f in l['raw_findings']
-                                        if isinstance(f.get('fid'), str) and counts[f['fid']] == 1}
-                        matches.append((r['mtime'], pid, l['lane'], rel, r, findings, na))
-        newest = order != 'oldest'
-        matches.sort(key=lambda m: m[:4], reverse=newest)
+                    owner = by_fid.get(r.get('finding_fid')) if r.get('finding_fid') else None
+                    if owner is None:
+                        sev, cls, sub = finding_facets.NONE, finding_facets.NONE, finding_facets.NONE
+                    else:
+                        sev, cls, sub = owner['severity_key'], owner['class_info']['category'], owner['submission_key']
+                    present.add(cls)
+                    ok = {'program': in_program, 'lane': in_lane, 'sev': not wanted_sev or sev in wanted_sev,
+                          'cls': not wanted_cls or cls in wanted_cls, 'sub': not wanted_sub or sub in wanted_sub}
+                    every = all(ok.values())
+                    if na and hiding:
+                        if every:
+                            hidden.append(((r['mtime'], pid, l['lane'], rel), sev, cls, None))
+                        continue
+                    for facet, key in (('program', pid), ('lane', l['lane']), ('sev', sev), ('cls', cls), ('sub', sub)):
+                        if all(v for k, v in ok.items() if k != facet):
+                            counts[facet][key] = counts[facet].get(key, 0) + 1
+                    if every:
+                        matches.append(((r['mtime'], pid, l['lane'], rel), sev, cls, (r, owner, na)))
+        all_class_labels = dict(finding_facets.class_options())
+
+        def order_rows(rows):
+            rows.sort(key=lambda m: m[0], reverse=order != 'oldest')
+            if order == 'severity':
+                rows.sort(key=lambda m: finding_facets.SEVERITY_RANK[m[1]])
+            elif order == 'class':
+                rows.sort(key=lambda m: (finding_facets.class_sort(m[2], all_class_labels.get(m[2], m[2])),
+                                         finding_facets.SEVERITY_RANK[m[1]]))
+            return rows
+        order_rows(matches)
         page_hidden = 0
         if hidden:
             # Hidden reports between the previous page's last item (or the
             # list start) and this page's last item.
-            combined = sorted(matches + hidden, key=lambda m: m[:4], reverse=newest)
             visible = run = 0
-            for m in combined:
+            for m in order_rows(matches + hidden):
                 if visible >= offset + limit:
                     break
-                if m[4] is None:
+                if m[3] is None:
                     run += 1
                     continue
                 if visible >= offset:
@@ -657,28 +695,39 @@ class SearchIndex:
                 run = 0
                 visible += 1
         items = []
-        for mtime, pid, lane_name, rel, r, findings, na in matches[offset:offset + limit]:
-            owner = findings.get(r.get('finding_fid')) if r.get('finding_fid') else None
+        for (mtime, pid, lane_name, rel), sev, cls, (r, owner, na) in matches[offset:offset + limit]:
             finding = None
             if owner is not None:
                 finding = {'fid': owner['fid'], 'title': owner['title'], 'severity': owner['severity'],
                            'status': owner['status'], 'submission': owner.get('submission'),
                            'submission_status': owner.get('submission_status'),
-                           'metadata_revision': owner.get('metadata_revision'), 'match': r['finding_match']}
+                           'metadata_revision': owner.get('metadata_revision'), 'match': r['finding_match'],
+                           'class': dict(owner['class_info']), 'severity_key': sev}
             items.append({'path': rel, 'name': rel.rsplit('/', 1)[-1], 'title': r['title'], 'program': pid,
                           'program_name': names[pid][0], 'family': names[pid][1], 'lane': lane_name,
                           'modified': mtime, 'report_kind': 'generated_navigation' if r['nav'] else r['report_kind'],
-                          'owner_fids': r['owner_fids'][:5], 'finding': finding, 'na': na, 'packet_meta': bool(r.get('meta')),
+                          'owner_fids': r['owner_fids'][:5], 'finding': finding, 'submission_key': sub_of(owner),
+                          'na': na, 'packet_meta': bool(r.get('meta')),
                           'packet': r['packet']['packet'] if r.get('packet') else None,
                           'updated_file': r['packet']['updated_file'] if r.get('packet') else None,
                           'target': {'program': pid, 'lane': lane_name, 'section': 'reports', 'report': rel}})
+
+        def facet(name, options, shown=None):
+            # Severity and submission list every option (zero counts included);
+            # classes list those present without the facet filters, plus selected ones.
+            return [{'key': k, 'label': label, 'count': counts[name].get(k, 0)} for k, label in options
+                    if shown is None or k in shown]
         return {'index_state': self.state(), 'root_instance': self._instance, 'now': now,
                 'total': len(matches), 'total_reports': total_reports, 'offset': offset, 'limit': limit, 'order': order,
                 'items': items, 'na_available': na_keys is not None, 'na_hidden': len(hidden),
                 'na_hidden_page': page_hidden,
                 'facets': {'programs': sorted(({'id': pid, 'name': names[pid][0], 'family': names[pid][1], 'count': n}
-                                               for pid, n in program_counts.items()), key=lambda x: (x['name'].lower(), x['id'])),
-                           'lanes': [{'name': k, 'count': v} for k, v in sorted(lane_counts.items())]},
+                                               for pid, n in counts['program'].items()), key=lambda x: (x['name'].lower(), x['id'])),
+                           'lanes': [{'name': k, 'count': v} for k, v in sorted(counts['lane'].items())],
+                           'severities': facet('sev', finding_facets.SEVERITIES),
+                           'classes': facet('cls', sorted(finding_facets.class_options(), key=lambda o: finding_facets.class_sort(*o)),
+                                            present | wanted_cls),
+                           'submissions': facet('sub', finding_facets.SUBMISSIONS)},
                 'warnings': list(self._warnings), 'took_ms': round((time.perf_counter() - started) * 1000, 2)}
 
     # ---- scoring ---------------------------------------------------------
