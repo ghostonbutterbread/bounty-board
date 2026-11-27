@@ -143,7 +143,7 @@ R1 and R2 confirmed fixed (reviewer repros pass). Live keyboard check: one popov
 | 5 | 10/10 | 19.3 | 9/9 | 19.3 |
 
 - After the fix, once each: `report-links-recent` **7/7**, `dashboard-coverage` **2/2**, `finding-actions` **13/13**, `recent-facets` **6/6**.
-  - `recent-facets` first went 5/6. Its "No longer matches" test checked the stale row's resting opacity right after the pill save. It had relied on focus being lost: focus now stays on the row's pill, which lifts the dimming through `:focus-within`. The test now blurs before measuring (`8d1ad7c`); intent unchanged.
+  - `recent-facets` first went 5/6. Its "No longer matches" test checked the stale row's resting opacity right after the pill save. It had relied on focus being lost: focus now stays on the row's pill, which lifts the dimming through `:focus-within`. The test now blurs before measuring (`6e4c55f`); intent unchanged.
 
 ## Screenshots
 
