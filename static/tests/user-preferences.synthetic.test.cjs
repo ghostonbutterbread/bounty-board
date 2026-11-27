@@ -118,6 +118,43 @@ test('new acknowledgements never delete other-owner or uncertain records', {time
   assert.equal(await page.locator('#preferences-save-error').isVisible(),true);
 }));
 
+test('scrolled preference warning stays below the sticky topbar at intermediate widths', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
+  const context=await browser.newContext({viewport:{width:760,height:500}}), a=await context.newPage(), b=await context.newPage();
+  await a.goto(base); await b.goto(base);
+  await chooseTheme(a,'Dark'); await waitSaved(a);
+  await chooseTheme(b,'Dusk'); await b.getByRole('button',{name:/use my choice.*theme/i}).waitFor();
+  await b.evaluate(()=>{const spacer=document.createElement('div');spacer.style.height='1800px';document.querySelector('#app').append(spacer);});
+  for(const width of [650,700,760,761]){
+    await b.setViewportSize({width,height:500});
+    await b.evaluate(()=>window.scrollTo(0,600));
+    await b.waitForFunction(()=>window.scrollY>100);
+    const position=await b.locator('.preferences-error-message').evaluate(el=>({textTop:el.getBoundingClientRect().top,barBottom:document.querySelector('.topbar').getBoundingClientRect().bottom}));
+    assert.ok(position.textTop>=Math.max(0,position.barBottom)-1 && position.textTop>=0,`warning text is behind the topbar at ${width}px: ${JSON.stringify(position)}`);
+  }
+}));
+
+test('many preference conflicts leave workspace visible and every action reachable on a short phone', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
+  const context=await browser.newContext({viewport:{width:375,height:500}}), page=await context.newPage();
+  await page.goto(base);
+  await page.evaluate(()=>{
+    const owner=sessionStorage.getItem('bounty-board-preferences-owner:v2');
+    const fields=['window','order','nav','hideNa','programs','lanes','subs','sevs','classes'];
+    const value=field=>field==='window'?'"7d"':field==='order'?'"newest"':(field==='nav'||field==='hideNa')?'false':'[]';
+    [...['recent','submissions'].flatMap(name=>fields.map(field=>[`list.${name}.${field}`,value(field)])),['bounty-board-theme','dark']].forEach(([key,v],i)=>{
+      localStorage.setItem(`bounty-board-preferences-edit:v2:seed-${i}`,JSON.stringify({owner,key,value:v,base:null,stamp:i+1}));
+    });
+  });
+  await page.reload();
+  await page.waitForFunction(()=>document.querySelectorAll('#preferences-save-error button').length===19);
+  await page.evaluate(()=>{const spacer=document.createElement('div');spacer.style.height='1800px';document.querySelector('#app').append(spacer);window.scrollTo(0,600);});
+  await page.waitForFunction(()=>window.scrollY>100);
+  const dims=await page.locator('#preferences-save-error').evaluate(el=>({height:el.getBoundingClientRect().height,viewport:innerHeight,top:el.getBoundingClientRect().top}));
+  assert.ok(dims.height<dims.viewport/2,`recovery banner consumes the viewport: ${JSON.stringify(dims)}`);
+  const last=page.locator('#preferences-save-error button').last(); await last.focus();
+  assert.equal(await last.evaluate(el=>document.activeElement===el),true);
+  assert.ok(await page.locator('#preferences-save-error').evaluate(el=>el.scrollTop)>0,'last action is reachable by scrolling the banner');
+}));
+
 test('persistent preference conflict and Board toast are both actionable', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
   for(const width of [1440,375]){
     const context=await browser.newContext({viewport:{width,height:812}}), a=await context.newPage(), b=await context.newPage();
