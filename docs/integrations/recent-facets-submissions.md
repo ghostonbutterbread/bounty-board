@@ -24,7 +24,7 @@ Full text in `BACKEND_API.md` (`GET /api/recent-reports`, "Facet filters").
 
 - Python: `finding_facets.py` (`submission_key`, `severity_key`, `class_info`, `class_key`, option lists and class order).
 - JS: `BoardFilterBar.keys` in `static/modules/filter-bar.js`. The browser uses it to decide, right after a pill edit, whether a row still matches its list.
-- Shared cases: `static/tests/facet-cases.json` (32 cases), run by `tests/test_finding_facets.py` and `static/tests/filter-bar.test.cjs`; the JS test also checks that the option labels match the Python ones.
+- Shared cases: `static/tests/facet-cases.json` (34 cases, including the server `item.finding` shape), run by `tests/test_finding_facets.py` and `static/tests/filter-bar.test.cjs`; the JS test also checks that the option labels match the Python ones.
 - Submission bucket: a `valid` or `duplicate` result wins; else the state (nested `submission.state`, falling back to the legacy top-level `submission_status`) trimmed and lowercased: missing, empty, `not submitted`, `none`, `draft`, `unsubmitted` and `not_submitted` give `not_submitted`; `submitted` and `dropped` map to themselves; anything else (for example `raw`) is `other`; no mapped finding is `none`.
 
 ## Design (frontend)
@@ -52,7 +52,7 @@ Full text in `BACKEND_API.md` (`GET /api/recent-reports`, "Facet filters").
 | Empty state (default filters) | No reports match these filters. | No submitted reports yet |
 
 - Rows are the Recent rows for both: one row per finding packet, report title and path, the new Class column, program and family, lane, finding ID with severity and submission pills, modified time, N/A. Same context menu and links.
-- Class column (right after Report): the normalized category label, the subclass muted after it (not shown for the generic "Other" subclass), the raw `class_name` in the tooltip ("Recorded class: idor"). "Unclassified" (muted) when the class is empty or unknown; "No finding" (muted) when the report maps to no finding.
+- Class column (right after Report): the normalized category label, the subclass on its own muted line under it (not shown for the generic "Other" subclass), the raw `class_name` in the tooltip ("Recorded class: idor"). "Unclassified" (muted) when the class is empty or unknown; "No finding" (muted) when the report maps to no finding.
 - Sort select: Newest first, Oldest first, Severity (highest first, ties newest), Class (A to Z, Unclassified then no finding last, ties by severity then newest). Server-side, so paging stays right.
 - Narrow results column (container query on the panel, not the viewport): at 1080 px or less the Lane column folds away (the program cell still names it via the route); at 860 px or less each row becomes a two-column card (title, class, program on the left; finding pills, time, N/A on the right); at 520 px or less the pills move to their own line.
 - URL keys, as before plus: `sub`, `sev`, `class` and `lane` repeat; `order=newest|oldest|severity|class`. Canonical order `within, sub, sev, class, program, lane, q, order, nav, na, page`. `within` and `order` are always written, so the canonical links stay `#/recent?within=7d&order=newest` and `#/submissions?within=all&order=newest`. Filter changes replace the URL, paging pushes; a link with a query wins over memory; invalid values are dropped and the link is rewritten; class values are checked once the taxonomy rules are loaded (the list waits for them, at most 3 s).
@@ -97,6 +97,22 @@ Load average about 12 throughout.
   - `recent-actions.synthetic`: the `_meta` toggle and `#recent-hide-na` are used through the Options dropdown; `isChecked` on `#recent-hide-na` becomes the Options summary ("Options" / "Options: N/A shown").
   - `evidence-artifacts.synthetic`: `#recent-nav` is checked inside the Options dropdown.
   - `tools/report-links-screenshots.cjs`: same selector change for its program-filter shot.
+
+## Review round 1 (independent review of `d546895`: BLOCK, one blocker, one minor)
+
+| Finding | Fix | Red on `d546895` (only the source file swapped back) | Test (green on the fix) |
+| --- | --- | --- | --- |
+| R1 (blocker): a row whose finding is not in the loaded workspace (cold start, summary mode, cold links) is a copy of the server's `item.finding`, where `class` is an object; `BoardFilterBar.keys` read it as unclassified, so under a Class filter those rows showed "No longer matches" and `carryKept` could resurrect rows the server stopped returning. | `bd3e312`: `classInfo` (JS) and `finding_facets.class_info` (Python) bucket the object's `raw` class, so both sides and both row sources agree. Severity and submission were checked: the server copy carries the raw `severity`, `submission` and `submission_status`, which map the same as `severity_key`/`submission_key` (now pinned by shared cases); no change needed. Two server-shaped cases added to `static/tests/facet-cases.json` (34 cases). | `filter-bar.js`: `filter-bar.test.cjs` 4/6 (the shared cases and the R1 test fail). `finding_facets.py`: `test_finding_facets` fails on the server-shape case. Browser: `recent-facets.synthetic` "R1: cold-start rows…" fails (stale rows found). | `filter-bar.test.cjs` "R1: a row built from item.finding keeps the server class key"; `recent-facets.synthetic` "R1: cold-start rows are not falsely …" (stubs `BoardFindingActions.entry` to return null, opens `#/recent?within=all&class=xss`, expects no stale rows and no "no longer match" status); shared cases in both runners. |
+| R2 (minor): a class seen only in hidden N/A reports was listed in `facets.classes` with 0. | `bd3e312`: `present.add` moved after the hidden-N/A check in `SearchIndex.recent`. | `search_index.py`: `test_hidden_na_class_not_listed` fails. | `tests/test_recent_reports.py` `FacetIndexTests.test_hidden_na_class_not_listed` (also checks the class is listed when N/A is not hidden). |
+| Polish (screenshots): the subclass ran on inline after the category and wrapped mid-phrase. | `bd3e312`: subclass on its own muted line under the category (title-over-path rhythm); raw class still in the tooltip. | n/a | `recent-facets.synthetic` Class column assertion (`Broken Access Control\nIDOR / object-level`). |
+
+Evidence for round 1 (load average 15 to 17; each file alone, serial, `TMPDIR=/tmp/bbfacets`, `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome`):
+
+- `python3 -W error::ResourceWarning -m unittest tests.test_recent_reports tests.test_finding_facets`: **46 run, OK** (41 + 5; was 44).
+- `node --test static/tests/filter-bar.test.cjs`: **6/6**.
+- `recent-facets.synthetic`: **5/5** (one new). `recent-actions.synthetic`: **9/9**. `report-links-recent.synthetic`: **7/7**.
+- Red runs were done in a scratch copy of the tree with only the named source file taken from `d546895`: `search_index.py` → R2 test fails; `filter-bar.js` → `filter-bar.test.cjs` 4/6 and the R1 browser test 0/1; `finding_facets.py` → `test_finding_facets` 1 failure (the server-shape case).
+- Screenshots regenerated in `/tmp/bbfacets/screens/` (all 14, including `submissions-*.png` and `recent-filtered-light.png`); checked by eye: the subclass sits under the category.
 
 ## Screenshots
 
