@@ -70,7 +70,10 @@ async function headerIntact(page){
     const head=document.querySelector('#term-drawer [data-term-head]'),slot=head.querySelector('[data-term-slot="ports"]');
     const marks=[...head.querySelectorAll('[data-term-dock],.term-actions,[data-term-sub],[data-term-status]')];
     const probe=()=>({h:head.offsetHeight,tops:marks.map(e=>Math.round(e.getBoundingClientRect().top))});
-    const withChips=probe();slot.style.display='none';const without=probe();slot.style.display='';
+    // Reference: the drawer's own header, without chips and without the secondary-text cap they may cause.
+    const withChips=probe(),squeezed=head.classList.contains('ports-squeeze');
+    slot.style.display='none';head.classList.remove('ports-squeeze');const without=probe();
+    slot.style.display='';if(squeezed)head.classList.add('ports-squeeze');
     const d=document.querySelector('#term-drawer').getBoundingClientRect();
     const boxes=[...slot.querySelectorAll('[data-ports-chip],[data-ports-more]')].map(c=>c.getBoundingClientRect());
     const inside=boxes.every(r=>r.left>=d.left-1&&r.right<=d.right+1&&r.width>0);
