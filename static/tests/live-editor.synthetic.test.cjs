@@ -242,3 +242,17 @@ test('unknown Syncthing conflict copy can be reviewed and applied',{timeout:6000
   await a.getByRole('button',{name:'History'}).click();
   await a.locator('.live-history-entry').filter({hasText:'Syncthing copy archived'}).waitFor();
 });
+
+test('outside write updates the rendered Preview while reading',{timeout:60000},async t=>{
+  const env=await setup(t);
+  const a=await (await env.context()).newPage();
+  await open(a,env.base);
+  await a.locator('#live-report-host .editor-toolbar button.preview').click();
+  const shown=a.locator('#live-report-host .editor-preview-full.editor-preview-active');
+  await shown.filter({hasText:'Intro line.'}).waitFor();
+  outsideWrite(env.report,ORIGINAL.replace('Intro line.','Intro from an agent.'));
+  await waitValue(a,v=>v.includes('Intro from an agent.'),'outside change reached the editor');
+  await shown.filter({hasText:'Intro from an agent.'}).waitFor({timeout:5000});
+  await a.getByText('Updated outside the Board').waitFor();
+  assert.equal(await pill(a),'Saved');
+});

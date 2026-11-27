@@ -125,6 +125,19 @@
     // the undo history restarts whenever foreign text enters the editor.
     cm.clearHistory();
     if (s.conflict) refreshConflict(s);
+    refreshPreview(s);
+  }
+
+  // EasyMDE renders the full Preview only when it is switched on (side by side
+  // follows edits by itself), so text arriving while someone reads the
+  // Preview must be rendered into it here, keeping the reading position.
+  function refreshPreview(s) {
+    if (!s.mde?.isPreviewActive()) return;
+    const preview = s.cm.getWrapperElement().lastChild;
+    const top = preview.scrollTop;
+    const html = s.mde.options.previewRender(s.cm.getValue(), preview);
+    if (html != null) preview.innerHTML = html;
+    preview.scrollTop = top;
   }
 
   function conflictBlocks(cm) {
