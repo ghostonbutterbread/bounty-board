@@ -493,6 +493,16 @@ test('the address wins over secondary text: one port shows in full at 1440 px, b
       await page.mouse.up();
       assert.equal(dragging,false);
     }
+    // A hidden drawer never keeps a stale cap (re-review N1): a re-fit while hidden clears it.
+    const capped=()=>page.evaluate(()=>document.querySelector('#term-drawer [data-term-head]').classList.contains('ports-squeeze'));
+    assert.equal(await capped(),true);
+    await page.evaluate(()=>{document.querySelector('#term-drawer').hidden=true;});
+    await page.setViewportSize({width:1400,height:900});
+    await page.waitForTimeout(500);
+    assert.equal(await capped(),false,'a re-fit while the drawer is hidden removes the cap');
+    await page.evaluate(()=>{document.querySelector('#term-drawer').hidden=false;});
+    await page.setViewportSize({width:1440,height:900});
+    await page.waitForFunction(()=>document.querySelector('#term-drawer [data-term-head]').classList.contains('ports-squeeze'),null,{timeout:5000});
     // Ports gone: the secondary text gets its full width back.
     setPorts(info,[]);
     await page.waitForFunction(()=>window.BoardPorts.ports.length===0,null,{timeout:15000});

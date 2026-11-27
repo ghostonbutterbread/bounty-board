@@ -116,6 +116,9 @@
   function fitChips(slot) {
     const head = slot.closest('[data-term-head]');
     const first = Math.min(CHIPS_MAX, ports.length);
+    // Every fit starts from the uncapped header, and a hidden drawer never keeps a stale cap.
+    head?.classList.remove('ports-squeeze');
+    head?.style.removeProperty('--ports-sub-max');
     if (!head || !head.offsetParent) { renderChips(slot, first, 'normal'); return; }
     // The address wins over secondary text: in the one-line headers (bottom, top, maximized) the
     // session text and steps summary ([data-term-sub], which carries the full text in its title)
@@ -123,8 +126,6 @@
     // Side docks keep that text on their second row and phones wrap it: nothing to gain there.
     const sub = head.querySelector('[data-term-sub]');
     const squeezable = !!sub && window.innerWidth > 700 && !head.closest('.term-drawer')?.matches('[data-dock="left"],[data-dock="right"]');
-    head.classList.remove('ports-squeeze');
-    head.style.removeProperty('--ports-sub-max');
     const marks = [...head.querySelectorAll('[data-term-dock], .term-actions, [data-term-sub], [data-term-status]')];
     const others = [...head.querySelectorAll('.term-grip, .term-title, [data-term-status], [data-term-flash], [data-term-dock], [data-term-sub], .term-actions, [data-term-slot]')].filter(el => el !== slot);
     const hit = (a, b) => a.width > 0 && b.width > 0 && a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
