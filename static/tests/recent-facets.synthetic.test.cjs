@@ -57,7 +57,7 @@ test('Recent filter bar: dropdowns with counts, OR within and AND across facets,
   assert.equal(await page.locator('[data-facet-open="sev"]').getAttribute('aria-haspopup'),'true');
   // Class column: category label, subclass muted, raw class in the tooltip; unmapped rows say No finding.
   const row=page.locator(`.recent-table tr[data-path="${F002}"]`);
-  assert.equal(await row.locator('td.recent-class').innerText(),'Broken Access Control IDOR / object-level');
+  assert.equal(await row.locator('td.recent-class').innerText(),'Broken Access Control\nIDOR / object-level');
   assert.equal(await row.locator('.recent-class-label').getAttribute('title'),'Recorded class: idor');
   assert.equal(await page.locator('.recent-table tr[data-program="web_bounty/orchard"][data-path="scratch/unmapped-notes.md"] td.recent-class').innerText(),'No finding');
   // Class dropdown: counts, checking applies at once and keeps the popover open.
@@ -224,4 +224,16 @@ test('Default Submissions empty state, and the bar at 375 px: wraps, popover ins
     const b=await page.locator(`[data-facet-open="${key}"]`).boundingBox();
     assert.ok(b.x>=0 && b.x+b.width<=375,`${key} button fits`);
   }
+}));
+
+// Review round 1, R1: rows whose finding is not in the loaded workspace (cold start,
+// summary mode) are built from the server's item.finding; under a Class filter they
+// must not be drawn as "No longer matches".
+test('R1: cold-start rows are not falsely "No longer matches" under a class filter',{timeout:90000},()=>withBoard('readonly',async({page,url})=>{
+  await page.evaluate(()=>{window.BoardFindingActions.entry=()=>null;}); // finding not in the loaded workspace
+  await page.goto(`${url}#/recent?within=all&class=xss&order=newest`);
+  await page.locator(`.recent-table tr[data-path="${REPORT}"]`).waitFor();
+  const stale=await page.locator('.recent-table tr[data-stale="true"]').evaluateAll(rs=>rs.map(r=>r.dataset.path));
+  assert.deepEqual(stale,[],'the server returned these rows for class=xss');
+  assert.doesNotMatch(await page.locator('[data-recent-status]').innerText(),/no longer match/);
 }));

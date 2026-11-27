@@ -32,6 +32,8 @@
   {"name": "class junk placeholder", "finding": {"class_name": "short vulnerability label"}, "submission": "not_submitted", "severity": "unknown", "class": "unclassified"},
   {"name": "class no rule", "finding": {"class_name": "zzz mystery"}, "submission": "not_submitted", "severity": "unknown", "class": "unclassified"},
   {"name": "class not a string", "finding": {"class_name": 7}, "submission": "not_submitted", "severity": "unknown", "class": "unclassified"},
-  {"name": "class ssrf", "finding": {"class_name": "ssrf"}, "submission": "not_submitted", "severity": "unknown", "class": "ssrf"}
+  {"name": "class ssrf", "finding": {"class_name": "ssrf"}, "submission": "not_submitted", "severity": "unknown", "class": "ssrf"},
+  {"name": "server item.finding shape (cold-start row)", "finding": {"fid": "F001", "id": "F001", "severity": "HIGH", "severity_key": "high", "submission": {"state": "submitted", "result": null}, "submission_status": null, "class": {"raw": "stored-xss", "category": "xss", "subclass": "stored", "label": "Cross-Site Scripting", "subclass_label": "Stored"}}, "submission": "submitted", "severity": "high", "class": "xss"},
+  {"name": "server shape without a recorded class", "finding": {"fid": "F002", "severity": "low", "severity_key": "low", "submission": null, "class": {"raw": null, "category": "unclassified", "subclass": null, "label": "Unclassified", "subclass_label": null}}, "submission": "not_submitted", "severity": "low", "class": "unclassified"}
  ]
 }

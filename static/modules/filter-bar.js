@@ -53,7 +53,10 @@
   // {raw, category, subclass, label, subclass_label}; the browser rows carry `class`, the ledger `class_name`.
   function classInfo(finding) {
     if (finding == null) return null;
-    const raw = finding.class !== undefined ? finding.class : finding.class_name;
+    let raw = finding.class !== undefined ? finding.class : finding.class_name;
+    // A cold-start row is a copy of the server's item.finding, where class is {raw, category, ...}:
+    // bucket its recorded raw class, exactly as the server did.
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) raw = raw.raw;
     const t = tax();
     const result = t && t.ready() ? t.normalizeClass(typeof raw === 'string' ? raw : null) : {category: UNCLASSIFIED, subclass: null, label: 'Unclassified'};
     const [label, subLabel] = String(result.label).split(' > ');

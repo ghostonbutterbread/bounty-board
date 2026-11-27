@@ -38,3 +38,13 @@ test('labels match finding_facets.py', () => {
   const py = require('node:fs').readFileSync(require('node:path').join(__dirname, '../../finding_facets.py'), 'utf8');
   for (const [key, label] of [...rail.SUBMISSIONS, ...rail.SEVERITIES]) assert.ok(py.includes(key === 'none' ? `(NONE, '${label}')` : `('${key}', '${label}')`), `${key} ${label}`);
 });
+// Review round 1, R1: a cold-start row is a copy of the server's item.finding,
+// where class is an object; it must bucket into the class the server used.
+test('R1: a row built from item.finding keeps the server class key', () => {
+  const serverFinding = {fid: 'F001', severity: 'HIGH', submission: {state: 'not_submitted'},
+    class: {raw: 'xss', category: 'xss', subclass: 'other', label: 'Cross-Site Scripting', subclass_label: 'Other'}, severity_key: 'high'};
+  const row = {...serverFinding, id: 'F001'}; // recent-reports.js entryFor() fallback
+  assert.equal(rail.keys.classKey(row), 'xss');
+  assert.equal(rail.keys.severity(row), 'high');
+  assert.equal(rail.keys.submission(row), 'not_submitted');
+});

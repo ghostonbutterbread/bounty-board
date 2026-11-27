@@ -57,6 +57,8 @@ def class_info(finding):
     if finding is None:
         return None
     raw = finding.get('class_name', finding.get('class'))
+    if isinstance(raw, dict):  # an item.finding from /api/recent-reports: {raw, category, ...}
+        raw = raw.get('raw')
     result = taxonomy.normalize_class(raw if isinstance(raw, str) else None)
     category, subclass = result['category'], result['subclass']
     label = result['label'].split(' > ')[0]

@@ -60,7 +60,11 @@
 .recent-toolbar .recent-filter{flex:1 1 200px;max-width:320px}
 .recent-table td.recent-class{min-width:120px;max-width:200px;font-size:var(--text-sm)}
 .recent-class-label{color:var(--text)}
-.recent-class-sub{color:var(--text-3)}
+/* Category over subclass, like report title over path. */
+.recent-class-label{display:block}
+.recent-class-cat{display:block}
+.recent-class-sub{display:block;font-size:var(--text-xs);color:var(--text-3)}
+.recent-where .recent-class-label{display:inline}
 .recent-where .recent-class-label{color:inherit}
 .recent-panel{container:results / inline-size}
 @container results (max-width: 1080px){

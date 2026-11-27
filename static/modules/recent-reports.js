@@ -104,7 +104,7 @@
     const c = item.finding?.class;
     if (!item.finding) return '<span class="hint">No finding</span>';
     if (!c || c.category === 'unclassified') return `<span class="hint"${c?.raw ? ` title="${esc(`Recorded class: ${c.raw}`)}"` : ''}>Unclassified</span>`;
-    return `<span class="recent-class-label" title="${esc(`Recorded class: ${c.raw ?? ''}`)}">${esc(c.label)}${c.subclass_label && c.subclass !== 'other' ? ` <span class="recent-class-sub">${esc(c.subclass_label)}</span>` : ''}</span>`;
+    return `<span class="recent-class-label" title="${esc(`Recorded class: ${c.raw ?? ''}`)}"><span class="recent-class-cat">${esc(c.label)}</span>${c.subclass_label && c.subclass !== 'other' ? `<span class="recent-class-sub">${esc(c.subclass_label)}</span>` : ''}</span>`;
   };
   const classText = item => item.finding?.class && item.finding.class.category !== 'unclassified' ? item.finding.class.label : '';
   const programLabel = id => { const p = ctx.programs().find(x => String(x.id) === id); return p ? String(p.name || p.id) : id.split('/').slice(1).join('/') || id; };

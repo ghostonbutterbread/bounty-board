@@ -655,7 +655,6 @@ class SearchIndex:
                         sev, cls, sub = finding_facets.NONE, finding_facets.NONE, finding_facets.NONE
                     else:
                         sev, cls, sub = owner['severity_key'], owner['class_info']['category'], owner['submission_key']
-                    present.add(cls)
                     ok = {'program': in_program, 'lane': in_lane, 'sev': not wanted_sev or sev in wanted_sev,
                           'cls': not wanted_cls or cls in wanted_cls, 'sub': not wanted_sub or sub in wanted_sub}
                     every = all(ok.values())
@@ -663,6 +662,7 @@ class SearchIndex:
                         if every:
                             hidden.append(((r['mtime'], pid, l['lane'], rel), sev, cls, None))
                         continue
+                    present.add(cls)  # after the N/A check: hidden reports add no class option
                     for facet, key in (('program', pid), ('lane', l['lane']), ('sev', sev), ('cls', cls), ('sub', sub)):
                         if all(v for k, v in ok.items() if k != facet):
                             counts[facet][key] = counts[facet].get(key, 0) + 1

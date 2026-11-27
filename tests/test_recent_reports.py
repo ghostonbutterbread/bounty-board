@@ -640,6 +640,14 @@ class FacetIndexTests(unittest.TestCase):
         sev = {f['key']: f['count'] for f in self.index.recent(na_keys=keys, hide_na=True)['facets']['severities']}
         self.assertEqual((sev['high'], sev['none']), (2, 1), 'hidden N/A rows are left out of facets')
 
+    def test_hidden_na_class_not_listed(self):
+        # Review round 1, R2: a class seen only in a hidden N/A report is not a class option.
+        key = 'web_bounty/facetco/web/' + FID['F103']
+        out = self.index.recent(limit=200, na_keys={key}, hide_na=True)
+        self.assertEqual(out['na_hidden'], 1)
+        self.assertNotIn('ssrf', [c['key'] for c in out['facets']['classes']])
+        self.assertIn('ssrf', [c['key'] for c in self.index.recent(limit=200, na_keys={key})['facets']['classes']])
+
     def test_normalized_once_per_ledger_change(self):
         from unittest import mock
         import search_index
