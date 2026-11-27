@@ -64,6 +64,7 @@
   function hrefFor(target={}) {
     if(!target || typeof target!=='object' || target.view==='dashboard')return '#/dashboard';
     if(target.view==='recent')return recentRoute(target.query);
+    if(target.view==='submissions')return submissionsRoute(target.query);
     if(target.view==='recon')return reconRoute(target.query);
     if(target.view==='settings')return '#/settings';
     const program=target.program==null ? state.program : String(target.program);
@@ -464,7 +465,7 @@
   // the Recent filters without a render, so they are also refreshed just before
   // the pointer or keyboard can use them (hover status, middle-click, menu).
   function syncNavLinks() {
-    document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('href',b.dataset.view==='recent' ? recentRoute(state.recentQuery) : b.dataset.view==='recon' ? reconRoute(state.reconQuery) : b.dataset.view==='program' ? programRoute() : b.dataset.view==='settings' ? '#/settings' : '#/dashboard'));
+    document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('href',b.dataset.view==='recent' ? recentRoute(state.recentQuery) : b.dataset.view==='submissions' ? submissionsRoute(state.submissionsQuery) : b.dataset.view==='recon' ? reconRoute(state.reconQuery) : b.dataset.view==='program' ? programRoute() : b.dataset.view==='settings' ? '#/settings' : '#/dashboard'));
   }
   for(const type of ['pointerover','pointerdown','focusin','contextmenu'])document.querySelector('.sidebar .nav')?.addEventListener(type,syncNavLinks,true);
   document.querySelectorAll('[data-view]').forEach(link => link.addEventListener('click', event => {if(!plainClick(event))return;event.preventDefault();state.view=link.dataset.view;state.routeNotice='';routePush=true;render();}));
@@ -1776,7 +1777,7 @@
   function pageTitle() {
     if(state.loading)return 'Bounty Board';
     if(state.error)return 'Workspace unavailable · Bounty Board';
-    const views={dashboard:'Dashboard',recent:'Recent reports',recon:'Recon intel',settings:'Settings'};
+    const views={dashboard:'Dashboard',recent:'Recent reports',submissions:'Submissions',recon:'Recon intel',settings:'Settings'};
     if(views[state.view])return `${views[state.view]} · Bounty Board`;
     const program=currentProgram();if(!program)return 'Programs · Bounty Board';
     const report=state.section==='reports' && state.report ? reportById(state.report) : null;
@@ -1801,12 +1802,12 @@
     portfolioButton.disabled=!!state.data?._portfolioLoading;
     document.querySelectorAll('[data-view]').forEach(b=>{const active=b.dataset.view===state.view;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
     syncNavLinks();
-    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':state.view==='recon'?'Recon intel':state.view==='settings'?'Settings':'Programs';
+    document.querySelector('#breadcrumb').textContent=state.view==='dashboard'?'Dashboard':state.view==='recent'?'Recent reports':state.view==='submissions'?'Submissions':state.view==='recon'?'Recon intel':state.view==='settings'?'Settings':'Programs';
     const trail=document.querySelector('#breadcrumb-trail'), crumbProgram=state.view==='program' && !state.loading ? currentProgram() : null;
     if(trail)trail.innerHTML=crumbProgram ? [programLabel(crumbProgram),state.lane,(sections.find(([k])=>k===state.section)||[])[1]].filter(Boolean).map(part=>`<span class="sep" aria-hidden="true">/</span> <span class="crumb-current">${esc(part)}</span>`).join(' ') : '';
     if(state.loading) app.innerHTML=skeleton();
     else if(state.error) app.innerHTML=`<div class="panel empty error-state" role="alert">${icon('exclamation-circle')}<h2>Workspace unavailable</h2><p>${esc(state.error)}</p></div>`;
-    else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():state.view==='recon'?reconView():state.view==='settings'?settingsView():workspace();
+    else app.innerHTML=state.view==='dashboard'?dashboard():state.view==='recent'?recentView():state.view==='submissions'?submissionsView():state.view==='recon'?reconView():state.view==='settings'?settingsView():workspace();
     document.title=pageTitle();
     for(const old of keptHosts){const fresh=app.querySelector(`#${old.id}`);if(fresh && ['family','program','lane','path','reportId'].every(k=>fresh.dataset[k]===old.dataset[k]))fresh.replaceWith(old);}
     const reportList=app.querySelector('.report-links');if(reportList && reportListScroll)reportList.scrollTop=reportListScroll;
@@ -1846,6 +1847,12 @@
   // fills #recent-reports-host (filters, list, paging) from /api/recent-reports.
   function recentView() {
     return `${title('Recent reports','Reports across every program and lane, by last modified time.')}<div class="stack">${rootWarning()}<div id="recent-reports-host"><div class="panel state">Loading recent reports…</div></div></div>`;
+  }
+  // Submissions view (feat/board-recent-facets): the page frame only; recent-reports.js
+  // fills #submissions-host with its Recent list in "submitted" mode (submitted, valid
+  // and duplicate reports) and owns the #/submissions?<query> keys.
+  function submissionsView() {
+    return `${title('Submissions','Submitted reports across every program and lane: awaiting a result, valid or duplicate.')}<div class="stack">${rootWarning()}<div id="submissions-host"><div class="panel state">Loading submitted reports…</div></div></div>`;
   }
   // Recon intel view: the page frame only; static/modules/recon-intel.js fills
   // #recon-intel-host from /api/recon/* and owns the #/recon?<query> keys.
@@ -1892,12 +1899,14 @@
   }
   function recentRoute(query) { return `#/recent${query ? '?'+String(query) : ''}`; }
   function reconRoute(query) { return `#/recon${query ? '?'+String(query) : ''}`; }
+  function submissionsRoute(query) { return `#/submissions${query ? '?'+String(query) : ''}`; }
   function programRoute() {
     if(!state.program)return '#/programs';
     return `#/programs/${encodeURIComponent(state.program)}/${encodeURIComponent(state.lane)}/${state.section}${state.section==='reports' && state.report ? '/'+encodeURIComponent(state.report) : state.section==='scope' && state.scopeQuery ? '?'+String(state.scopeQuery) : ''}`;
   }
   function routeFor() {
     if(state.view==='recent')return recentRoute(state.recentQuery);
+    if(state.view==='submissions')return submissionsRoute(state.submissionsQuery);
     if(state.view==='recon')return reconRoute(state.reconQuery);
     if(state.view==='settings')return '#/settings';
     if(state.view!=='program')return '#/dashboard';
@@ -1907,6 +1916,7 @@
     const raw=String(hash||'').replace(/^#\/?/,''), mark=raw.indexOf('?');
     if((mark<0 ? raw : raw.slice(0,mark))==='recent')return {view:'recent',recentQuery:mark<0 ? '' : raw.slice(mark+1)};
     if((mark<0 ? raw : raw.slice(0,mark))==='recon')return {view:'recon',reconQuery:mark<0 ? '' : raw.slice(mark+1)};
+    if((mark<0 ? raw : raw.slice(0,mark))==='submissions')return {view:'submissions',submissionsQuery:mark<0 ? '' : raw.slice(mark+1)};
     // Program routes encode every path part, so a raw "?" starts the Scope section's query.
     const path=raw.startsWith('programs/') && mark>=0 ? raw.slice(0,mark) : raw, query=path===raw ? '' : raw.slice(mark+1);
     const parts=path.split('/').map(part=>{try {return decodeURIComponent(part);} catch {return '';}});
@@ -1929,6 +1939,7 @@
     if(next.view)state.view=next.view;
     if(next.view==='recent' && typeof next.recentQuery==='string')state.recentQuery=next.recentQuery;
     if(next.view==='recon' && typeof next.reconQuery==='string')state.reconQuery=next.reconQuery;
+    if(next.view==='submissions' && typeof next.submissionsQuery==='string')state.submissionsQuery=next.submissionsQuery;
     if(typeof next.scopeQuery==='string')state.scopeQuery=next.scopeQuery;
     if(next.program!==undefined && next.program!==state.program){
       ++laneGeneration;state.program=next.program;state.lane=next.lane||'';state.report='';state.filters=emptyFilters();normalizeSelection();
@@ -2112,6 +2123,7 @@
     state.view=initialRoute.view;
     if(initialRoute.view==='recent')state.recentQuery=initialRoute.recentQuery;
     if(initialRoute.view==='recon')state.reconQuery=initialRoute.reconQuery;
+    if(initialRoute.view==='submissions')state.submissionsQuery=initialRoute.submissionsQuery;
     if(initialRoute.view==='program' && initialRoute.program){state.program=initialRoute.program;state.lane=initialRoute.lane;state.section=initialRoute.section;state.report=initialRoute.report;state.linkedReport=initialRoute.report;state.highlight=initialRoute.highlight||'';state.scopeQuery=initialRoute.scopeQuery||'';state.scrollToHighlight=!!initialRoute.highlight;state.programOrigin='route';}
   }
   // Public UI helpers for feature modules (see style.css header for tokens).

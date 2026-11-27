@@ -69,7 +69,7 @@ test('evidence is absent from the Reports list, picker, Recent and search; the s
   await until(async()=>(await page.locator('.recent-table [data-recent-row]').count())===REPORTS.length,'recent rows');
   assert.deepEqual((await page.locator('.recent-table [data-recent-row]').evaluateAll(rs=>rs.map(r=>r.dataset.path))).sort(),REPORTS.slice().sort());
   // Including generated and _meta files still never shows evidence.
-  await page.locator('#recent-nav').check();
+  await page.locator('[data-facet-open="opts"]').click();await page.locator('#recent-nav').check();await page.keyboard.press('Escape'); // filter bar (feat/board-recent-facets)
   await page.waitForTimeout(800);
   for(const p of EVIDENCE)assert.equal(await page.locator(`.recent-table [data-recent-row][data-path="${p}"]`).count(),0,p);
 

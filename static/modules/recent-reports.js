@@ -19,7 +19,12 @@
  * (BoardFindingActions, same write paths, revisions and Undo) and a context
  * menu; every row gets the N/A toggle (report-na.js). N/A rows are hidden by
  * default ("Hide N/A", hide_na=1 on the request, `na=show` in the URL when off),
- * with "N hidden · Show". */
+ * with "N hidden · Show".
+ * Facets (feat/board-recent-facets): the filters live in the shared filter rail
+ * (filter-rail.js): Submission, Severity, Vulnerability class, Modified, Program,
+ * Lane and Report options, with counts from the server's facets (each ignoring
+ * its own filter). URL keys sub, sev, class and lane repeat; order is newest,
+ * oldest, severity or class. A Class column shows the normalized category. */
 (() => {
   'use strict';
   const PREFS = 'bounty-board-recent-reports';
@@ -29,71 +34,20 @@
   const DEFAULT_WINDOW = '7d';
   const MAX_PAGE = 20000; // the server accepts offsets up to 1,000,000
   let ctx = null;
-  const view = {window: DEFAULT_WINDOW, programs: [], lane: '', q: '', order: 'newest', nav: false, hideNa: true, offset: 0,
-    data: null, at: 0, source: null, loading: false, error: '', seq: 0, controller: null, retry: 0, timer: 0, qTimer: 0};
+  const ORDERS = [['newest', 'Newest first'], ['oldest', 'Oldest first'], ['severity', 'Severity'], ['class', 'Class']];
+  const FB = () => window.BoardFilterBar;
   const panel = {data: null, at: 0, source: null, loading: false, error: '', seq: 0, waitTimer: 0, waited: 0, retry: 0, showNa: false};
   // #recon-reports-host (Recon program page): the same rows, one program and lane.
   const scoped = {data: null, at: 0, key: '', loading: false, error: '', seq: 0, retry: 0, showNa: false};
   const SCOPED_LIMIT = 20;
   // Which list a row or button belongs to: the dashboard panel, the Recon reports panel or the view.
-  const scopeOf = node => node.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : node.closest('#recon-reports-host') ? '#recon-reports-host' : '#recent-reports-host';
+  const scopeOf = node => node.closest('#dashboard-recent-host') ? '#dashboard-recent-host' : node.closest('#recon-reports-host') ? '#recon-reports-host' : node.closest('#submissions-host') ? '#submissions-host' : '#recent-reports-host';
   const PANEL_NA = 'bounty-board-recent-panel-show-na'; // per browser, like the view's filters
   try { panel.showNa = localStorage.getItem(PANEL_NA) === '1'; } catch {}
   // Rows for mapped findings that are not in the loaded workspace data yet
   // (cold start): one shared object per finding, so the view and the panel
   // show the same values after a save.
   const fallback = new Map();
-
-  try {
-    const saved = JSON.parse(localStorage.getItem(PREFS) || 'null');
-    if (saved && typeof saved === 'object') {
-      if (WINDOWS.some(([k]) => k === saved.window)) view.window = saved.window;
-      if (saved.order === 'oldest') view.order = 'oldest';
-      view.nav = saved.nav === true;
-      view.hideNa = saved.hideNa !== false;
-      if (Array.isArray(saved.programs)) view.programs = saved.programs.filter(p => typeof p === 'string').slice(0, 100);
-      if (LANES.includes(saved.lane)) view.lane = saved.lane;
-    }
-  } catch {}
-  const savePrefs = () => { try { localStorage.setItem(PREFS, JSON.stringify({window: view.window, order: view.order, nav: view.nav, hideNa: view.hideNa, programs: view.programs, lane: view.lane})); } catch {} };
-
-  // ---- URL state -----------------------------------------------------------
-  function queryFor() {
-    const params = new URLSearchParams({within: view.window});
-    for (const p of view.programs) params.append('program', p);
-    if (view.lane) params.set('lane', view.lane);
-    if (view.q.trim()) params.set('q', view.q.trim().slice(0, 200));
-    params.set('order', view.order);
-    if (view.nav) params.set('nav', '1');
-    if (!view.hideNa) params.set('na', 'show');
-    const page = Math.floor(view.offset / PAGE) + 1;
-    if (page > 1) params.set('page', String(page));
-    return params.toString();
-  }
-  function applyQuery(query) {
-    const params = new URLSearchParams(query);
-    const known = new Set(ctx.programs().map(p => String(p.id)));
-    const clean = value => String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
-    const within = params.get('within');
-    view.window = WINDOWS.some(([k]) => k === within) ? within : DEFAULT_WINDOW;
-    view.programs = [...new Set(params.getAll('program').map(clean).filter(p => p && p.length <= 200 && (!known.size || known.has(p))))].slice(0, 100);
-    view.lane = LANES.includes(params.get('lane')) ? params.get('lane') : '';
-    view.q = clean(params.get('q') || '').slice(0, 200);
-    view.order = params.get('order') === 'oldest' ? 'oldest' : 'newest';
-    view.nav = params.get('nav') === '1';
-    view.hideNa = params.get('na') !== 'show';
-    const page = /^[0-9]{1,6}$/.test(params.get('page') || '') ? Number(params.get('page')) : 1;
-    view.offset = page > 1 && page <= MAX_PAGE ? (page - 1) * PAGE : 0;
-  }
-  // Keeps ctx.state.recentQuery (what app.js puts in #/recent) equal to the
-  // current filters; writes the address bar only while the view is shown.
-  function writeUrl(push = false) {
-    const query = queryFor();
-    ctx.state.recentQuery = query;
-    if (ctx.state.view !== 'recent') return;
-    const next = ctx.hrefFor({view: 'recent', query});
-    if (location.hash !== next) { try { history[push ? 'pushState' : 'replaceState'](null, '', next); } catch {} }
-  }
 
   const esc = value => ctx.esc(value);
   const icon = name => `<i class="fa fa-${name}" aria-hidden="true"></i>`;
@@ -140,6 +94,14 @@
   const findingCell = item => item.finding
     ? `<span class="recent-finding-cell"><a class="link-button id-link" href="${esc(ctx.hrefFor({program: item.program, lane: item.lane, section: 'findings', finding: item.finding.fid}))}" title="${esc(item.finding.title || '')}">${esc(item.finding.fid)}</a>${pickHtml(item, 'sev')}${pickHtml(item, 'sub')}</span>`
     : (item.owner_fids && item.owner_fids.length ? `<span class="id">${esc(item.owner_fids[0])}</span>` : '<span class="hint">None</span>');
+  // Class column: normalized category, subclass muted, raw class in the tooltip.
+  const classCell = item => {
+    const c = item.finding?.class;
+    if (!item.finding) return '<span class="hint">No finding</span>';
+    if (!c || c.category === 'unclassified') return `<span class="hint"${c?.raw ? ` title="${esc(`Recorded class: ${c.raw}`)}"` : ''}>Unclassified</span>`;
+    return `<span class="recent-class-label" title="${esc(`Recorded class: ${c.raw ?? ''}`)}">${esc(c.label)}${c.subclass_label && c.subclass !== 'other' ? ` <span class="recent-class-sub">${esc(c.subclass_label)}</span>` : ''}</span>`;
+  };
+  const classText = item => item.finding?.class && item.finding.class.category !== 'unclassified' ? item.finding.class.label : '';
   const programLabel = id => { const p = ctx.programs().find(x => String(x.id) === id); return p ? String(p.name || p.id) : id.split('/').slice(1).join('/') || id; };
 
   async function fetchRecent(params, signal) {
@@ -152,86 +114,6 @@
     return body;
   }
 
-  // ---- view --------------------------------------------------------------
-  function viewParams() {
-    const params = new URLSearchParams({limit: String(PAGE), offset: String(view.offset), order: view.order});
-    const seconds = WINDOWS.find(([k]) => k === view.window)?.[2];
-    if (seconds) params.set('within', String(seconds));
-    for (const p of view.programs) params.append('program', p);
-    if (view.lane) params.set('lane', view.lane);
-    if (view.q.trim()) params.set('q', view.q.trim().slice(0, 200));
-    if (view.nav) params.set('nav', '1');
-    if (view.hideNa) params.set('hide_na', '1');
-    return params;
-  }
-  async function loadView({quiet = false} = {}) {
-    clearTimeout(view.timer);
-    const mine = ++view.seq;
-    view.controller?.abort(); view.controller = new AbortController();
-    view.loading = true; view.source = ctx.state.data;
-    if (!quiet) paintStatus();
-    try {
-      const body = await fetchRecent(viewParams(), view.controller.signal);
-      if (mine !== view.seq) return;
-      if (body.offset > 0 && !body.items.length && body.total > 0) { view.offset = Math.floor((body.total - 1) / PAGE) * PAGE; view.loading = false; writeUrl(); return loadView({quiet}); }
-      view.data = body; view.at = Date.now(); view.error = '';
-      if (body.index_state === 'building' && view.retry++ < 120) view.timer = setTimeout(() => loadView({quiet: true}), 1000);
-      else if (body.index_state !== 'building') view.retry = 0;
-    } catch (error) {
-      if (mine !== view.seq || error.name === 'AbortError') return;
-      if (error.status === 503 && view.retry++ < 10) { view.error = 'Recent reports are busy. Retrying.'; view.timer = setTimeout(() => loadView({quiet: true}), 1000); }
-      else view.error = 'Recent reports are unavailable. Use Refresh to try again.';
-    } finally {
-      if (mine === view.seq) { view.loading = false; paintView(); }
-    }
-  }
-  function changed() { view.offset = 0; view.retry = 0; savePrefs(); writeUrl(); paintControls(); loadView(); }
-
-  function controlsHtml() {
-    const windowButtons = WINDOWS.map(([key, label]) => `<button type="button" data-recent-window="${key}" aria-pressed="${view.window === key}">${esc(label)}</button>`).join('');
-    const lanes = [...new Set([...LANES.filter(l => ctx.programs().some(p => (p.lanes || []).some(x => x.name === l))), ...(view.lane ? [view.lane] : [])])];
-    const programsLabel = view.programs.length ? (view.programs.length === 1 ? programLabel(view.programs[0]) : `${view.programs.length} programs`) : 'All programs';
-    const chips = view.programs.map(p => `<span class="chip"><span class="chip-key">Program</span><span>${esc(programLabel(p))}</span><button type="button" data-recent-remove-program="${esc(p)}" aria-label="Remove program filter ${esc(programLabel(p))}">${icon('times')}</button></span>`).join('');
-    const filtered = view.programs.length || view.lane || view.q || view.window !== DEFAULT_WINDOW;
-    return `<div class="recent-toolbar">
-      <div class="segmented" role="group" aria-label="Modified within">${windowButtons}</div>
-      <button type="button" class="button sm recent-programs-trigger" data-recent-programs aria-haspopup="true" aria-expanded="false" aria-label="Filter programs: ${esc(programsLabel)}">${icon('folder-o')}<span>${esc(programsLabel)}</span>${icon('angle-down')}</button>
-      <select id="recent-lane" class="recent-lane" aria-label="Lane"><option value="">All lanes</option>${lanes.map(l => `<option value="${esc(l)}"${l === view.lane ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
-      <div class="input-icon recent-filter">${icon('search')}<input id="recent-filter" type="search" aria-label="Filter recent reports by title or path" placeholder="Filter by title or path" value="${esc(view.q)}" autocomplete="off"></div>
-      <button type="button" class="button sm" data-recent-order aria-label="Sort: ${view.order === 'oldest' ? 'oldest first' : 'newest first'}">${icon(view.order === 'oldest' ? 'sort-amount-asc' : 'sort-amount-desc')}<span>${view.order === 'oldest' ? 'Oldest first' : 'Newest first'}</span></button>
-      <label class="recent-nav"><input type="checkbox" id="recent-nav"${view.nav ? ' checked' : ''}> Include generated and _meta files</label>
-      <label class="recent-nav na-hide-toggle"><input type="checkbox" id="recent-hide-na"${view.hideNa ? ' checked' : ''}> Hide N/A</label>
-      <button type="button" class="button sm" data-recent-refresh>${icon('refresh')}<span>Refresh list</span></button>
-    </div>${chips || filtered ? `<div class="chips">${chips}${filtered ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>` : ''}`;
-  }
-  function statusHtml() {
-    const d = view.data, bits = [];
-    if (d) {
-      const first = d.total ? d.offset + 1 : 0, last = d.offset + d.items.length;
-      bits.push(d.total ? `Showing ${first} to ${last} of ${d.total} ${d.total === 1 ? 'report' : 'reports'}` : 'No reports match');
-      if (d.index_state === 'building') bits.push('the report index is still building, so the list may be incomplete');
-      if (d.na_available === false) bits.push('N/A marks are unavailable');
-      if (ctx.state.data?.root_instance && d.root_instance && ctx.state.data.root_instance !== d.root_instance) bits.push('the data root changed: refresh the board');
-    }
-    if (view.loading) bits.push(d ? 'updating' : 'Loading recent reports');
-    const hidden = view.hideNa && d?.na_hidden > 0 ? ` <span class="na-hidden-note">${d.na_hidden} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-recent-show-na>Show</button></span>` : '';
-    return `${esc(bits.join('. '))}${bits.length ? '.' : ''}${hidden}${view.error ? ` <span class="recent-error">${esc(view.error)}</span>` : ''}`;
-  }
-  function resultsHtml() {
-    const d = view.data;
-    if (!d) return view.error ? '' : '<div class="state">Loading recent reports…</div>';
-    if (!d.items.length) return `<div class="empty">${icon('inbox')}<strong>${d.index_state === 'building' ? 'Indexing reports…' : view.hideNa && d.na_hidden ? 'Every matching report is marked N/A.' : 'No reports match these filters.'}</strong>${view.programs.length || view.lane || view.q || view.window !== DEFAULT_WINDOW ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>`;
-    const rows = d.items.map(item => `<tr data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}>
-      <td class="recent-report"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-path">${esc(item.path)}</span>${updatedHtml(item)}</td>
-      <td><a class="link-button" href="${esc(programHref(item))}">${esc(item.program_name)}</a><span class="id">${esc(item.family)}</span></td>
-      <td>${esc(item.lane)}</td>
-      <td class="recent-finding">${findingCell(item)}</td>
-      <td class="date">${timeCell(item.modified, d)}</td>
-      <td class="recent-na">${naHtml(item)}</td></tr>`).join('');
-    const page = Math.floor(d.offset / PAGE) + 1, pages = Math.max(1, Math.ceil(d.total / PAGE));
-    const pager = pages > 1 ? `<nav class="recent-pager" aria-label="Recent reports pages"><button type="button" class="button sm" data-recent-page="-1"${d.offset ? '' : ' disabled'}>${icon('angle-left')}<span>Previous</span></button><span class="hint num">Page ${page} of ${pages}</span><button type="button" class="button sm" data-recent-page="1"${d.offset + PAGE < d.total ? '' : ' disabled'}><span>Next</span>${icon('angle-right')}</button></nav>` : '';
-    return `<div class="table-wrap"><table class="recent-table"><thead><tr><th>Report</th><th>Program</th><th>Lane</th><th>Finding</th><th class="date">Modified</th><th class="recent-na"><span class="sr-only">N/A</span></th></tr></thead><tbody>${rows}</tbody></table></div>${pager}`;
-  }
   // Background refreshes repaint rows; keep keyboard focus on the same control.
   function keepFocus(box, paint) {
     const active = document.activeElement;
@@ -244,74 +126,323 @@
     const again = [...box.querySelectorAll('[data-recent-row]')].find(r => r.dataset.path === path && r.dataset.program === program && r.dataset.lane === lane);
     again?.querySelector(which)?.focus();
   }
-  function paintControls() { const box = ctx.app.querySelector('[data-recent-controls]'); if (box) box.innerHTML = controlsHtml(); }
-  function paintStatus() { const box = ctx.app.querySelector('[data-recent-status]'); if (box) box.innerHTML = statusHtml(); }
-  function paintView() {
-    paintStatus();
-    const box = ctx.app.querySelector('[data-recent-results]'); if (box) keepFocus(box, () => { box.innerHTML = resultsHtml(); });
-  }
-  function mountView(host) {
-    const linked = ctx.state.recentQuery;
-    const fromLink = typeof linked === 'string' && linked !== '' && linked !== queryFor();
-    if (fromLink) { applyQuery(linked); view.retry = 0; }
-    writeUrl();
-    host.innerHTML = `<section class="panel recent-panel" aria-label="Recent reports list" data-na-scope="recent-view"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">Ordered by file modification time; a finding packet shows once, at its newest file. Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
-    host.onclick = onViewClick; host.onchange = onViewChange; host.oninput = onViewInput; host.oncontextmenu = onRowMenu; host.onkeydown = onRowKey;
-    if (fromLink || !view.data || view.source !== ctx.state.data || Date.now() - view.at > 10000) { view.retry = 0; loadView(); }
-  }
-  function onViewClick(event) {
-    const t = event.target.closest('button'); if (!t) return;
-    if (t.dataset.recentPick) return openPick(t);
-    if (t.hasAttribute('data-recent-show-na')) { view.hideNa = false; changed(); ctx.app.querySelector('#recent-hide-na')?.focus(); return; }
-    if (t.dataset.recentWindow) { view.window = t.dataset.recentWindow; changed(); }
-    else if (t.hasAttribute('data-recent-order')) { view.order = view.order === 'oldest' ? 'newest' : 'oldest'; changed(); ctx.app.querySelector('[data-recent-order]')?.focus(); }
-    else if (t.hasAttribute('data-recent-refresh')) { view.retry = 0; loadView(); }
-    else if (t.hasAttribute('data-recent-clear')) { view.window = DEFAULT_WINDOW; view.programs = []; view.lane = ''; view.q = ''; changed(); ctx.app.querySelector('#recent-filter')?.focus(); }
-    else if (t.dataset.recentRemoveProgram != null) { view.programs = view.programs.filter(p => p !== t.dataset.recentRemoveProgram); changed(); }
-    else if (t.dataset.recentPage) {
-      view.offset = Math.max(0, view.offset + Number(t.dataset.recentPage) * PAGE); writeUrl(true); loadView();
-      ctx.app.querySelector('.recent-panel')?.scrollIntoView({block: 'start'});
+  // ---- lists: the Recent view and the Submissions view -------------------------
+  // One code path, two instances with their own state, URL keys, memory and
+  // defaults. Submissions is Recent with the submission filter fixed to the
+  // submitted buckets (submitted, valid, duplicate; none checked = all three).
+  function createList(cfg) {
+    const L = {window: cfg.defaultWindow, programs: [], lanes: [], subs: [], sevs: [], classes: [], q: '', order: 'newest', nav: false, hideNa: true, offset: 0,
+      data: null, at: 0, source: null, loading: false, error: '', seq: 0, controller: null, retry: 0, timer: 0, qTimer: 0, keep: true, taxWaited: false};
+    const P = cfg.id; // id prefix for controls (#recent-filter, #submissions-filter, ...)
+    const subKeys = () => new Set(cfg.subOptions().map(([k]) => k));
+    const sevOptions = () => (FB()?.SEVERITIES || []).filter(([k]) => cfg.withNone || k !== FB().NONE);
+    const classOptionList = () => (FB()?.classOptions() || []).filter(([k]) => cfg.withNone || k !== FB().NONE);
+    const host = () => ctx.app.querySelector(cfg.host);
+    const inHost = selector => host()?.querySelector(selector) || null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(cfg.prefs) || 'null');
+      if (saved && typeof saved === 'object') {
+        if (WINDOWS.some(([k]) => k === saved.window)) L.window = saved.window;
+        if (ORDERS.some(([k]) => k === saved.order)) L.order = saved.order;
+        L.nav = saved.nav === true;
+        L.hideNa = saved.hideNa !== false;
+        const strings = value => Array.isArray(value) ? value.filter(v => typeof v === 'string').slice(0, 100) : [];
+        L.programs = strings(saved.programs);
+        L.lanes = Array.isArray(saved.lanes) ? strings(saved.lanes).filter(l => LANES.includes(l)) : LANES.includes(saved.lane) ? [saved.lane] : [];
+        // Facet keys are checked against the option lists once the taxonomy is ready (mount).
+        L.subs = strings(saved.subs); L.sevs = strings(saved.sevs); L.classes = strings(saved.classes);
+      }
+    } catch {}
+    const savePrefs = () => { try { localStorage.setItem(cfg.prefs, JSON.stringify({window: L.window, order: L.order, nav: L.nav, hideNa: L.hideNa, programs: L.programs, lanes: L.lanes, subs: L.subs, sevs: L.sevs, classes: L.classes})); } catch {} };
+    // Drop facet values that are not options (old prefs, edited links); true when something changed.
+    function validateFacets() {
+      const before = JSON.stringify([L.subs, L.sevs, L.classes]);
+      const keep = (values, allowed) => [...new Set(values)].filter(v => allowed.has(v));
+      L.subs = keep(L.subs, subKeys()); L.sevs = keep(L.sevs, new Set(sevOptions().map(([k]) => k))); L.classes = keep(L.classes, new Set(classOptionList().map(([k]) => k)));
+      return before !== JSON.stringify([L.subs, L.sevs, L.classes]);
     }
-    else if (t.hasAttribute('data-recent-programs')) openPrograms(t);
+
+    // ---- URL state ---------------------------------------------------------
+    function queryFor() {
+      const params = new URLSearchParams({within: L.window});
+      for (const v of L.subs) params.append('sub', v);
+      for (const v of L.sevs) params.append('sev', v);
+      for (const v of L.classes) params.append('class', v);
+      for (const p of L.programs) params.append('program', p);
+      for (const l of L.lanes) params.append('lane', l);
+      if (L.q.trim()) params.set('q', L.q.trim().slice(0, 200));
+      params.set('order', L.order);
+      if (L.nav) params.set('nav', '1');
+      if (!L.hideNa) params.set('na', 'show');
+      const page = Math.floor(L.offset / PAGE) + 1;
+      if (page > 1) params.set('page', String(page));
+      return params.toString();
+    }
+    function applyQuery(query) {
+      const params = new URLSearchParams(query);
+      const known = new Set(ctx.programs().map(p => String(p.id)));
+      const clean = value => String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+      const within = params.get('within');
+      L.window = WINDOWS.some(([k]) => k === within) ? within : cfg.defaultWindow;
+      L.programs = [...new Set(params.getAll('program').map(clean).filter(p => p && p.length <= 200 && (!known.size || known.has(p))))].slice(0, 100);
+      L.lanes = [...new Set(params.getAll('lane').filter(l => LANES.includes(l)))];
+      L.subs = params.getAll('sub').slice(0, 20); L.sevs = params.getAll('sev').slice(0, 20); L.classes = params.getAll('class').slice(0, 40);
+      validateFacets();
+      L.q = clean(params.get('q') || '').slice(0, 200);
+      L.order = ORDERS.some(([k]) => k === params.get('order')) ? params.get('order') : 'newest';
+      L.nav = params.get('nav') === '1';
+      L.hideNa = params.get('na') !== 'show';
+      const page = /^[0-9]{1,6}$/.test(params.get('page') || '') ? Number(params.get('page')) : 1;
+      L.offset = page > 1 && page <= MAX_PAGE ? (page - 1) * PAGE : 0;
+    }
+    // Keeps ctx.state[cfg.stateKey] (what app.js puts in the route) equal to the
+    // current filters; writes the address bar only while the view is shown.
+    function writeUrl(push = false) {
+      const query = queryFor();
+      ctx.state[cfg.stateKey] = query;
+      if (ctx.state.view !== cfg.view) return;
+      const next = ctx.hrefFor({view: cfg.view, query});
+      if (location.hash !== next) { try { history[push ? 'pushState' : 'replaceState'](null, '', next); } catch {} }
+    }
+
+    // ---- "No longer matches" -------------------------------------------------
+    // A pill edit can move a row out of the filter. Such a row stays where it is,
+    // dimmed, until the next filter change or "Refresh list" (also across polls).
+    const effectiveSubs = () => L.subs.length ? L.subs : cfg.baseSubs;
+    function matchesNow(item) {
+      if (!item.finding || !FB()) return true;
+      const row = entryFor(item)?.row; if (!row) return true;
+      const subs = effectiveSubs();
+      return (!subs.length || subs.includes(FB().keys.submission(row))) && (!L.sevs.length || L.sevs.includes(FB().keys.severity(row))) &&
+        (!L.classes.length || L.classes.includes(FB().keys.classKey(row)));
+    }
+    const itemKey = i => JSON.stringify([String(i.program), String(i.lane), i.path]);
+    function carryKept(body) {
+      if (!L.keep || !L.data || !body.items) return;
+      const fresh = new Set(body.items.map(itemKey));
+      L.data.items.forEach((item, index) => {
+        if (fresh.has(itemKey(item)) || matchesNow(item)) return;
+        body.items.splice(Math.min(index, body.items.length), 0, {...item, kept: true});
+      });
+    }
+
+    // ---- loading -------------------------------------------------------------
+    function params() {
+      const out = new URLSearchParams({limit: String(PAGE), offset: String(L.offset), order: L.order});
+      const seconds = WINDOWS.find(([k]) => k === L.window)?.[2];
+      if (seconds) out.set('within', String(seconds));
+      for (const p of L.programs) out.append('program', p);
+      for (const l of L.lanes) out.append('lane', l);
+      for (const v of effectiveSubs()) out.append('submission', v);
+      for (const v of L.sevs) out.append('severity', v);
+      for (const v of L.classes) out.append('class', v);
+      if (L.q.trim()) out.set('q', L.q.trim().slice(0, 200));
+      if (L.nav) out.set('nav', '1');
+      if (L.hideNa) out.set('hide_na', '1');
+      return out;
+    }
+    async function load({quiet = false} = {}) {
+      clearTimeout(L.timer);
+      const mine = ++L.seq;
+      L.controller?.abort(); L.controller = new AbortController();
+      L.loading = true; L.source = ctx.state.data;
+      if (!quiet) paintStatus();
+      try {
+        const body = await fetchRecent(params(), L.controller.signal);
+        if (mine !== L.seq) return;
+        if (body.offset > 0 && !body.items.length && body.total > 0) { L.offset = Math.floor((body.total - 1) / PAGE) * PAGE; L.loading = false; writeUrl(); return load({quiet}); }
+        carryKept(body);
+        L.keep = true;
+        L.data = body; L.at = Date.now(); L.error = '';
+        if (body.index_state === 'building' && L.retry++ < 120) L.timer = setTimeout(() => load({quiet: true}), 1000);
+        else if (body.index_state !== 'building') L.retry = 0;
+      } catch (error) {
+        if (mine !== L.seq || error.name === 'AbortError') return;
+        if (error.status === 503 && L.retry++ < 10) { L.error = 'Recent reports are busy. Retrying.'; L.timer = setTimeout(() => load({quiet: true}), 1000); }
+        else L.error = `${cfg.noun} are unavailable. Use Refresh to try again.`;
+      } finally {
+        if (mine === L.seq) { L.loading = false; paint(); }
+      }
+    }
+    // A filter, sort or page change, or Refresh list: kept rows leave.
+    function fresh() { L.keep = false; L.retry = 0; load(); }
+    function changed() { L.offset = 0; savePrefs(); writeUrl(); paintControls(); fresh(); }
+    const filtered = () => !!(L.programs.length || L.lanes.length || L.subs.length || L.sevs.length || L.classes.length || L.q || L.window !== cfg.defaultWindow);
+
+    // ---- filter bar ------------------------------------------------------------
+    function model() {
+      const f = L.data?.facets || {};
+      const counted = (list, key = 'key') => new Map((list || []).map(x => [String(x[key]), x.count]));
+      const subs = counted(f.submissions), sevs = counted(f.severities), programs = counted(f.programs, 'id'), lanes = counted(f.lanes, 'name');
+      const has = !!L.data;
+      const count = (map, key) => has ? (map.get(key) || 0) : undefined;
+      const classes = new Map((f.classes || []).map(c => [c.key, c]));
+      const classOptions = classOptionList().filter(([k]) => classes.has(k) || L.classes.includes(k))
+        .map(([value, label]) => ({value, label: classes.get(value)?.label || label, count: has ? (classes.get(value)?.count || 0) : undefined}));
+      const allPrograms = ctx.programs().map(p => ({value: String(p.id), label: String(p.name || p.id), search: `${p.id} ${p.family || ''}`, hint: String(p.id)}));
+      for (const id of L.programs) if (!allPrograms.some(p => p.value === id)) allPrograms.push({value: id, label: programLabel(id), hint: id});
+      const programOptions = allPrograms.map(o => ({...o, count: count(programs, o.value)}))
+        .sort((a, b) => (b.count || 0) - (a.count || 0) || a.label.localeCompare(b.label));
+      const laneNames = [...new Set([...LANES.filter(l => ctx.programs().some(p => (p.lanes || []).some(x => x.name === l))), ...L.lanes])];
+      const optsOff = !L.hideNa || L.nav;
+      return {view: cfg.id, groups: [
+        {key: 'sub', label: 'Submission', options: cfg.subOptions().map(([value, label]) => ({value, label, count: count(subs, value)})), selected: L.subs, note: cfg.subNote},
+        {key: 'sev', label: 'Severity', options: sevOptions().map(([value, label]) => ({value, label, count: count(sevs, value)})), selected: L.sevs},
+        {key: 'class', label: 'Class', search: true, options: classOptions, selected: L.classes},
+        {key: 'window', label: 'Modified', type: 'radio', defaultValue: cfg.defaultWindow, options: WINDOWS.map(([value, label]) => ({value, label, attrs: ` data-recent-window="${value}"`})), selected: [L.window]},
+        {key: 'program', label: 'Program', search: true, options: programOptions, selected: L.programs},
+        {key: 'lane', label: 'Lane', options: laneNames.map(l => ({value: l, label: l, count: count(lanes, l)})), selected: L.lanes},
+        {key: 'opts', label: 'Options', chips: false, clear: false, countSelections: false, active: optsOff, summaryOff: () => optsOff ? [!L.hideNa ? 'N/A shown' : '', L.nav ? 'generated' : ''].filter(Boolean).join(', ') : '', options: [
+          {value: 'hide_na', label: 'Hide N/A', attrs: ` id="${P}-hide-na"`},
+          {value: 'nav', label: 'Include generated and _meta files', attrs: ` id="${P}-nav"`}],
+        selected: [...(L.hideNa ? ['hide_na'] : []), ...(L.nav ? ['nav'] : [])]},
+      ]};
+    }
+    const FIELD = {sub: 'subs', sev: 'sevs', class: 'classes', program: 'programs', lane: 'lanes'};
+    function facetChange(group, values) {
+      if (group === 'window') L.window = WINDOWS.some(([k]) => k === values[0]) ? values[0] : cfg.defaultWindow;
+      else if (group === 'opts') { L.hideNa = values.includes('hide_na'); L.nav = values.includes('nav'); }
+      else if (FIELD[group]) L[FIELD[group]] = [...new Set(values)];
+      changed();
+    }
+    function clearFilters(group) {
+      if (group && FIELD[group]) L[FIELD[group]] = [];
+      else if (!group) { L.window = cfg.defaultWindow; L.programs = []; L.lanes = []; L.subs = []; L.sevs = []; L.classes = []; L.q = ''; }
+      changed();
+      if (!group) { FB()?.close(); const input = inHost(`#${P}-filter`); if (input) { input.value = ''; input.focus(); } }
+    }
+    function removeChip(button) {
+      const group = button.dataset.facetRemove, value = button.dataset.value;
+      if (group === 'window') L.window = cfg.defaultWindow;
+      else if (FIELD[group]) L[FIELD[group]] = L[FIELD[group]].filter(v => v !== value);
+      changed();
+      (inHost('[data-facet-remove]') || inHost(`#${P}-filter`))?.focus();
+    }
+    function openFacet(button) {
+      const key = button.dataset.facetOpen;
+      if (FB().openKey() === key) { FB().close(); button.focus(); return; }
+      FB().openFacet(button, model(), key, {change: facetChange, clear: clearFilters,
+        anchor: () => inHost(`[data-facet-open="${CSS.escape(key)}"]`)});
+    }
+
+    // ---- rendering ---------------------------------------------------------------
+    function controlsHtml() {
+      const m = FB() ? model() : null;
+      const sort = `<label class="recent-sort"><span>Sort</span><select id="${P}-order" aria-label="Sort">${ORDERS.map(([k, label]) => `<option value="${k}"${k === L.order ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>`;
+      return `<div class="recent-toolbar facet-toolbar"><div class="facet-bar-host" data-facet-bar>${m ? FB().barHtml(m) : ''}</div>
+        <div class="input-icon recent-filter">${icon('search')}<input id="${P}-filter" type="search" aria-label="${esc(cfg.searchLabel)}" placeholder="Filter by title or path" value="${esc(L.q)}" autocomplete="off"></div>
+        ${sort}
+        <button type="button" class="button sm" data-recent-refresh>${icon('refresh')}<span>Refresh list</span></button>
+      </div><div data-facet-chips>${chipsHtml(m)}</div>`;
+    }
+    const chipsHtml = m => (m ? FB().chipsHtml(m, {clearAttrs: 'data-recent-clear'}) : '') || (filtered() ? '<div class="chips facet-chips"><button type="button" class="link-button" data-facet-clear-all data-recent-clear>Clear filters</button></div>' : '');
+    function statusHtml() {
+      const d = L.data, bits = [];
+      if (d) {
+        const first = d.total ? d.offset + 1 : 0, last = d.offset + d.items.filter(i => !i.kept).length;
+        bits.push(d.total ? `Showing ${first} to ${last} of ${d.total} ${d.total === 1 ? 'report' : 'reports'}` : 'No reports match');
+        if (d.index_state === 'building') bits.push('the report index is still building, so the list may be incomplete');
+        if (d.na_available === false) bits.push('N/A marks are unavailable');
+        if (ctx.state.data?.root_instance && d.root_instance && ctx.state.data.root_instance !== d.root_instance) bits.push('the data root changed: refresh the board');
+        const stale = d.items.filter(i => i.kept || !matchesNow(i)).length;
+        if (stale) bits.push(`${stale} ${stale === 1 ? 'row no longer matches' : 'rows no longer match'} the filters and ${stale === 1 ? 'stays' : 'stay'} until you change a filter or refresh the list`);
+      }
+      if (L.loading) bits.push(d ? 'updating' : `Loading ${cfg.noun.toLowerCase()}`);
+      const hidden = L.hideNa && d?.na_hidden > 0 ? ` <span class="na-hidden-note">${d.na_hidden} N/A hidden · <button type="button" class="link-button" data-na-show-hidden data-recent-show-na>Show</button></span>` : '';
+      return `${esc(bits.join('. '))}${bits.length ? '.' : ''}${hidden}${L.error ? ` <span class="recent-error">${esc(L.error)}</span>` : ''}`;
+    }
+    function resultsHtml() {
+      const d = L.data;
+      if (!d) return L.error ? '' : `<div class="state">Loading ${esc(cfg.noun.toLowerCase())}…</div>`;
+      if (!d.items.length) {
+        const text = d.index_state === 'building' ? 'Indexing reports…' : L.hideNa && d.na_hidden ? 'Every matching report is marked N/A.' : filtered() ? 'No reports match these filters.' : cfg.emptyDefault;
+        return `<div class="empty">${icon('inbox')}<strong>${esc(text)}</strong>${filtered() ? '<button type="button" class="link-button" data-recent-clear>Clear filters</button>' : ''}</div>`;
+      }
+      const rows = d.items.map(item => {
+        const stale = item.kept || !matchesNow(item);
+        return `<tr data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na || stale ? ` class="${[item.na ? 'is-na' : '', stale ? 'is-stale' : ''].filter(Boolean).join(' ')}"` : ''}${stale ? ' data-stale="true"' : ''}>
+        <td class="recent-report"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-path">${esc(item.path)}</span>${updatedHtml(item)}${stale ? '<span class="stale-note">No longer matches</span>' : ''}</td>
+        <td class="recent-class">${classCell(item)}</td>
+        <td class="recent-program"><a class="link-button" href="${esc(programHref(item))}">${esc(item.program_name)}</a><span class="id">${esc(item.family)}</span></td>
+        <td class="recent-lane-cell">${esc(item.lane)}</td>
+        <td class="recent-finding">${findingCell(item)}</td>
+        <td class="date">${timeCell(item.modified, d)}</td>
+        <td class="recent-na">${naHtml(item)}</td></tr>`;
+      }).join('');
+      const page = Math.floor(d.offset / PAGE) + 1, pages = Math.max(1, Math.ceil(d.total / PAGE));
+      const pager = pages > 1 ? `<nav class="recent-pager" aria-label="${esc(cfg.noun)} pages"><button type="button" class="button sm" data-recent-page="-1"${d.offset ? '' : ' disabled'}>${icon('angle-left')}<span>Previous</span></button><span class="hint num">Page ${page} of ${pages}</span><button type="button" class="button sm" data-recent-page="1"${d.offset + PAGE < d.total ? '' : ' disabled'}><span>Next</span>${icon('angle-right')}</button></nav>` : '';
+      return `<div class="table-wrap"><table class="recent-table"><thead><tr><th>Report</th><th class="recent-class">Class</th><th class="recent-program">Program</th><th class="recent-lane-cell">Lane</th><th class="recent-finding">Finding</th><th class="date">Modified</th><th class="recent-na"><span class="sr-only">N/A</span></th></tr></thead><tbody>${rows}</tbody></table></div>${pager}`;
+    }
+    function paintControls() {
+      const m = FB() ? model() : null;
+      const bar = inHost('[data-facet-bar]');
+      if (bar && m) FB().paintBar(bar, m);
+      const chips = inHost('[data-facet-chips]');
+      if (chips) { const html = chipsHtml(m); if (chips.innerHTML !== html) { const focused = chips.contains(document.activeElement); chips.innerHTML = html; if (focused) (chips.querySelector('[data-facet-remove]') || inHost(`#${P}-filter`))?.focus(); } }
+      const order = inHost(`#${P}-order`); if (order && order.value !== L.order) order.value = L.order;
+      if (m) FB().refresh(m);
+    }
+    function paintStatus() { const box = inHost('[data-recent-status]'); if (box) box.innerHTML = statusHtml(); }
+    function paint() {
+      paintStatus();
+      const box = inHost('[data-recent-results]'); if (box) keepFocus(box, () => { box.innerHTML = resultsHtml(); });
+      paintControls(); // counts and chips follow the server's facets
+    }
+    function mount(el) {
+      // Class keys need the taxonomy rules (filter-bar.js); they load with the page, well before the workspace data.
+      if (FB() && window.BoardTaxonomy && !window.BoardTaxonomy.ready() && !L.taxWaited) {
+        el.innerHTML = `<div class="panel state">Loading ${esc(cfg.noun.toLowerCase())}…</div>`;
+        FB().whenReady().then(() => { L.taxWaited = true; const again = host(); if (again && !again.querySelector('[data-recent-results]')) mount(again); });
+        return;
+      }
+      const linked = ctx.state[cfg.stateKey];
+      const fromLink = typeof linked === 'string' && linked !== '' && linked !== queryFor();
+      if (fromLink) { applyQuery(linked); L.retry = 0; L.keep = false; }
+      else if (validateFacets()) savePrefs();
+      writeUrl();
+      el.innerHTML = `<section class="panel recent-panel" aria-label="${esc(cfg.listLabel)}" data-na-scope="${cfg.naScope}"><div class="panel-pad recent-controls" data-recent-controls>${controlsHtml()}</div><p class="hint recent-status" data-recent-status role="status">${statusHtml()}</p><div data-recent-results>${resultsHtml()}</div><p class="footnote">${esc(cfg.footnote)} Middle-click or Ctrl/Cmd+click a report to open it in a new tab.</p></section>`;
+      el.onclick = onClick; el.onchange = onChange; el.oninput = onInput; el.oncontextmenu = onRowMenu; el.onkeydown = onRowKey;
+      if (fromLink || !L.data || L.source !== ctx.state.data || Date.now() - L.at > 10000) { L.retry = 0; load(); }
+    }
+    function onClick(event) {
+      const t = event.target.closest('button'); if (!t) return;
+      if (t.dataset.recentPick) return openPick(t);
+      if (t.dataset.facetOpen) return openFacet(t);
+      if (t.hasAttribute('data-recent-show-na')) { L.hideNa = false; changed(); inHost('[data-facet-open="opts"]')?.focus(); return; }
+      if (t.hasAttribute('data-recent-refresh')) fresh();
+      else if (t.hasAttribute('data-recent-clear')) clearFilters(null);
+      else if (t.dataset.facetRemove != null) removeChip(t);
+      else if (t.dataset.recentPage) {
+        L.offset = Math.max(0, L.offset + Number(t.dataset.recentPage) * PAGE); writeUrl(true); fresh();
+        inHost('.recent-panel')?.scrollIntoView({block: 'start'});
+      }
+    }
+    function onChange(event) {
+      if (event.target.id === `${P}-order`) { L.order = ORDERS.some(([k]) => k === event.target.value) ? event.target.value : 'newest'; changed(); }
+    }
+    function onInput(event) {
+      if (event.target.id !== `${P}-filter`) return;
+      L.q = event.target.value; L.offset = 0;
+      ctx.state[cfg.stateKey] = queryFor(); // the address bar follows after the debounce
+      clearTimeout(L.qTimer);
+      L.qTimer = setTimeout(() => { writeUrl(); savePrefs(); paintControls(); fresh(); }, 200);
+    }
+    return {L, cfg, mount, load, paint, host, get data() { return L.data; }};
   }
-  function onViewChange(event) {
-    if (event.target.id === 'recent-lane') { view.lane = event.target.value; changed(); ctx.app.querySelector('#recent-lane')?.focus(); }
-    else if (event.target.id === 'recent-nav') { view.nav = event.target.checked; changed(); ctx.app.querySelector('#recent-nav')?.focus(); }
-    else if (event.target.id === 'recent-hide-na') { view.hideNa = event.target.checked; changed(); ctx.app.querySelector('#recent-hide-na')?.focus(); }
-  }
-  function onViewInput(event) {
-    if (event.target.id !== 'recent-filter') return;
-    view.q = event.target.value; view.offset = 0;
-    ctx.state.recentQuery = queryFor(); // the address bar follows after the debounce
-    clearTimeout(view.qTimer);
-    view.qTimer = setTimeout(() => { view.retry = 0; writeUrl(); loadView(); }, 200);
-  }
-  // Program multi-select: a searchable checkbox list (counts from the server's
-  // facets ignore the program filter itself). Stays open while ticking.
-  function openPrograms(trigger) {
-    const box = document.createElement('div');
-    const counts = new Map((view.data?.facets?.programs || []).map(p => [p.id, p.count]));
-    const all = ctx.programs().map(p => ({id: String(p.id), name: String(p.name || p.id), family: p.family || ''}));
-    for (const id of view.programs) if (!all.some(p => p.id === id)) all.push({id, name: programLabel(id), family: ''});
-    const has = p => (counts.get(p.id) || 0) > 0 ? 0 : 1; // programs with matching reports first
-    all.sort((a, b) => has(a) - has(b) || a.name.localeCompare(b.name));
-    box.innerHTML = `<div class="menu-label">Programs</div><div class="input-icon recent-program-search">${icon('search')}<input type="search" aria-label="Search programs to filter" placeholder="Search programs" autocomplete="off"></div><div class="menu recent-program-list" role="group" aria-label="Program values">${all.map(p => `<label class="option" data-name="${esc((p.name + ' ' + p.id).toLowerCase())}"><input type="checkbox" value="${esc(p.id)}"${view.programs.includes(p.id) ? ' checked' : ''}><span>${esc(p.name)}<span class="id"> ${esc(p.family)}</span></span><span class="count">${counts.has(p.id) ? counts.get(p.id) : 0}</span></label>`).join('')}</div><div class="menu-foot"><button type="button" class="button sm ghost" data-clear>Clear</button><button type="button" class="button sm" data-done>Done</button></div>`;
-    const search = box.querySelector('input[type=search]');
-    search.addEventListener('input', () => { const q = search.value.trim().toLowerCase(); box.querySelectorAll('label.option').forEach(o => { o.hidden = !!q && !o.dataset.name.includes(q); }); });
-    box.addEventListener('change', event => {
-      const input = event.target.closest('input[type=checkbox]'); if (!input) return;
-      const set = new Set(view.programs); if (input.checked) set.add(input.value); else set.delete(input.value);
-      view.programs = [...set]; view.offset = 0; savePrefs(); writeUrl(); loadView();
-      const label = ctx.app.querySelector('[data-recent-programs] span'); if (label) label.textContent = view.programs.length ? (view.programs.length === 1 ? programLabel(view.programs[0]) : `${view.programs.length} programs`) : 'All programs';
-    });
-    box.addEventListener('click', event => {
-      if (event.target.closest('[data-clear]')) { view.programs = []; box.querySelectorAll('input[type=checkbox]').forEach(i => { i.checked = false; }); ui().closePopover(true); changed(); }
-      else if (event.target.closest('[data-done]')) { ui().closePopover(true); paintControls(); }
-    });
-    ui().openPopover(trigger, box, {className: 'filter-popover recent-program-popover', label: 'Filter programs', trapTab: true,
-      reanchor: () => ctx.app.querySelector('[data-recent-programs]'), onClose: () => setTimeout(paintControls, 0)});
-    search.focus();
-  }
+  const SUBMITTED = ['submitted', 'valid', 'duplicate'];
+  const lists = {
+    recent: createList({id: 'recent', view: 'recent', host: '#recent-reports-host', stateKey: 'recentQuery', prefs: PREFS, defaultWindow: DEFAULT_WINDOW,
+      subOptions: () => FB()?.SUBMISSIONS || [], baseSubs: [], withNone: true, noun: 'Recent reports', listLabel: 'Recent reports list', naScope: 'recent-view',
+      searchLabel: 'Filter recent reports by title or path', emptyDefault: 'No reports match these filters.',
+      footnote: 'Ordered by file modification time unless sorted otherwise; a finding packet shows once, at its newest file.'}),
+    // Submissions: reports whose finding is submitted (awaiting a result), valid or
+    // duplicate. Dropped findings are not submissions.
+    submissions: createList({id: 'submissions', view: 'submissions', host: '#submissions-host', stateKey: 'submissionsQuery', prefs: 'bounty-board-submissions', defaultWindow: 'all',
+      subOptions: () => [['submitted', 'Awaiting result'], ['valid', 'Valid'], ['duplicate', 'Duplicate']], baseSubs: SUBMITTED, withNone: false,
+      subNote: 'None checked shows all three.', noun: 'Submitted reports', listLabel: 'Submitted reports list', naScope: 'submissions-view',
+      searchLabel: 'Filter submitted reports by title or path', emptyDefault: 'No submitted reports yet',
+      footnote: 'Reports whose finding is submitted, valid or duplicate; dropped findings are not listed. Newest first by the packet\'s newest file.'}),
+  };
 
   // ---- dashboard panel ---------------------------------------------------
   async function loadPanel() {
@@ -332,7 +463,7 @@
     }
   }
   // The Recent row (reference row design), shared by the dashboard and Recon panels.
-  const dashRow = (item, d) => `<li data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}><span class="recent-dash-main"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}${item.updated_file ? ` · <span class="recent-updated">Updated ${esc(item.updated_file)}</span>` : ''}</span></span><span class="frow-sev">${pickHtml(item, 'sev')}</span><span class="frow-subm">${pickHtml(item, 'sub')}</span><span class="recent-when">${timeCell(item.modified, d)}</span><span class="recent-na">${naHtml(item)}</span></li>`;
+  const dashRow = (item, d) => `<li data-recent-row data-program="${esc(item.program)}" data-lane="${esc(item.lane)}" data-path="${esc(item.path)}"${item.na ? ' class="is-na"' : ''}><span class="recent-dash-main"><a class="recent-link na-title" href="${esc(reportHref(item))}">${esc(item.title || item.name)}</a><span class="recent-where">${esc(item.program_name)} / ${esc(item.lane)}${item.finding ? ` · ${esc(item.finding.fid)}` : ''}${classText(item) ? ` · <span class="recent-class-label" title="${esc(`Recorded class: ${item.finding.class.raw ?? ''}`)}">${esc(classText(item))}</span>` : ''}${item.updated_file ? ` · <span class="recent-updated">Updated ${esc(item.updated_file)}</span>` : ''}</span></span><span class="frow-sev">${pickHtml(item, 'sev')}</span><span class="frow-subm">${pickHtml(item, 'sub')}</span><span class="recent-when">${timeCell(item.modified, d)}</span><span class="recent-na">${naHtml(item)}</span></li>`;
   function panelHtml() {
     const d = panel.data;
     const row = item => dashRow(item, d);
@@ -421,7 +552,7 @@
   function itemFor(node) {
     const row = node?.closest?.('[data-recent-row]'); if (!row) return null;
     const where = scopeOf(row);
-    const list = where === '#dashboard-recent-host' ? panel.data?.items : where === '#recon-reports-host' ? scoped.data?.items : view.data?.items;
+    const list = where === '#dashboard-recent-host' ? panel.data?.items : where === '#recon-reports-host' ? scoped.data?.items : where === '#submissions-host' ? lists.submissions.data?.items : lists.recent.data?.items;
     return (list || []).find(i => i.path === row.dataset.path && String(i.program) === row.dataset.program && String(i.lane) === row.dataset.lane) || null;
   }
   function refocus(selector) { return () => requestAnimationFrame(() => ctx.app.querySelector(selector)?.focus()); }
@@ -461,7 +592,7 @@
       if (!fa?.canEdit('severity')) items.splice(1, 0, {heading: fa?.OFF_HINT || ''});
     }
     items.push({separator: true}, {label: item.na ? 'Unmark N/A' : 'Mark N/A', icon: 'check', disabled: naOff,
-      onSelect: () => NA().set(item.program, item.lane, item.path, !item.na, {focusKey: scope === '#dashboard-recent-host' ? 'recent-panel' : scope === '#recon-reports-host' ? 'recon-reports' : 'recent-view'})});
+      onSelect: () => NA().set(item.program, item.lane, item.path, !item.na, {focusKey: scope === '#dashboard-recent-host' ? 'recent-panel' : scope === '#recon-reports-host' ? 'recon-reports' : scope === '#submissions-host' ? 'submissions-view' : 'recent-view'})});
     const anchor = pointAnchor(x, y);
     ui().openMenu(anchor, items, {label: `Actions for ${item.title || item.name}`, reanchor: () => null, onClose: () => { anchor.remove(); focusBack(); }});
     document.querySelector('.menu-popover')?.classList.add('context-menu');
@@ -487,7 +618,7 @@
   // totals and paging match the server.
   window.addEventListener('board-report-na', event => {
     const {program, lane, path, na} = event.detail || {};
-    for (const [d, hide] of [[view.data, view.hideNa], [panel.data, !panel.showNa], [scoped.data, !scoped.showNa]]) {
+    for (const [d, hide] of [[lists.recent.L.data, lists.recent.L.hideNa], [lists.submissions.L.data, lists.submissions.L.hideNa], [panel.data, !panel.showNa], [scoped.data, !scoped.showNa]]) {
       if (!d) continue;
       const index = d.items.findIndex(i => i.path === path && String(i.program) === program && String(i.lane) === lane);
       if (index < 0) continue;
@@ -495,7 +626,7 @@
       if (hide && na) { d.items.splice(index, 1); d.total = Math.max(0, d.total - 1); d.na_hidden = (d.na_hidden || 0) + 1; d.na_hidden_page = (d.na_hidden_page || 0) + 1; }
     }
     if (!ctx) return;
-    if (ctx.app.querySelector('#recent-reports-host')) { paintView(); loadView({quiet: true}); }
+    for (const list of Object.values(lists)) if (list.host()) { list.paint(); list.load({quiet: true}); }
     if (ctx.app.querySelector('#dashboard-recent-host')) { paintPanel(); loadPanel(); }
     const reconHost = ctx.app.querySelector('#recon-reports-host');
     if (reconHost) { paintScoped(); loadScoped(reconHost.dataset.program, reconHost.dataset.lane); }
@@ -504,7 +635,7 @@
   // Keep an open view or panel current while the tab is visible.
   setInterval(() => {
     if (!ctx || document.visibilityState !== 'visible') return;
-    if (ctx.app.querySelector('#recent-reports-host') && !view.loading) loadView({quiet: true}); // repaints only status and rows
+    for (const list of Object.values(lists)) if (list.host() && !list.L.loading) list.load({quiet: true}); // repaints only status and rows; kept rows stay
     if (ctx.app.querySelector('#dashboard-recent-host') && !panel.loading && Date.now() - panel.at > 30000) loadPanel();
   }, 30000);
 
@@ -513,8 +644,7 @@
     afterRender(context) {
       ctx = context;
       if (!ctx.state.data || ctx.state.loading) return;
-      const host = ctx.app.querySelector('#recent-reports-host');
-      if (host) mountView(host);
+      for (const list of Object.values(lists)) { const host = list.host(); if (host) list.mount(host); }
       const dash = ctx.app.querySelector('#dashboard-recent-host');
       if (dash) mountPanel(dash);
       const recon = ctx.app.querySelector('#recon-reports-host');

@@ -54,3 +54,42 @@
 .recent-table .id-link{font-family:var(--font-mono);font-size:var(--text-xs)}
 .recent-table td.recent-na,.recent-table th.recent-na{width:1%;text-align:right;white-space:nowrap}
 .recent-dash .panel-head .hint .na-hidden-note{margin-left:2px}
+/* Facets (feat/board-recent-facets): filter bar (filter-bar.css), Sort select, Class column, kept rows. */
+.recent-sort{display:inline-flex;align-items:center;gap:6px;font-size:var(--text-sm);color:var(--text-2);white-space:nowrap}
+.recent-sort select{width:auto;min-width:128px}
+.recent-toolbar .recent-filter{flex:1 1 200px;max-width:320px}
+.recent-table td.recent-class{min-width:120px;max-width:200px;font-size:var(--text-sm)}
+.recent-class-label{color:var(--text)}
+.recent-class-sub{color:var(--text-3)}
+.recent-where .recent-class-label{color:inherit}
+.recent-panel{container:results / inline-size}
+@container results (max-width: 1080px){
+  /* Middle widths: the lane column goes; the program cell keeps the family. */
+  .recent-table .recent-lane-cell{display:none}
+}
+@container results (max-width: 860px){
+  /* Narrow results column: each report is a two-column card (header hidden):
+     title, class and program on the left; finding pills, time and N/A on the right. */
+  .recent-table thead{display:none}
+  .recent-table,.recent-table tbody{display:block}
+  .recent-table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:var(--space-3);row-gap:2px;padding:var(--space-2) var(--space-4);border-bottom:1px solid var(--border)}
+  .recent-table td{display:block;padding:0;border:0;min-width:0;max-width:none}
+  .recent-table td.recent-report{grid-column:1;grid-row:1;min-width:0}
+  .recent-table td.recent-class{grid-column:1;grid-row:2;font-size:var(--text-xs);max-width:none}
+  .recent-table td.recent-program{grid-column:1;grid-row:3;font-size:var(--text-xs)}
+  .recent-table td.recent-program .id{display:inline;margin-left:4px}
+  .recent-table td.recent-finding{grid-column:2;grid-row:1;justify-self:end}
+  .recent-table td.date{grid-column:2;grid-row:2;justify-self:end;font-size:var(--text-xs)}
+  .recent-table td.recent-na{grid-column:2;grid-row:3;justify-self:end;width:auto}
+}
+@container results (max-width: 520px){
+  .recent-table td.recent-report{grid-column:1/-1}
+  .recent-table td.recent-finding{grid-column:1/-1;grid-row:4;justify-self:start;white-space:normal}
+  .recent-finding-cell{flex-wrap:wrap}
+}
+.recent-table td.recent-report{min-width:240px}
+/* A row a pill edit moved out of the filter: kept in place, dimmed, until a filter change or Refresh list. */
+.recent-table tr.is-stale>td{opacity:.55}
+.recent-table tr.is-stale:hover>td,.recent-table tr.is-stale:focus-within>td{opacity:.85}
+.recent-table .stale-note{display:block;font-size:var(--text-xs);font-weight:550;color:var(--warning)}
+#submissions-host{min-width:0}

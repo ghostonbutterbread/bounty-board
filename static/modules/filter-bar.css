@@ -1,0 +1,22 @@
+/* Filter bar (filter-bar.js): facet dropdowns along the top of a list. Redesign
+   tokens only; the popovers reuse .popover/.menu/.option/.menu-foot like the
+   Findings filters. */
+.facet-toolbar{align-items:center}
+.facet-bar-host{display:contents}
+.facet-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+.facet-button{max-width:260px;gap:6px}
+.facet-button .facet-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.facet-button .fa-angle-down{flex:none;color:var(--text-3)}
+.facet-button.is-active{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 45%,var(--border-strong));color:var(--accent-text)}
+.facet-button.is-active .fa-angle-down{color:var(--accent-text)}
+.facet-button[aria-expanded="true"]{box-shadow:var(--focus-ring)}
+.facet-popover{width:min(320px,calc(100vw - 16px))}
+.facet-popover .facet-search{margin:0 8px 6px}
+.facet-popover .facet-list{max-height:min(320px,50vh);overflow:auto}
+.facet-popover .option{min-height:28px}
+.facet-popover .facet-option-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.facet-popover .option.is-zero{color:var(--text-3)}
+.facet-popover .option.is-zero .count{opacity:.7}
+.facet-popover .facet-none,.facet-popover .facet-note{margin:4px 8px;font-size:var(--text-xs)}
+.facet-chips{padding:var(--space-2) 0 0}
+.facet-chips .link-button{font-size:var(--text-sm);font-weight:550}

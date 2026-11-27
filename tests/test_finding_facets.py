@@ -1,7 +1,7 @@
 """Shared facet-key cases (static/tests/facet-cases.json) against finding_facets.py.
 
-static/tests/filter-rail.test.cjs runs the same file against the browser
-mapping (BoardFilterRail.keys), so Recent and Submissions agree."""
+static/tests/filter-bar.test.cjs runs the same file against the browser
+mapping (BoardFilterBar.keys), so Recent and Submissions agree."""
 import json
 import unittest
 from pathlib import Path

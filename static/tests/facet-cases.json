@@ -1,5 +1,5 @@
 {
- "notes": "Shared facet-key cases (synthetic). tests/test_finding_facets.py runs them against finding_facets.py and static/tests/filter-rail.test.cjs against BoardFilterRail.keys, so Recent (server) and Submissions (browser) bucket findings the same way. finding null = a report with no linked finding.",
+ "notes": "Shared facet-key cases (synthetic). tests/test_finding_facets.py runs them against finding_facets.py and static/tests/filter-bar.test.cjs against BoardFilterBar.keys, so Recent (server) and Submissions (browser) bucket findings the same way. finding null = a report with no linked finding.",
  "cases": [
   {"name": "no linked finding", "finding": null, "submission": "none", "severity": "none", "class": "none"},
   {"name": "missing submission", "finding": {"severity": "HIGH", "class_name": "xss"}, "submission": "not_submitted", "severity": "high", "class": "xss"},

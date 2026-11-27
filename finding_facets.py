@@ -2,7 +2,7 @@
 
 One mapping, two sides: the Recent view filters server-side with this module
 (search_index.py), the Submissions view filters client-side with
-static/modules/filter-rail.js (`BoardFilterRail.keys`). Both run the shared
+static/modules/filter-bar.js (`BoardFilterBar.keys`). Both run the shared
 cases in static/tests/facet-cases.json, so "Duplicate" or "Not submitted"
 means the same thing in both views. Display only: nothing here writes a ledger.
 """
