@@ -446,6 +446,81 @@ test('a URL wrapped across terminal rows links as a whole, never by its first ro
   });
 });
 
+test('the address wins over secondary text: one port shows in full at 1440 px, bottom and top docks',{timeout:240000},async()=>{
+  await withFixture('tailnet,ports',async info=>{
+    const {base,newPage,sandbox_port:P}=info;
+    const page=await newPage({permissions:CLIP,viewport:{width:1440,height:900}});
+    await openReport(page,base);
+    await openDrawer(page);
+    const on=await page.evaluate(async()=>(await fetch('/terminal/api/settings',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({ports_tailscale:true})})).json());
+    assert.equal(on.ports_tailscale,true);
+    setPorts(info,[P]);
+    const address=`127.0.0.2:${P}`;
+    await chips(page).first().filter({hasText:address}).waitFor({timeout:15000});
+    assert.ok(await page.evaluate(()=>{const s=document.querySelector('.sidebar,#sidebar,[data-sidebar],nav');return !!s&&s.getBoundingClientRect().width>100;}),'sidebar open');
+    for(const dock of ['bottom','top']){
+      await page.locator(`[data-term-dock] [data-dock="${dock}"]`).click();
+      await page.waitForFunction(d=>document.querySelector('#term-drawer').dataset.dock===d,dock);
+      await page.waitForTimeout(400);
+      const r=await page.evaluate(()=>{
+        const head=document.querySelector('#term-drawer [data-term-head]');
+        const chip=head.querySelector('[data-ports-chip] .term-ports-chip-text');
+        const sub=head.querySelector('[data-term-sub]'),meta=head.querySelector('[data-term-meta]'),steps=head.querySelector('[data-term-steps]');
+        const top=el=>Math.round(el.getBoundingClientRect().top+el.getBoundingClientRect().height/2);
+        const row=[head.querySelector('.term-title'),head.querySelector('[data-term-status]'),sub,head.querySelector('[data-ports-chip]'),head.querySelector('[data-term-dock]'),head.querySelector('.term-actions')];
+        return {chipText:chip.textContent,chipFull:chip.scrollWidth<=chip.clientWidth,mids:row.map(top),
+          subTitle:sub.title,metaText:meta.textContent,stepsText:steps.textContent,squeezed:head.classList.contains('ports-squeeze'),
+          metaCut:meta.scrollWidth>meta.clientWidth,subWidth:Math.round(sub.getBoundingClientRect().width)};
+      });
+      assert.equal(r.chipText,address,`${dock}: the chip shows the address`);
+      assert.equal(r.chipFull,true,`${dock}: no ellipsis on the address ${JSON.stringify(r)}`);
+      assert.equal(new Set(r.mids).size,1,`${dock}: title, status, session text, chip, dock picker and actions on one row ${JSON.stringify(r)}`);
+      assert.match(r.metaText,/Session .* · Folder reports\/D1-sqli-login/,'realistic long session text');
+      assert.match(r.stepsText,/of \d+ steps? checked/,'a checks summary is present');
+      assert.ok(r.subTitle.includes(r.metaText)&&r.subTitle.includes(r.stepsText),'the full secondary text stays in the tooltip');
+      assert.ok(r.squeezed&&r.metaCut&&r.subWidth>=96,`${dock}: the secondary text gave way, down to its minimum at most ${JSON.stringify(r)}`);
+      const state=await headerIntact(page);
+      assert.equal(state.ok,true,`${dock}: header intact ${JSON.stringify(state)}`);
+      if(dock==='bottom')for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(250);await shot(page,`ports-chip-1440-bottom-${t}.png`);}
+      // A drag from the chip still never starts a drawer drag.
+      const box=await chips(page).first().boundingBox();
+      await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+      await page.mouse.move(box.x-150,box.y-150,{steps:6});
+      const dragging=await page.evaluate(()=>document.documentElement.classList.contains('term-dragging')||!!document.querySelector('[data-term-drop-preview]:not([hidden])'));
+      await page.mouse.up();
+      assert.equal(dragging,false);
+    }
+    // Ports gone: the secondary text gets its full width back.
+    setPorts(info,[]);
+    await page.waitForFunction(()=>window.BoardPorts.ports.length===0,null,{timeout:15000});
+    assert.equal(await page.evaluate(()=>document.querySelector('#term-drawer [data-term-head]').classList.contains('ports-squeeze')),false);
+    assert.equal(await page.evaluate(()=>{const m=document.querySelector('#term-drawer [data-term-meta]');return m.scrollWidth<=m.clientWidth;}),true);
+    assert.deepEqual(page.errors,[]);
+    // The live length: a real Tailscale address, 100.101.102.103:8765 (the service's answer routed).
+    await page.close();   // one viewer, like the live check (a second viewer lengthens the session text)
+    const real=await newPage({permissions:CLIP,viewport:{width:1440,height:900}});
+    const reply={preview_ports:true,ports_tailscale:true,ports:[{port:8765,host_port:9100,state:'open',local_url:'http://127.0.0.1:9100/',tailscale_port:8765,tailscale_url:'http://100.101.102.103:8765/'}]};
+    await real.route('**/api/ports?**',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(reply)}));
+    await openReport(real,base);
+    await openDrawer(real);
+    await chips(real).first().filter({hasText:'100.101.102.103:8765'}).waitFor({timeout:15000});
+    for(const dock of ['top','bottom']){
+      await real.locator(`[data-term-dock] [data-dock="${dock}"]`).click();
+      await real.waitForFunction(d=>document.querySelector('#term-drawer').dataset.dock===d,dock);
+      await real.waitForTimeout(400);
+      const r=await real.evaluate(()=>{const head=document.querySelector('#term-drawer [data-term-head]'),chip=head.querySelector('[data-ports-chip] .term-ports-chip-text');
+        const mid=el=>Math.round(el.getBoundingClientRect().top+el.getBoundingClientRect().height/2);
+        return {text:chip.textContent,full:chip.scrollWidth<=chip.clientWidth,mids:[head.querySelector('.term-title'),head.querySelector('[data-term-sub]'),head.querySelector('[data-ports-chip]'),head.querySelector('[data-term-dock]'),head.querySelector('.term-actions')].map(mid)};});
+      assert.equal(r.text,'100.101.102.103:8765');
+      assert.equal(r.full,true,`${dock}: the full Tailscale address shows ${JSON.stringify(r)}`);
+      assert.equal(new Set(r.mids).size,1,`${dock}: one row ${JSON.stringify(r)}`);
+      assert.equal((await headerIntact(real)).ok,true);
+      if(dock==='bottom')for(const t of ['light','dark']){await theme(real,t);await real.waitForTimeout(250);await shot(real,`ports-chip-1440-bottom-real-${t}.png`);}
+    }
+    assert.deepEqual(real.errors,[]);
+  });
+});
+
 test('phone sheet: the chip fits and a tap opens it',{timeout:120000},async()=>{
   await withFixture('tailnet,ports',async info=>{
     const page=await info.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true,deviceScaleFactor:2});
