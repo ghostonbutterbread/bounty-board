@@ -3,7 +3,7 @@
 - **Status:** Fourth narrow fix round implemented; awaiting the same parent independent reviewer and exact-final-SHA gates. Do not integrate or activate before those gates.
 - **Branch:** `feat/board-user-conf`; **target:** `beta`; **base:** `63f3f4f037ac131c886af005f33106419f651d96` (`origin/beta` at start).
 - **Previously reviewed predecessor:** `616b4024d4606efe89bd595a501528c5f3eed4c9`; fix-round precursor `234a0b336c61dc175d18d35b7db96221cf4751ad`; immediately preceding blocked handoff `8c1a21e0d22aaa911ce7bde2a11da24c68d1ec9e`. Review the complete branch range.
-- **Third-round implementation checkpoint:** `5422d723a9ae19008c7a93054894c30f6322f184`; the branch tip also contains a later dossier-only handoff commit. Previous recovery checkpoint: `01e7b805b37dfac6182cb93dcee408700f20f1f2`.
+- **Fourth-round implementation checkpoint:** `c8d1befc924002beb33d2e1a1459e2d6da046a21`; the branch tip also contains a later dossier-only handoff commit. Third-round checkpoint: `5422d723a9ae19008c7a93054894c30f6322f184`; earlier recovery checkpoint: `01e7b805b37dfac6182cb93dcee408700f20f1f2`.
 - **Intent:** Ryushe requested `~/.config/bountyboard/user.conf` so theme, recent programs and settings survive Board restarts and other devices. Do not change `--config`, terminal network state, or Shared data.
 
 ## Contract
