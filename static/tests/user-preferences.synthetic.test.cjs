@@ -43,6 +43,13 @@ test('draft write guard rejects report endpoints and draft content in preference
   assert.throws(()=>assertPreferencesOnly([{method:'POST',url:base+'/api/user-preferences',body:JSON.stringify({migrate:{'list.recent.programs':doubleNested}})}],base,[multiline]));
 });
 
+async function waitResolutionReady(page) {
+  await page.waitForFunction(()=>{
+    const b=document.querySelector('#preferences-save-error button');
+    return !!b && !!b.getClientRects().length && getComputedStyle(b).visibility==='visible' && !b.disabled && b.getAttribute('aria-disabled')!=='true';
+  },null,{timeout:10000});
+}
+
 async function chooseTheme(page,name) {
   await page.getByRole('button',{name:'Theme',exact:true}).click();
   await page.getByRole('menuitemradio',{name,exact:true}).click();
@@ -126,6 +133,35 @@ test('a stale tab can explicitly resolve its own choice then make another choice
   assert.equal(await b.locator('#preferences-save-error').count(),0);
 }));
 
+test('migration disables the conflict action until it can be used', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const ca=await browser.newContext(), cb=await browser.newContext();
+  await cb.addInitScript(()=>{if(!sessionStorage.seeded){localStorage.setItem('bounty-board-terminal:v1',JSON.stringify({dock:'left'}));sessionStorage.seeded='1';}});
+  const a=await ca.newPage(),b=await cb.newPage(); await a.goto(base);
+  let releaseRead,seeRead,releaseMigration,seeMigration;
+  const readGate=new Promise(r=>{releaseRead=r;}),readSeen=new Promise(r=>{seeRead=r;});
+  const migrationGate=new Promise(r=>{releaseMigration=r;}),migrationSeen=new Promise(r=>{seeMigration=r;});
+  let firstRead=true;
+  await b.route('**/api/user-preferences',async route=>{
+    const req=route.request();
+    if(req.method()==='GET' && firstRead){firstRead=false;seeRead();await readGate;}
+    if(req.method()==='POST' && JSON.parse(req.postData()).migrate){seeMigration();await migrationGate;}
+    await route.continue().catch(()=>{});
+  });
+  try {
+    await b.goto(base,{waitUntil:'domcontentloaded'}); await readSeen;
+    await chooseTheme(a,'Dark'); await waitSaved(a);
+    await chooseTheme(b,'Dusk'); const button=b.getByRole('button',{name:/use my choice.*theme/i}); await waitResolutionReady(b);
+    releaseRead(); await migrationSeen;
+    assert.equal(await button.isDisabled(),true,'action must not appear usable while migration is held');
+    assert.match(await b.locator('#preferences-save-error').innerText(),/migration/i);
+    await button.focus(); await b.keyboard.press('Enter');
+    assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark','disabled action cannot initiate a save');
+    releaseMigration(); await waitResolutionReady(b);
+    await button.click(); await waitSaved(b);
+    assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dusk');
+  } finally {releaseRead();releaseMigration();}
+}));
+
 test('a second race during explicit resolution leaves the conflict intact', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
   const context=await browser.newContext(),a=await context.newPage(),b=await context.newPage();
   await a.goto(base); await b.goto(base); await chooseTheme(a,'Dark'); await waitSaved(a);
@@ -134,15 +170,20 @@ test('a second race during explicit resolution leaves the conflict intact', {tim
   const gate=new Promise(resolve=>{release=resolve;}),entered=new Promise(resolve=>{seen=resolve;});
   await b.route('**/api/user-preferences',async route=>{if(route.request().method()==='POST'){seen();await gate;}await route.continue().catch(()=>{});});
   try {
-    await b.getByRole('button',{name:/use my choice.*theme/i}).click(); await entered;
+    const button=b.getByRole('button',{name:/use my choice.*theme/i});
+    await button.focus(); await b.evaluate(()=>window.resolutionButton=document.activeElement);
+    await b.keyboard.press('Enter'); await entered;
+    assert.equal(await b.evaluate(()=>document.activeElement===window.resolutionButton),true,'focus remains on resolution action while request is held');
+    assert.equal(await button.isDisabled(),true);
     const c=await context.newPage(); await c.goto(base); await chooseTheme(c,'Light'); await waitSaved(c);
     release();
     await b.getByRole('button',{name:/use my choice.*theme/i}).waitFor({state:'visible'});
-    await b.waitForFunction(()=>!document.querySelector('#preferences-save-error button')?.disabled);
+    await waitResolutionReady(b);
+    assert.equal(await b.evaluate(()=>document.activeElement===window.resolutionButton),true,'focus remains on same action after 409');
     assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'light');
     assert.equal(await b.evaluate(()=>window.BoardPreferences.hasPending()),true);
     await b.unroute('**/api/user-preferences');
-    await b.getByRole('button',{name:/use my choice.*theme/i}).click(); await waitSaved(b);
+    await b.keyboard.press('Enter'); await waitSaved(b);
     assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dusk');
   } finally {release();}
 }));
@@ -151,21 +192,32 @@ test('an uncertain in-flight resolution is retained after a newer choice saves',
   const context=await browser.newContext(),a=await context.newPage(),b=await context.newPage();
   await a.goto(base); await b.goto(base); await chooseTheme(a,'Dark'); await waitSaved(a);
   await chooseTheme(b,'Dusk'); await b.locator('#preferences-save-error').waitFor();
-  let release,seen;
-  const gate=new Promise(resolve=>{release=resolve;}),entered=new Promise(resolve=>{seen=resolve;});
+  let release,seen,abortDone;
+  const events=[];
+  b.on('request',r=>{if(r.url().endsWith('/api/user-preferences'))events.push({phase:'request',method:r.method(),body:r.postData()});});
+  b.on('response',r=>{if(r.url().endsWith('/api/user-preferences'))events.push({phase:'response',method:r.request().method(),status:r.status(),body:r.request().postData()});});
+  const gate=new Promise(resolve=>{release=resolve;}),entered=new Promise(resolve=>{seen=resolve;}),aborted=new Promise(resolve=>{abortDone=resolve;});
   await b.route('**/api/user-preferences',async route=>{
     if(route.request().method()!=='POST')return route.continue();
-    await route.fetch(); seen(); await gate; await route.abort('failed').catch(()=>{});
+    const response=await route.fetch(); events.push({phase:'upstream',status:response.status(),body:route.request().postData()});
+    seen(); await gate; await route.abort('failed').catch(()=>{}); abortDone();
   });
   try {
     await b.getByRole('button',{name:/use my choice.*theme/i}).click(); await entered;
-    await chooseTheme(b,'Light'); release();
-    await b.waitForFunction(()=>!document.querySelector('#preferences-save-error button')?.disabled);
+    await chooseTheme(b,'Light'); release(); await aborted;
+    await waitResolutionReady(b);
     await b.unroute('**/api/user-preferences');
-    await b.getByRole('button',{name:/use my choice.*theme/i}).click(); await waitSaved(b);
+    const ack=b.waitForResponse(r=>r.url().endsWith('/api/user-preferences') && r.request().method()==='POST' && JSON.parse(r.request().postData()).set?.['bounty-board-theme']==='light' && r.status()===200);
+    await b.getByRole('button',{name:/use my choice.*theme/i}).click(); await ack; await waitSaved(b);
     assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'light');
     assert.equal(await b.evaluate(()=>Object.keys(localStorage).some(k=>k.startsWith('bounty-board-preferences-edit:v2:') && JSON.parse(localStorage.getItem(k)).value==='dusk')),true);
     assert.equal(await b.locator('#preferences-save-error').isVisible(),true,'uncertain earlier edit is not hidden');
+    assert.ok(events.some(e=>e.phase==='upstream' && e.status===200),'first resolution reached server');
+    assert.ok(events.some(e=>e.phase==='response' && e.status===200 && e.body && JSON.parse(e.body).set?.['bounty-board-theme']==='light'),'new resolution acknowledged');
+  } catch(error) {
+    const state=await b.evaluate(()=>({alert:document.querySelector('#preferences-save-error')?.outerHTML,theme:document.documentElement.dataset.theme,pending:BoardPreferences.hasPending(),records:Object.keys(localStorage).filter(k=>k.startsWith('bounty-board-preferences-edit:v2:')).map(k=>localStorage.getItem(k))})).catch(()=>null);
+    const server=fs.existsSync(config)?fs.readFileSync(config,'utf8'):'missing';
+    throw new Error(`uncertain resolution failed: ${JSON.stringify({state,server,events})}`,{cause:error});
   } finally {release();}
 }));
 

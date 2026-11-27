@@ -80,26 +80,38 @@
     if(event.key===terminalKey && !fields.some(field=>Object.hasOwn(pending,`terminal.${field}`))) memory.delete(terminalKey);
   });
   let failed = false, readFailed = false, inflight = false, migrating = false;
+  const noticeButtons = new Map();
   const notice = () => {
     const paint = () => {
       let node = document.getElementById('preferences-save-error');
-      if (!failed) { node?.remove(); return; }
+      if (!failed) { node?.remove(); noticeButtons.clear(); return; }
       if (!node && document.body) {
         node = document.createElement('div'); node.id = 'preferences-save-error'; node.setAttribute('role', 'alert');
         node.style.cssText = 'position:fixed;z-index:9999;bottom:1rem;left:1rem;max-width:28rem;padding:.75rem 1rem;background:#8b2525;color:white;border-radius:.5rem;pointer-events:none';
+        const message=document.createElement('span'); message.className='preferences-error-message'; node.appendChild(message);
         document.body.appendChild(node);
       }
       if (node) {
-        node.textContent = conflicts.size ? (readFailed ? 'A preference needs recovery. Waiting to read the saved values before retrying.' : 'A preference needs recovery. Use your choice below to replace the current saved value.') : ownershipFailed || uncertain.size ? 'An earlier preference needs recovery and remains in this browser.' : cacheFailed ? 'Browser storage is unavailable; unsaved preferences may be lost after reload.' : 'Preferences could not be saved to the server. Changes remain in this browser; retrying.';
-        if(cacheFailed && (conflicts.size || ownershipFailed || uncertain.size))node.append(' Browser storage is unavailable; unsaved choices may be lost after reload.');
+        const message=node.querySelector('.preferences-error-message');
+        message.textContent = conflicts.size ? (readFailed ? 'A preference needs recovery. Waiting to read the saved values before retrying.' : migrating ? 'A preference needs recovery. Waiting for preference migration to finish.' : inflight ? 'A preference needs recovery. Saving is in progress.' : 'A preference needs recovery. Use your choice below to replace the current saved value.') : ownershipFailed || uncertain.size ? 'An earlier preference needs recovery and remains in this browser.' : cacheFailed ? 'Browser storage is unavailable; unsaved preferences may be lost after reload.' : 'Preferences could not be saved to the server. Changes remain in this browser; retrying.';
+        if(cacheFailed && (conflicts.size || ownershipFailed || uncertain.size))message.append(' Browser storage is unavailable; unsaved choices may be lost after reload.');
+        const visible=new Set();
         if (!readFailed && ownerClaimed && !ownershipFailed) for (const key of conflicts) {
           if (!Object.hasOwn(pending,key)) continue;
+          visible.add(key);
           const label=key==='bounty-board-theme'?'Theme':key.replace(/^bounty-board-/, '').replaceAll('.', ' ').replaceAll('-', ' ');
-          const button=document.createElement('button'); button.type='button'; button.textContent=`Use my choice for ${label}`;
-          button.style.cssText='display:block;margin-top:.5rem;pointer-events:auto';
-          button.disabled=inflight || migrating;
-          button.addEventListener('click',()=>resolveChoice(key)); node.appendChild(button);
+          let button=noticeButtons.get(key);
+          if(!button){
+            button=document.createElement('button'); button.type='button'; button.textContent=`Use my choice for ${label}`;
+            button.style.cssText='display:block;margin-top:.5rem;pointer-events:auto';
+            button.addEventListener('click',()=>{if(!inflight && !migrating)resolveChoice(key);});
+            noticeButtons.set(key,button); node.appendChild(button);
+          }
+          // aria-disabled keeps a focused action in place while guarded against activation.
+          button.setAttribute('aria-disabled',String(inflight || migrating));
+          button.style.opacity=inflight || migrating ? '0.6' : '1';
         }
+        for(const [key,button] of noticeButtons)if(!visible.has(key)){button.remove();noticeButtons.delete(key);}
       }
     };
     if (document.body) paint(); else document.addEventListener('DOMContentLoaded', paint, {once: true});
@@ -200,7 +212,7 @@
     const key = Object.keys(pending).find(k => !conflicts.has(k));
     if (inflight || migrating || !key || !ownerClaimed) return;
     if (!Number.isSafeInteger(pendingBases[key])) { conflicts.add(key); setFailed(true); return; }
-    inflight = true;
+    inflight = true; if(failed)notice();
     const value = pending[key], base = pendingBases[key], id = pendingIds[key];
     const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),3000);
     let retryImmediately = true;
@@ -317,7 +329,7 @@
       if(read(marker)!=='1') {
         const migrate=Object.fromEntries(Object.entries(legacy).filter(([key])=>!Object.hasOwn(pending,key)));
         if(Object.keys(migrate).length) {
-          const bases={...observed}; migrating=true;
+          const bases={...observed}; migrating=true; if(failed)notice();
           try {
             snapshot=await jsonRequest({method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({migrate})});
             if(!Array.isArray(snapshot.migrated))throw new Error('missing migration receipt');
@@ -325,7 +337,7 @@
               pendingBases[key]=snapshot.revisions[key];
               if(pendingIds[key])put(pendingIds[key],JSON.stringify({owner,key,value:pending[key],base:pendingBases[key],stamp:pendingStamps[key]}));
             }
-          } finally {migrating=false;}
+          } finally {migrating=false; if(failed)notice();}
         }
         put(marker,'1');
       }
