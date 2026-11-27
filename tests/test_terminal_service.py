@@ -497,13 +497,18 @@ class HardeningTests(unittest.TestCase):
         # Review N1: connections that never finish their head cannot fill the service.
         import socket as socket_mod
         idle = []
+        baseline_threads = threading.active_count()
         try:
-            for _ in range(60):  # three times max_pending
+            for _ in range(60):  # three times the configured pending-head cap (20)
                 sock = socket_mod.create_connection(('127.0.0.1', self.port), timeout=5)
                 sock.sendall(b'GET /terminal/api/status HTTP/1.1\r\nHost: ')  # never finished
                 idle.append(sock)
             self.assertEqual(self.tailnet_status(), 200)
-            self.assertLess(threading.active_count(), 120)
+            with self.server.pending_lock:
+                self.assertLessEqual(len(self.server.pending), 20, 'slow heads stay within the configured cap')
+            # Other synthetic services in the full suite can leave unrelated
+            # threads alive; only growth caused by these slow heads matters.
+            self.assertLess(threading.active_count() - baseline_threads, 40)
         finally:
             for sock in idle:
                 sock.close()
