@@ -13,6 +13,13 @@ span.term-ports-chip{cursor:default}
 .term-ports-chip[data-copied] .term-ports-chip-text{font-family:inherit}
 .term-ports-more{flex:none;max-width:none}
 .term-ports-more[aria-expanded="true"]{border-color:var(--accent)}
+/* The address wins over secondary text: while chips are shown and the one-line header is short,
+   the module caps the drawer's session text and steps summary ([data-term-sub] > .term-meta,
+   .term-steps; full text in the [data-term-sub] title) with an ellipsis before any chip shrinks. */
+.term-head.ports-squeeze [data-term-sub]{max-width:var(--ports-sub-max);min-width:0;overflow:hidden}
+.term-head.ports-squeeze [data-term-sub]>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.term-head.ports-squeeze [data-term-sub]>.term-steps{flex:0 1 auto}
+.term-head.ports-squeeze [data-term-sub]>.term-meta{flex:0 3 auto}
 .term-drawer:is([data-dock="left"],[data-dock="right"]) .term-slots{min-width:0;flex:0 1 auto}
 .term-drawer:is([data-dock="left"],[data-dock="right"]) .term-ports-chip{max-width:13em}
 [data-term-slot="ports"][data-ports-tight="true"] .term-ports-chip{max-width:9em}

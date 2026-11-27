@@ -26,6 +26,7 @@
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
   const touchOnly = () => !!window.matchMedia && !window.matchMedia('(any-pointer: fine)').matches;
   const hint = () => (touchOnly() ? 'Tap to open' : `${isMac ? 'Cmd' : 'Ctrl'}+click to open, click to copy`);
+  const SUB_MIN_PX = 96;   // the session text and steps summary shrink to this before any chip does
   const CHIPS_MAX = 2;   // address chips in the header; more ports go behind "+N" (the popover)
   const NOT_ENABLED = 'Not enabled on this server. Start the terminal service with --preview-ports.';
   const ERRORS = {
@@ -115,7 +116,16 @@
   function fitChips(slot) {
     const head = slot.closest('[data-term-head]');
     const first = Math.min(CHIPS_MAX, ports.length);
+    // Every fit starts from the uncapped header, and a hidden drawer never keeps a stale cap.
+    head?.classList.remove('ports-squeeze');
+    head?.style.removeProperty('--ports-sub-max');
     if (!head || !head.offsetParent) { renderChips(slot, first, 'normal'); return; }
+    // The address wins over secondary text: in the one-line headers (bottom, top, maximized) the
+    // session text and steps summary ([data-term-sub], which carries the full text in its title)
+    // are capped with an ellipsis, as little as needed, before chips are shortened or dropped.
+    // Side docks keep that text on their second row and phones wrap it: nothing to gain there.
+    const sub = head.querySelector('[data-term-sub]');
+    const squeezable = !!sub && window.innerWidth > 700 && !head.closest('.term-drawer')?.matches('[data-dock="left"],[data-dock="right"]');
     const marks = [...head.querySelectorAll('[data-term-dock], .term-actions, [data-term-sub], [data-term-status]')];
     const others = [...head.querySelectorAll('.term-grip, .term-title, [data-term-status], [data-term-flash], [data-term-dock], [data-term-sub], .term-actions, [data-term-slot]')].filter(el => el !== slot);
     const hit = (a, b) => a.width > 0 && b.width > 0 && a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
@@ -129,7 +139,23 @@
     // Nothing fits (a side dock at its minimum width): no chip rather than one over the
     // dock picker; widening the drawer re-fits, and terminal links still work.
     const tries = [[first, 'normal'], [Math.min(1, first), 'normal'], [Math.min(1, first), 'tight'], [0, 'compact']];
-    for (const [count, mode] of tries) { renderChips(slot, count, mode); if (fits()) return; }
+    const natural = squeezable ? Math.ceil(sub.getBoundingClientRect().width) : 0;
+    const cap = width => { head.classList.add('ports-squeeze'); head.style.setProperty('--ports-sub-max', `${width}px`); };
+    const uncap = () => { head.classList.remove('ports-squeeze'); head.style.removeProperty('--ports-sub-max'); };
+    // The widest cap (SUB_MIN_PX..natural) that lets the chips fit, or false.
+    const squeeze = () => {
+      if (!squeezable || natural <= SUB_MIN_PX) return false;
+      cap(SUB_MIN_PX);
+      if (!fits()) { uncap(); return false; }
+      let lo = SUB_MIN_PX, hi = natural;   // lo fits
+      while (hi - lo > 4) { const mid = Math.floor((lo + hi) / 2); cap(mid); if (fits()) lo = mid; else hi = mid; }
+      cap(lo);
+      return true;
+    };
+    for (const [count, mode] of tries) {
+      renderChips(slot, count, mode);
+      if (fits() || squeeze()) return;
+    }
     renderChips(slot, 0, 'none');
   }
 
@@ -141,7 +167,12 @@
     bindSlot(slot);
     observeDrawer(slot);
     const show = flags.preview_ports && selector && ports.length;
-    if (!show) { closePopover(false); slot.replaceChildren(); fitKey = ''; return; }
+    if (!show) {
+      closePopover(false); slot.replaceChildren(); fitKey = '';
+      const head = slot.closest('[data-term-head]');
+      head?.classList.remove('ports-squeeze'); head?.style.removeProperty('--ports-sub-max');
+      return;
+    }
     const keepFocus = slot.contains(document.activeElement) ? document.activeElement.dataset.port || 'more' : null;
     fitChips(slot);
     fitKey = layoutKey(slot);
