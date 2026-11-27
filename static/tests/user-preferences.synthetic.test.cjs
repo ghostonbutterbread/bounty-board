@@ -118,6 +118,16 @@ test('new acknowledgements never delete other-owner or uncertain records', {time
   assert.equal(await page.locator('#preferences-save-error').isVisible(),true);
 }));
 
+test('conflict action does not cover sidebar navigation', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
+  const context=await browser.newContext({viewport:{width:1440,height:900}}), a=await context.newPage(), b=await context.newPage();
+  await a.goto(base); await b.goto(base);
+  await chooseTheme(a,'Dark'); await waitSaved(a);
+  await chooseTheme(b,'Dusk');
+  await b.getByRole('button',{name:/use my choice.*theme/i}).waitFor();
+  await b.getByRole('button',{name:'Collapse sidebar'}).click({timeout:3000});
+  assert.equal(await b.locator('#shell.sidebar-collapsed').count(),1);
+}));
+
 test('a stale tab can explicitly resolve its own choice then make another choice', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
   const context=await browser.newContext(),a=await context.newPage(),b=await context.newPage();
   await a.goto(base); await b.goto(base);

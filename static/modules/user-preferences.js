@@ -87,7 +87,7 @@
       if (!failed) { node?.remove(); noticeButtons.clear(); return; }
       if (!node && document.body) {
         node = document.createElement('div'); node.id = 'preferences-save-error'; node.setAttribute('role', 'alert');
-        node.style.cssText = 'position:fixed;z-index:9999;bottom:1rem;left:1rem;max-width:28rem;padding:.75rem 1rem;background:#8b2525;color:white;border-radius:.5rem;pointer-events:none';
+        node.style.cssText = 'position:fixed;z-index:9999;bottom:1rem;right:1rem;max-width:min(28rem, calc(100vw - 2rem));padding:.75rem 1rem;background:#8b2525;color:white;border-radius:.5rem;pointer-events:none';
         const message=document.createElement('span'); message.className='preferences-error-message'; node.appendChild(message);
         document.body.appendChild(node);
       }

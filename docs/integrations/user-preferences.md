@@ -1,6 +1,6 @@
 # User preferences integration dossier
 
-- **Status:** Fourth narrow fix round implemented; awaiting the same parent independent reviewer and exact-final-SHA gates. Do not integrate or activate before those gates.
+- **Status:** Fourth fix reviewed; one full-suite UI overlap regression fixed on this feature branch. Final exact-tip gates and beta integration remain pending.
 - **Branch:** `feat/board-user-conf`; **target:** `beta`; **base:** `63f3f4f037ac131c886af005f33106419f651d96` (`origin/beta` at start).
 - **Previously reviewed predecessor:** `616b4024d4606efe89bd595a501528c5f3eed4c9`; fix-round precursor `234a0b336c61dc175d18d35b7db96221cf4751ad`; immediately preceding blocked handoff `8c1a21e0d22aaa911ce7bde2a11da24c68d1ec9e`. Review the complete branch range.
 - **Fourth-round implementation checkpoint:** `c8d1befc924002beb33d2e1a1459e2d6da046a21`; the branch tip also contains a later dossier-only handoff commit. Third-round checkpoint: `5422d723a9ae19008c7a93054894c30f6322f184`; earlier recovery checkpoint: `01e7b805b37dfac6182cb93dcee408700f20f1f2`.
@@ -31,5 +31,7 @@
 - Earlier fixture-isolation and Reports-toggle regressions were red-to-green; draft/review guards now structurally admit only preference POSTs and assert draft text is absent. A sentinel HOME test proves the standalone report-links fixture does not write inherited user config. Parent owns independent complete-diff review and exact-committed-tree gates, including full npm; no full npm run was started during these edits.
 
 ## Integration and activation boundary
+
+- Independent reviewer accepted the fourth correction at `ada8dab` (three relevant focused browser checks green). Parent's exact-tip `npm test` then ran **314 tests, 313 pass, 1 fail**: UI redesign `theme menu is keyboard operable and persists` timed out because the conflict alert's actionable button at bottom-left intercepted the sidebar collapse control. This was a real overlay defect, not waived as a flaky assertion. Added `conflict action does not cover sidebar navigation` (red 0/1 on the reviewed code), moved the alert to the bottom-right with a viewport width cap, and reran that regression **1/1** and the whole `ui-redesign.synthetic.test.cjs` file **7/7** green on the corrected worktree. The new alert position and final full gates remain to be independently verified before integration. Synthetic disconnects emitted BrokenPipe tracebacks in passing focused tests; no clean-log claim.
 
 No push, merge, deployment, service restart or real user config write is authorized by this branch. Parent should independently review the full feature and correction range, especially per-edit ownership, uncertain/superseded records, conditional conflict resolution, snapshot escaping, migration receipts, and late reconciliation, then run exact-final-SHA gates. The no-Web-Locks, uncertain-record and detached-tab recovery limitations above remain explicit. Delete this branch-local dossier during integration; durable behavior belongs in code and the terminal UX note.
