@@ -373,6 +373,16 @@ test('popover links only http URLs to loopback or a Tailscale address on the hos
     assert.equal(await popover(page).locator('[data-ports-invalid]').count(),4,'the four bad URLs are shown as text');
     assert.match(await popover(page).locator('[data-ports-invalid]').first().textContent(),/not linked/);
     assert.notEqual(await page.title(),'pwned');
+    // Live line with several ports: two shown, bad URLs as text, "+1 more" opens the full list.
+    await page.keyboard.press('Escape');
+    await popover(page).waitFor({state:'detached'});
+    assert.equal((await live(page).locator('.term-ports-live-text').textContent()).trim(),'3 ports live');
+    assert.deepEqual(await live(page).locator('.term-ports-live-port code').allTextContents(),[':8000',':8001']);
+    assert.equal(await live(page).locator('a[data-ports-url]').count(),0,'the two shown URLs are invalid: no links');
+    assert.equal(await live(page).locator('[data-ports-invalid]').count(),2);
+    await live(page).locator('[data-ports-more]').click();
+    await popover(page).waitFor();
+    assert.equal(await popover(page).locator('[data-ports-item]').count(),3);
     assert.deepEqual(page.errors,[]);
   });
 });

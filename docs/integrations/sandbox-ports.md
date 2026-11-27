@@ -4,14 +4,15 @@
 - Owner surfaces: `terminal_ports.py` (new), `terminal_sandbox.py`, `terminal_service.py`, `sandbox/bbterm-ports.py` (new), `sandbox/Dockerfile`, `sandbox/Dockerfile.test`, `tests/test_terminal_ports.py` (new), `tests/test_terminal_service.py`, `tests/test_terminal_docker.py`; phase 2: `static/modules/sandbox-ports.js|css` (new), `static/index.html` tags, `static/tests/sandbox-ports.synthetic.test.cjs` (new, in `npm test`), `tests/terminal_browser_fixture.py` (`ports` mode).
 - Ryu's request, short: a PoC server started in a report's sandbox (`python3 -m http.server 8000`, a small Flask app, a websocket server) must open in his browser on another tailnet machine. Bind to localhost always, and to the Tailscale address when a terminal setting says so.
 - Phase 2 (done, on top of the terminal UX work): a ports pill in the drawer header and the Tailscale switch on the Settings page, built on `window.BoardTerminal` and `window.BoardSettings` (see "UI" below).
+- Phase 3, Tailscale links (branch `feat/board-ports-tailnet-links`, base `69ee73d`): the Tailscale listener reuses the sandbox's own port number when free (`--ports-same`), a printed `http://localhost:8000/...` in the terminal is a link to the Tailscale URL, a "Port 8000 is live" line under the drawer header, and one interaction for every URL (Ctrl/Cmd+click or middle click opens, a click copies; no Open or Copy buttons). Ryu, verbatim: "it should be same port as the lh is running on if possible ... ctrl click opens and clikcing copies that way we dont need more ui buttons". See "Phase 3" below.
 
 ## How it works
 
 ```
-browser on a tailnet machine ──http://100.x.y.z:9100/──┐
+browser on a tailnet machine ──http://100.x.y.z:8000/──┐   (same number as in the sandbox when free, else :9100)
 local process on the host ─────http://127.0.0.1:9100/──┤
                                                         ▼
-terminal_service.py  PortsHub: listeners 127.0.0.1:<n> (+ Tailscale IPv4:<n> when on)
+terminal_service.py  PortsHub: listeners 127.0.0.1:<n> (+ Tailscale IPv4:<sandbox port or n> when on)
                      per session: ports.sock (host-owned, 0600) in <state>/proxy/<session>/
                                    ▲ the agent dials out; the host never connects in
 container (--network none, read-only, cap-drop ALL, unchanged)
@@ -21,7 +22,7 @@ container (--network none, read-only, cap-drop ALL, unchanged)
 ```
 
 1. The agent (`sandbox/bbterm-ports.py`, run as a thread inside the 3128 forwarder process `bbterm-forward`, restarted by a supervisor loop if the thread dies) opens a control connection to `/run/bbterm/ports.sock` and reports the TCP ports in LISTEN state on loopback or the unspecified address, every second, only on change. 3128 is excluded by the agent and, independently, by the host.
-2. For each reported port (at most 8) the host picks a number from `--ports-range` (default 9100-9199) and listens on `127.0.0.1:<n>`, plus `<tailscale ip>:<n>` when the setting is on.
+2. For each reported port (at most 8) the host picks a number from `--ports-range` (default 9100-9199) and listens on `127.0.0.1:<n>`. When the setting is on it also listens on the Tailscale address: first on the sandbox's own number (`<tailscale ip>:8000`) if that number is in `--ports-same` and the bind succeeds, otherwise on `<tailscale ip>:<n>`.
 3. A browser connects to `<n>`. The host sends `{"t":"open","id":<random 128-bit hex>,"port":8000}` on the control connection. The agent connects to `127.0.0.1:8000` (then `::1`) inside the container, dials a new connection to `ports.sock`, sends `{"t":"data","id":…}` and from then on bytes are copied both ways with half-close.
 4. When the server stops listening the port leaves the list and the host listener closes; the number stays reserved for that sandbox port while the session lives, so the URL is the same when the server starts again.
 
@@ -38,7 +39,7 @@ All routes also work without the `/terminal` prefix, like the existing ones.
 | `GET /api/session?…` | yes | session info gains `ports: [item...]` |
 | WebSocket | yes | new server message `{"type":"ports","ports":[item...]}` whenever that session's list changes (also when Tailscale URLs appear or go); `hello.session.ports` carries the list on attach |
 
-Port item: `{port, host_port, local_url: "http://127.0.0.1:<host_port>/", tailscale_url: "http://<tailscale ip>:<host_port>/"|null, state: "open"|"paused"}`. `tailscale_url` is null when the setting is off, no address is found, or that one listener could not bind. `state` is `paused` while the sandbox is paused (a connection wakes it).
+Port item: `{port, host_port, local_url: "http://127.0.0.1:<host_port>/", tailscale_port: int|null, tailscale_url: "http://<tailscale ip>:<tailscale_port>/"|null, state: "open"|"paused"}`. `host_port` is always the loopback number (from `--ports-range`). `tailscale_port` is the number of the Tailscale listener: `port` itself when it was free and allowed by `--ports-same`, otherwise `host_port`. `tailscale_port` and `tailscale_url` are null when the setting is off, no address is found, or that one listener could not bind on either number. `state` is `paused` while the sandbox is paused (a connection wakes it).
 
 `tailscale_reason`: `disabled` when the setting (or the flag) is off; `not_found` when on but no address is currently found (it keeps looking every 60 s); `null` when on and bound. `tailscale_address` is null unless on and found.
 
@@ -48,6 +49,7 @@ Port item: `{port, host_port, local_url: "http://127.0.0.1:<host_port>/", tailsc
 | --- | --- | --- |
 | `--preview-ports` | off | Off: no `ports.sock`, no listeners, no agent connection accepted, `preview_ports: false` everywhere, POST settings 409. |
 | `--ports-range LO-HI` | `9100-9199` | Host ports used for previews. 1024-65535, at most 1000 numbers, must not contain `--port`. |
+| `--ports-same RANGES` | `1024-8999,10000-65535` | Numbers the Tailscale listener may take from the sandbox (sandbox 8000 → `100.x.y.z:8000`). Comma list of `LO-HI` within 1-65535 (checked at start; bad syntax refused). Empty (`--ports-same ''`) turns it off: Tailscale uses the `--ports-range` number like before. Always excluded whatever the flag says: the service `--port`, 3128 and 3129 (sandbox proxy, model relay) and every `--ports-range` number. 9000-9999 is outside the default because Tailscale Serve uses 9000, 9001 and 9502-9511 on that address today, and a squatted number would block a later `tailscale serve` on it. If the bind fails (in use, privileged, any error) the range number is used. Tried again every time a forward opens (server restart, Tailscale on, address change), so a restarted server gets its number back when free. Loopback never uses it. |
 | `--tailscale-address auto\|IPv4` | `auto` | `auto`: the IPv4 address (in 100.64.0.0/10, local) of a `tailscale*` interface, `tailscale0` first; never another interface, even one with a 100.64.0.0/10 address (ISP carrier-grade NAT, another overlay), so while Tailscale is down there is no address. An explicit address must be in 100.64.0.0/10 (checked at start) and local (checked when used; otherwise `not_found`). |
 
 The setting itself lives in `<state-dir>/settings.json` (`{"ports_tailscale": false}` by default): atomic replace (new 0600 file, fsync, rename, directory fsync), never written after a failed read (permissions, symlink, directory: changes are refused until it is fixed), a corrupt file is renamed to `settings.json.corrupt-<stamp>-<rand>` before the first write replaces it, unknown keys are kept (room for app-wide settings later). Changing it applies live: on opens Tailscale listeners for every current forward; off closes them and the connections that came through them (local ones stay). Off fails closed: the listeners close first, then the file is saved; a failed save still answers 500 `settings_failed`, but Tailscale stays off in this process (the 60 s check does not turn it back on). The file still says on, so a restart would turn it on again until a save succeeds. A failed save when switching on leaves it off.
@@ -87,7 +89,9 @@ Limits (the agent is untrusted: any process in the sandbox can kill it and speak
 
 Newly reachable, and by whom:
 - **Ports on 127.0.0.1** (always, when `--preview-ports` is on): any local process on the host, as for the Board itself. Same assumption as the existing service: local processes on Hoster are trusted.
-- **Ports on the Tailscale address** (only when the setting is on): every tailnet peer the Tailscale ACLs let reach this machine on 9100-9199. There is **no Board auth** on these ports: whoever can reach them can use whatever the PoC server offers. Keep the setting off unless needed, or restrict the port range in ACLs.
+- **Ports on the Tailscale address** (only when the setting is on): every tailnet peer the Tailscale ACLs let reach this machine on that port. There is **no Board auth** on these ports: whoever can reach them can use whatever the PoC server offers. Keep the setting off unless needed.
+- **Since phase 3 the tailnet numbers are no longer confined to 9100-9199.** With the default `--ports-same`, a sandbox server on 8000 is reachable at `100.x.y.z:8000`, and a sandbox can pick almost any number in 1024-8999 and 10000-65535 (excluded: 9000-9999, the service port, 3128, 3129, the range). Tailnet ACLs can therefore **no longer scope preview ports by the 9100-9199 range**: an ACL that allows a peer `100.x.y.z:*` lets it reach any sandbox port while the setting is on. To get the old boundary back, start the service with `--ports-same ''` (Tailscale then uses only `--ports-range` numbers) and restrict 9100-9199 in ACLs.
+- The same-number listener only ever binds the validated Tailscale IPv4 (never `0.0.0.0`/`::`; `_bind_tcp` refusals unchanged), so a sandbox cannot take a host loopback port. Loopback stays on the range number on purpose: on Hoster the loopback has short-lived agent proxy and browser CDP listeners in 8082-8095, 8466-8480 and 9223-9228 that come and go, and a sandbox must never squat a loopback port a local agent will connect to. A sandbox can squat a number on the Tailscale address that another host service would want later (for example a future `tailscale serve` outside 9000-9999); the squat ends when the sandbox server stops, the switch goes off, or the session ends.
 - Never `0.0.0.0` or `::`: `_bind_tcp` refuses the unspecified and multicast addresses, and only `127.0.0.1` and the validated Tailscale address are ever passed (tested: kernel view in `/proc/net/tcp` shows only those). Never the control API port (refused at start).
 - The proxy port 3128 is never exposed (host-side filter, not trusted to the agent): exposing it would let peers use the sandbox's egress proxy.
 
@@ -99,6 +103,23 @@ The tunnel only reaches the container's own loopback:
 - The host never connects to anything for a forward. `terminal_ports.py` contains no `connect`, `connect_ex` or `create_connection` call (asserted by a test). It only accepts on its own listeners and on `ports.sock`.
 - `ports.sock` is created by the host in a host-owned directory through `/proc/self/fd/<dir_fd>/…`, mode 0600, like `proxy.sock`; the container sees that directory read-only, so it cannot replace the socket with a symlink to a host socket (docker.sock). The host never connects to a path the container can write.
 - The only thing the agent chooses is which bytes to send back on a data connection it dialled itself. Extra fields (`host`, `port` on a data line) close the connection (tested). The "destination" of a forward is whatever the agent connects to inside the container, which has only loopback.
+
+## Phase 3: Tailscale links (same number, terminal links, live line)
+
+Backend (`terminal_ports.py`, `terminal_service.py` flag only):
+- `_Forward.ts_port`: `_bind_tailscale` tries the sandbox number when `PortsHub.same_number_allowed(n)` (in `same_ranges`, not the service port, not 3128/3129, not in `--ports-range`), then the forward's `host_port`. The loopback listener is unchanged. Dropping the Tailscale listener clears `ts_port`, so off, address change (rebinds, trying the number again), stopped server, reset and removal all close or rebind it exactly like the old tailnet listener; switching off still closes first and saves second.
+- Two sandboxes on 8000: the first gets `100.x.y.z:8000`, the second's bind fails and it uses its own range number; when the first stops, the second gets 8000 the next time its forward opens.
+
+UI (`static/modules/sandbox-ports.js|css`; seams in `sandbox-terminal.js|css`):
+- **One interaction rule** for every URL (live line, popover, terminal): a real `<a href target="_blank" rel="noopener noreferrer" data-ports-url>` (terminal: `window.open(url, '_blank', 'noopener,noreferrer')`); Ctrl+click, Cmd+click, Shift/Alt+click and middle click open natively; a plain left click is intercepted and copies the URL, then "Copied" (or "Copy blocked by the browser") shows beside it for 1.6 s. On touch-only devices (`(any-pointer: fine)` false) a tap opens. Link title / tip hint: "Ctrl+click to open, click to copy" ("Cmd+click ..." on Apple platforms, "Tap to open" on touch). The popover's Open and Copy buttons are gone.
+- **Live line (1b)** in `BoardTerminal.strip('ports')`, under the header: green dot, "Port 8000 is live", the main URL (Tailscale first with "over Tailscale"; else the local URL and "Only reachable on the server. Turn on Tailscale in Settings." linking `#/settings`; Tailscale on with no address: "Tailscale is on, but the server has no Tailscale address right now."). Several ports: "3 ports live", the first two as `:8000 <url>`, and "+1 more" opening the pill's popover. Hidden without ports. It sits outside the header, so it never starts a drag (tested in all four docks).
+- **Terminal links (1a)**: an xterm link provider (`BoardTerminal.on('terminal')`) finds `http(s)://` text whose host is `localhost`, `127.x.y.z`, `0.0.0.0`, `[::1]` or `[::]` with an explicit port that is a forwarded sandbox port of this session. The target is that port's main URL (Tailscale, else local) with the printed path, query and fragment kept, built with `new URL` from parsed parts; the result must keep the validated forward host and port (same rules as `safeUrl`: http, 127.0.0.0/8 or 100.64.0.0/10 IPv4, the item's own port; an `https://` print keeps https on that same host and port). Anything else (another host, userinfo, `localhost:8000@evil`, an unforwarded port, no port) is not a link. Hover shows a tip built with `textContent` ("Opens over Tailscale" / "Opens on the server", the target, the hint). A drag that ends on a link is left to the selection and copy-on-select. Wide characters before the URL are mapped to cell columns.
+- **Settings** copy: the switch text says the port uses "the same port number as in the sandbox when that number is free"; the note says ports "can be on almost any port number, not only the range above".
+
+Seams (kept to the extension-point block of `sandbox-terminal.js` plus the export line, and one CSS hunk):
+- `BoardTerminal.strip(name)`: a stable `div.term-strip[data-term-strip=name]` in a `div.term-strips` inserted right after `[data-term-head]`; placed when created and again on every session event (the drawer is built lazily), `:empty` hides it.
+- `'terminal'` event: the xterm instance, emitted from `emitSession()` the first time a session attaches with a terminal (it is created once per page and never disposed), replayed to late subscribers in `on()`.
+- `on()` for an unknown type still returns an unsubscribe function.
 
 ## Decisions
 
@@ -119,6 +140,11 @@ The tunnel only reaches the container's own loopback:
 15. UI: the popover is appended to `<body>` (fixed position, clamped to the viewport) instead of living in the header slot, so the header's clipping, wrapping and drag handling are untouched; the slot holds only the pill button, which the drag code already ignores.
 16. No change to `sandbox-terminal.js` was needed: the module reads the terminal URL from the Board context (`capabilities.terminal_url`) like the drawer does, so no `base()` accessor was added.
 17. The browser fixture's Tailscale address is a TEST-ONLY file (`BBTERM_TEST_TAILSCALE_FILE`, a loopback alias, empty = no address), honoured only with `--backend local-test-only` (which already needs `BBTERM_ALLOW_LOCAL_BACKEND=1` and a root under TMPDIR); the Docker backend never reads it.
+18. (Phase 3) The `'terminal'` event is emitted from `emitSession()` (inside the extension-point block) rather than from `ensureTerm()`, so the seam stays in that block; the xterm instance exists before every hello, links only matter with a session, and the instance is never replaced. `strip` had to be added to the `window.BoardTerminal` export object (one word on the export line, outside the block); there is no other way to publish it.
+19. (Phase 3) Same-number binding is on by default (`--ports-same 1024-8999,10000-65535`) because that is what Ryu asked for; `--ports-same ''` restores the 9100-9199 boundary for ACLs.
+20. (Phase 3) An `https://localhost:8000/` print links to `https://<tailscale ip>:8000/` (scheme kept, host and port validated); the forward is plain TCP, so a TLS PoC server works through it, and linking it as http would break it.
+21. (Phase 3) Shift+click and Alt+click on a URL are left to the browser (new window / download) rather than copying; only a plain left click copies.
+22. (Phase 3) With several ports, the live line shows two and "+N more" opens the pill's popover (no second list).
 
 ## Evidence
 
