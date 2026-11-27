@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.client import HTTPConnection
 from pathlib import Path
 
@@ -44,6 +45,22 @@ class UserPreferencesTests(unittest.TestCase):
         self.assertEqual(self.request('GET')[1]['preferences']['bounty-board-theme'], 'dark')
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
 
+    def test_default_location_is_server_users_exact_config_path(self):
+        home = Path(self.temp.name) / 'home'
+        home.mkdir()
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            server = app.make_server(self.root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        original = self.server
+        self.server = server
+        try:
+            self.assertEqual(self.request('POST', {'set': {'bounty-board-theme': 'dark'}})[0], 200)
+            self.assertTrue((home / '.config' / 'bountyboard' / 'user.conf').is_file())
+        finally:
+            self.server = original
+            server.shutdown(); thread.join(); server.server_close()
+
     def test_migration_fills_missing_only(self):
         self.request('POST', {'set': {'bounty-board-theme': 'dark'}})
         status, body = self.request('POST', {'migrate': {'bounty-board-theme': 'light', 'terminal.dock': 'left'}})
@@ -66,7 +83,7 @@ class UserPreferencesTests(unittest.TestCase):
         self.config.parent.mkdir(parents=True)
         self.config.write_text('{broken')
         self.assertEqual(self.request('GET')[0], 503)
-        self.assertNotEqual(self.request('POST', {'set': {'bounty-board-theme': 'dark'}})[0], 200)
+        self.assertEqual(self.request('POST', {'set': {'bounty-board-theme': 'dark'}})[0], 503)
         self.assertEqual(self.config.read_text(), '{broken')
 
     @unittest.skipIf(os.geteuid() == 0, 'root can read mode-000 files')
@@ -76,7 +93,7 @@ class UserPreferencesTests(unittest.TestCase):
         self.config.chmod(0)
         try:
             self.assertEqual(self.request('GET')[0], 503)
-            self.assertNotEqual(self.request('POST', {'set': {'bounty-board-theme': 'light'}})[0], 200)
+            self.assertEqual(self.request('POST', {'set': {'bounty-board-theme': 'light'}})[0], 503)
         finally:
             self.config.chmod(0o600)
         self.assertEqual(self.config.read_text(), '{"bounty-board-theme":"dark"}')

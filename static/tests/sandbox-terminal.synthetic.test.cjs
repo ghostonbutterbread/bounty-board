@@ -748,7 +748,7 @@ test('settings page: sidebar link, tab title, persistence, live apply across tab
     assert.equal(await link.getAttribute('aria-current'),'page');
     const card=page.locator('[data-settings-group="terminal"]');
     assert.equal(await card.locator('h2').textContent().then(t=>t.trim()),'Terminal');
-    await card.locator('.settings-note').filter({hasText:'Saved in this browser.'}).waitFor();
+    await card.locator('.settings-note').filter({hasText:'Settings are saved on the Board server.'}).waitFor();
     for(const name of ['Copy on select','Ctrl+C copies a selection','Ctrl+V pastes'])assert.equal(await page.getByRole('switch',{name}).isChecked(),true,name);
     // Middle click opens Settings in a new tab (a real link).
     const [popup]=await Promise.all([page.context().waitForEvent('page'),link.click({button:'middle'})]);
@@ -791,12 +791,12 @@ test('settings page: sidebar link, tab title, persistence, live apply across tab
     assert.equal((await stored(page)).dock,'top');
     await page.getByRole('switch',{name:'Ctrl+V pastes'}).check();
     await report.waitForFunction(()=>window.BoardTerminal.prefs.ctrlVPaste===true);
-    // Corrupt stored values fall back to the defaults.
+    // Corrupt browser values cannot override the saved server default.
     await page.evaluate(k=>localStorage.setItem(k,'{"dock":"diagonal","height":"tall","shortcut":{"ctrl":true,"code":"KeyT"},"copyOnSelect":"yes"}'),STORE);
     await page.reload();
     await page.locator('[data-shortcut-recorder]').waitFor({timeout:15000});
     assert.equal((await page.locator('[data-shortcut-recorder]').textContent()).trim(),'Ctrl+E');
-    assert.equal(await page.locator('[data-set-dock="bottom"]').getAttribute('aria-pressed'),'true');
+    assert.equal(await page.locator('[data-set-dock="top"]').getAttribute('aria-pressed'),'true');
     assert.equal(await page.getByRole('switch',{name:'Copy on select'}).isChecked(),true);
     for(const t of ['light','dark']){await theme(page,t);await page.waitForTimeout(300);await shot(page,`settings-${t}.png`);}
     assert.deepEqual([...page.errors,...report.errors],[]);
