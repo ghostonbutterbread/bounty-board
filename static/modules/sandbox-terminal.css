@@ -61,8 +61,6 @@
 .term-slots{display:contents}
 .term-slot{display:inline-flex;align-items:center;gap:var(--space-2)}
 .term-slot:empty{display:none}
-.term-strips{flex:none;display:grid;min-width:0}
-.term-strip:empty{display:none}
 .term-dock{display:inline-flex;align-items:center;gap:1px;padding:2px;border-radius:var(--radius);background:var(--surface-3)}
 .term-dock-btn{display:inline-grid;place-items:center;width:26px;height:24px;padding:0;border:0;border-radius:calc(var(--radius) - 2px);background:transparent;color:var(--text-3)}
 .term-dock-btn:hover{color:var(--text)}

@@ -4,11 +4,11 @@
  * exposed by the terminal service on a host port (docs/integrations/sandbox-ports.md).
  * This module shows those ports one click away:
  *
- * - drawer: a "1 port" pill in window.BoardTerminal.slot('ports'); its popover
- *   lists each sandbox port with its URL(s). With Tailscale on, the Tailscale URL
- *   is the main one (it works from another machine) and the 127.0.0.1 one is
- *   "on the server".
- * - drawer: a "Port 8000 is live" line in window.BoardTerminal.strip('ports').
+ * - drawer: address chips in window.BoardTerminal.slot('ports'), one per port
+ *   (100.101.102.103:8000; the 127.0.0.1 one, muted, when Tailscale is off), at
+ *   most two, then "+N" opening a popover with every port and its URL(s). With
+ *   Tailscale on, the Tailscale URL is the main one (it works from another
+ *   machine) and the 127.0.0.1 one is "on the server".
  * - terminal: a printed http://localhost:8000/... (127.x, 0.0.0.0, [::1], [::])
  *   for a forwarded sandbox port is a link to that port's URL, path kept.
  * - one rule for every URL: Ctrl/Cmd+click (or middle click) opens in a new tab,
@@ -26,7 +26,7 @@
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
   const touchOnly = () => !!window.matchMedia && !window.matchMedia('(any-pointer: fine)').matches;
   const hint = () => (touchOnly() ? 'Tap to open' : `${isMac ? 'Cmd' : 'Ctrl'}+click to open, click to copy`);
-  const LIVE_MAX = 2;   // ports shown in the live line; the pill's popover has them all
+  const CHIPS_MAX = 2;   // address chips in the header; more ports go behind "+N" (the popover)
   const NOT_ENABLED = 'Not enabled on this server. Start the terminal service with --preview-ports.';
   const ERRORS = {
     tailscale_not_found: 'No Tailscale address found on the server.',
@@ -86,53 +86,87 @@
     paint();
   }
 
+  // Header chips: the address itself, one chip per port (at most CHIPS_MAX, fewer when
+  // the header is short of room), then "+N" opening the popover with every port.
+  function chipHtml(p, first) {
+    const {url, tailnet} = mainUrl(p);
+    const icon = first ? '<i class="fa fa-plug" aria-hidden="true"></i>' : '';
+    if (!url) {
+      const raw = String(p.tailscale_url || p.local_url || '');
+      return `<span class="term-ports-chip muted" data-ports-chip data-ports-invalid title="${esc(`${raw}\nUnexpected address, not linked`)}">${icon}<span class="term-ports-chip-text">${esc(raw.replace(/^[a-z]+:\/\//i, '').replace(/\/$/, ''))}</span></span>`;
+    }
+    const where = tailnet ? '' : `\n${flags.ports_tailscale ? NO_ADDRESS : `${NOTE_OFF} Settings.`}`;
+    return `<a class="term-ports-chip${tailnet ? '' : ' muted'}" href="${esc(url)}" target="_blank" rel="noopener noreferrer" draggable="false" data-ports-chip data-ports-url data-port="${esc(p.port)}" title="${esc(`${url}${where}\n${hint()}`)}">${icon}<span class="term-ports-chip-text">${esc(url.slice('http://'.length, -1))}</span></a>`;
+  }
+
+  // mode: 'normal', 'tight' (shorter chip text), 'compact' (only "+N", icon and number) or 'none'.
+  function renderChips(slot, count, mode) {
+    const more = ports.length - count;
+    slot.dataset.portsTight = mode === 'tight' ? 'true' : 'false';
+    slot.dataset.portsFit = mode;
+    if (mode === 'none') { slot.innerHTML = ''; return; }
+    const all = `All sandbox ports: ${ports.map(p => `:${p.port}`).join(', ')}`;
+    slot.innerHTML = ports.slice(0, count).map((p, i) => chipHtml(p, i === 0)).join('')
+      + (more > 0 ? `<button type="button" class="term-ports-chip term-ports-more" data-ports-more aria-haspopup="dialog" aria-expanded="false" aria-label="${esc(`${more} ${more === 1 ? 'port' : 'ports'}. ${all}`)}" title="${esc(all)}">${count ? '' : '<i class="fa fa-plug" aria-hidden="true"></i>'}+${esc(more)}</button>` : '');
+  }
+
+  // Chips must not add a header row, move the dock picker or the actions, or overflow:
+  // try CHIPS_MAX chips, then one, then one with a shorter text, then only "+N"; measured, not guessed.
+  function fitChips(slot) {
+    const head = slot.closest('[data-term-head]');
+    const first = Math.min(CHIPS_MAX, ports.length);
+    if (!head || !head.offsetParent) { renderChips(slot, first, 'normal'); return; }
+    const marks = [...head.querySelectorAll('[data-term-dock], .term-actions, [data-term-sub], [data-term-status]')];
+    const others = [...head.querySelectorAll('.term-grip, .term-title, [data-term-status], [data-term-flash], [data-term-dock], [data-term-sub], .term-actions, [data-term-slot]')].filter(el => el !== slot);
+    const hit = (a, b) => a.width > 0 && b.width > 0 && a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
+    const overlap = () => [...slot.children].some(chip => { const r = chip.getBoundingClientRect(); return others.some(el => hit(r, el.getBoundingClientRect())); });
+    const probe = () => ({h: head.offsetHeight, tops: marks.map(el => el.offsetTop),
+      over: [...head.querySelectorAll('.term-row')].some(row => row.scrollWidth > row.clientWidth + 1) || slot.scrollWidth > slot.clientWidth + 1 || overlap()});
+    slot.style.display = 'none';
+    const base = probe();
+    slot.style.display = '';
+    const fits = () => { const now = probe(); return now.h <= base.h + 1 && now.tops.every((t, i) => Math.abs(t - base.tops[i]) <= 1) && (!now.over || base.over); };
+    // Nothing fits (a side dock at its minimum width): no chip rather than one over the
+    // dock picker; widening the drawer re-fits, and terminal links still work.
+    const tries = [[first, 'normal'], [Math.min(1, first), 'normal'], [Math.min(1, first), 'tight'], [0, 'compact']];
+    for (const [count, mode] of tries) { renderChips(slot, count, mode); if (fits()) return; }
+    renderChips(slot, 0, 'none');
+  }
+
+  let fitKey = '', fitObserver = null;
   function paint() {
     const slot = slotEl();
     if (!slot) return;
-    paintStrip();
+    bindSlot(slot);
+    observeDrawer(slot);
     const show = flags.preview_ports && selector && ports.length;
-    if (!show) { closePopover(false); slot.replaceChildren(); return; }
-    const label = `${ports.length} ${ports.length === 1 ? 'port' : 'ports'}`;
-    let pill = slot.querySelector('[data-ports-pill]');
-    if (!pill) {
-      slot.innerHTML = '<button type="button" class="term-ports-pill" data-ports-pill aria-haspopup="dialog" aria-expanded="false"><i class="fa fa-plug" aria-hidden="true"></i><span data-ports-count></span></button>';
-      pill = slot.querySelector('[data-ports-pill]');
-      pill.addEventListener('click', () => (pop ? closePopover(true) : openPopover(pill)));
-    }
-    pill.querySelector('[data-ports-count]').textContent = label;
-    pill.title = `Sandbox ports: ${ports.map(p => `:${p.port}`).join(', ')}`;
-    if (pop) fillPopover();
+    if (!show) { closePopover(false); slot.replaceChildren(); fitKey = ''; return; }
+    const keepFocus = slot.contains(document.activeElement) ? document.activeElement.dataset.port || 'more' : null;
+    fitChips(slot);
+    fitKey = layoutKey(slot);
+    if (keepFocus) slot.querySelector(keepFocus === 'more' ? '[data-ports-more]' : `[data-port="${CSS.escape(keepFocus)}"]`)?.focus();
+    const more = slot.querySelector('[data-ports-more]');
+    if (pop && !more) closePopover(false);
+    else if (pop) { popFor = more; more.setAttribute('aria-expanded', 'true'); fillPopover(); }
   }
+  const layoutKey = slot => { const d = slot.closest('.term-drawer'); return d ? `${d.dataset.dock}|${d.offsetWidth}|${window.innerWidth}` : ''; };
 
-  // -- live line under the drawer header (1b) ---------------------------------------
-  const stripEl = () => window.BoardTerminal?.strip?.('ports') || null;
-
-  function paintStrip() {
-    const el = stripEl();
-    if (!el) return;
-    if (!(flags.preview_ports && selector && ports.length)) { el.replaceChildren(); return; }
-    const shown = ports.slice(0, LIVE_MAX);
-    const entry = p => {
-      const {url, tailnet} = mainUrl(p);
-      const link = url ? linkHtml(url, 'term-ports-live-link') : `<span class="term-ports-live-link" data-ports-invalid>${esc(p.tailscale_url || p.local_url)}</span>`;
-      return ports.length === 1
-        ? `<span class="term-ports-live-text">Port <b>${esc(p.port)}</b> is live</span>${link}${url && tailnet ? '<span class="term-ports-where">over Tailscale</span>' : ''}`
-        : `<span class="term-ports-live-port"><code>:${esc(p.port)}</code>${link}</span>`;
-    };
-    const anyTailnet = shown.some(p => mainUrl(p).tailnet);
-    const head = ports.length === 1 ? '' : `<span class="term-ports-live-text">${esc(ports.length)} ports live</span>`;
-    const more = ports.length > LIVE_MAX ? `<button type="button" class="term-ports-more" data-ports-more>+${esc(ports.length - LIVE_MAX)} more</button>` : '';
-    const note = anyTailnet ? ''
-      : flags.ports_tailscale ? `<span class="term-ports-live-note" data-ports-note>${esc(NO_ADDRESS)}</span>`
-        : `<span class="term-ports-live-note" data-ports-note>${NOTE_OFF} <a href="#/settings" data-ports-settings>Settings</a>.</span>`;
-    el.innerHTML = `<div class="term-ports-live" data-ports-live><span class="term-ports-dot" aria-hidden="true"></span>${head}${shown.map(entry).join('')}${more}${note}</div>`;
+  function bindSlot(slot) {
+    if (slot.__portsBound) return;
+    slot.__portsBound = true;
+    slot.addEventListener('click', event => {
+      if (onUrlClick(event)) return;
+      const more = event.target.closest('[data-ports-more]');
+      if (more) (pop ? closePopover(true) : openPopover(more));
+    });
+    // Re-fit when the drawer is re-docked, resized or opened (only when its dock or width changed).
+    const refit = () => { if (ports.length && fitKey && layoutKey(slot) !== fitKey) paint(); };
+    if (window.ResizeObserver) fitObserver = new ResizeObserver(refit);
+    window.addEventListener('resize', refit);
   }
-
-  function onStripClick(event) {
-    if (event.target.closest('[data-ports-more]')) {
-      const p = slotEl()?.querySelector('[data-ports-pill]');
-      if (p) openPopover(p);
-    }
+  function observeDrawer(slot) {
+    const drawer = slot.closest('.term-drawer');
+    if (fitObserver && drawer && !drawer.__portsObserved) { drawer.__portsObserved = true; fitObserver.observe(drawer); }
   }
 
   // The service builds these URLs, but only http links to loopback or a
@@ -177,8 +211,18 @@
     </div>`;
   }
 
-  // Copied / blocked note next to a link, 1.6 s.
+  // Copied / blocked note, 1.6 s: on a header chip itself, else next to the link.
   function flash(anchor, ok) {
+    if (anchor.matches('[data-ports-chip]')) {
+      const text = anchor.querySelector('.term-ports-chip-text');
+      anchor.dataset.copied = ok ? 'ok' : 'warn';
+      anchor.setAttribute('aria-live', 'polite');
+      text.dataset.address ??= text.textContent;
+      text.textContent = ok ? 'Copied' : 'Copy blocked by the browser';
+      clearTimeout(anchor.timer);
+      anchor.timer = setTimeout(() => { delete anchor.dataset.copied; text.textContent = text.dataset.address; }, 1600);
+      return;
+    }
     let el = anchor.nextElementSibling?.matches?.('[data-ports-copied]') ? anchor.nextElementSibling : null;
     if (!el) {
       el = document.createElement('span');
@@ -396,10 +440,6 @@
     paint();
     refresh();
   }
-  function bindStrip() {
-    const el = stripEl();
-    if (el && !el.__portsBound) { el.__portsBound = true; el.addEventListener('click', event => { if (!onUrlClick(event)) onStripClick(event); }); }
-  }
   function onMessage(message) {
     if (message?.type !== 'ports' || !selector) return;
     ports = Array.isArray(message.ports) ? message.ports : [];
@@ -488,7 +528,6 @@
       window.BoardTerminal.on('session', onSession);
       window.BoardTerminal.on('message', onMessage);
       window.BoardTerminal.on('terminal', attachLinks);
-      bindStrip();
     },
   });
   window.BoardPorts = {get ports() { return ports.slice(); }, get flags() { return {...flags}; }, linkTarget};  // tests and diagnostics
