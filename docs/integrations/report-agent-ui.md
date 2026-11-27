@@ -54,7 +54,7 @@ In the popover, under the start form or the live section: "Running agents on thi
 Ryu: the PoC should be validated end to end with web access, and the agent should have our skills without anyone maintaining a list. No UI change was needed: the Agent button, popover, tab and approval flow are the same; what the agent knows and does changed.
 
 - `--report-agent-skills-dir ~/.claude/skills` gives the agent every skill Claude Code uses on Hoster (about 200), copied with permission-widening frontmatter removed into one read-only tree mounted at `/opt/report-agent/skills`; `~/.claude/skills` in the sandbox links to it. New skills appear in the next sandbox started after the change; nothing to maintain. Details, mounts and the threat model: [`report-agent.md`](report-agent.md) (Skills tree).
-- The prompt now has the agent load the vulnerability-class skill and `live-testing-policy`, run offline checks, then ask to run the PoC end to end (the Agent tab shows the approval prompt for each command), show the result, save `poc-run-<UTC timestamp>.txt` in the packet, and give GREEN only after a live run showed impact (else "YELLOW / not ready"). For a test-account credential it gives Ryu a `read -rs` one-liner for the Terminal tab that writes `/tmp/bb-auth`, runs the PoC with `--auth-file /tmp/bb-auth`, and asks afterwards whether to delete the file.
+- The prompt now has the agent load the vulnerability-class skill and `live-testing-policy`, run offline checks, then ask to run the PoC end to end (the Agent tab shows the approval prompt for each command), show the result, save `poc-run-<UTC timestamp>.txt` in the packet, and give GREEN only after a live run showed impact (else "YELLOW / not ready"). For a test-account credential it gives Ryu the one-liner `rm -f /tmp/bb-auth; (umask 077; set -C; IFS= read -rs BB_AUTH && printf '%s' "$BB_AUTH" > /tmp/bb-auth)` for the Terminal tab (re-review V5), runs the PoC with `--auth-file /tmp/bb-auth`, and asks afterwards whether to delete the file.
 - Commit `4d79074`. Runs: see `report-agent.md`, "Follow-up 2". The browser file `static/tests/report-agent.synthetic.test.cjs` still passes (6 pass, 0 fail) with the new template.
 
 ## Review round (608a962..7696646, ACCEPT with one should-fix and four minors)
@@ -95,6 +95,46 @@ Ghost's `~/.claude/skills` (same shape as Hoster's), read-only, into a scratch s
 | `static/tests/ui-redesign.synthetic.test.cjs` | 7 pass, 0 fail |
 
 No Python module changed in this round.
+
+## Review round 2 (7696646..7e6c930, BLOCK on the skills tree; U1 to U5 and the mount race confirmed)
+
+Red/green: each regression test was run with the touched source swapped back to its `7e6c930` content, then restored. The tree fixes span `terminal_agent_cli.py` and its call site in `terminal_report_agent.py` (new `expect`, `log`, `identities` and `user` arguments), so those two were swapped back together. Regression tests: `tests/test_review_rv2.py` (from the reviewer's `test_skills_tree_rv2.py` and `test_bb_auth_rules.py`, paths fixed), `static/tests/report-agent-scan-coverage.test.cjs` (from `scan-websocket-gap.test.cjs`), and two new cases in `test_terminal_agent_docker.test_07`. Commit `7c727ed`.
+
+| Finding | Fix | Regression test | Swapped back | Red on 7e6c930 | Green now |
+| --- | --- | --- | --- | --- | --- |
+| V1 blocker: `.git` (409 entries on Hoster) and other dot-folders copied into every sandbox | `copy_skill` and `skill_signature` skip `.git`, `.hg`, `.svn`, `.bzr`, `CVS` (folder or a worktree's `.git` file) and every dot-directory at any depth; deploy scan now runs over the generated tree without `-I`, plus a count of compressed files to check by hand | `Exposure.test_git_metadata_and_dot_directories_are_not_copied` | cli + report_agent | FAIL (`.git`, `.hg`, `.svn`, `.bzr`, `CVS`, `.pytest_cache` copied) | pass |
+| V2: a FIFO in a skill hangs every start, reset and removal | `lstat` first, only regular files are opened, with `O_NONBLOCK\|O_NOFOLLOW` and an `fstat` re-check | `FifoHang.test_fifo_in_a_skill_does_not_block_builds_or_stop` | cli + report_agent | FAIL (build and destroy still blocked after 3 s) | pass |
+| V3: cleanup could delete a starting sandbox's tree | `skills_tree(user=)` records the tree in `tree_users` in the same lock hold that returns it; `session_destroyed` releases it, also after a failed `docker run` | `GcRace.test_tree_returned_to_a_starting_sandbox_survives_a_concurrent_rebuild` | cli + report_agent | ERROR (`user=` did not exist; the reviewer's form of the repro fails with "the tree handed to sandbox A was deleted") | pass |
+| V4: the agent could read `/tmp/bb-auth` without asking | Managed deny `Read(//tmp/bb-auth)`; the real binary also refuses Grep with it | `CredentialRules.test_managed_policy_denies_reading_the_credential_file`; `test_07` (real Claude Code 2.1.331: scripted Read and Grep of the file come back `is_error`, the content never reaches the fake upstream, Bash still asks) | `terminal_agent_cli.py` (unit); for `test_07` only the deny line removed, because the whole file would break the new call sites | unit FAIL; `test_07` FAIL ("FAKE-BBAUTH-SECRET-7Q2 unexpectedly found" in the model request) | pass |
+| V5: one-liner created the file 0644 until chmod, followed a planted link, left the variable set on failure | Template: `rm -f /tmp/bb-auth; (umask 077; set -C; IFS= read -rs BB_AUTH && printf '%s' "$BB_AUTH" > /tmp/bb-auth)`; the offer to delete it after the run stays | `CredentialRules.test_template_has_the_exact_one_liner`; `test_one_liner_in_the_sandbox_image` (Docker, `bbterm-test-image-agent`: mode 600 owned by the user, variable unset in the shell, a link to an existing file and a dangling link planted after the `rm` both refused with the target untouched and nothing created, the full line replaces a planted link with a 0600 file) | `agent_prompts/report-agent.md` | FAIL (both) | pass |
+| V6: copies ignored privacy and could follow a swap | Walk from an `O_NOFOLLOW\|O_DIRECTORY` handle whose dev/inode must match what discovery checked, `dir_fd`-relative opens below; files with more than one link or not readable by others skipped with one log line (name only) | `Exposure.test_hard_linked_and_private_files_are_not_copied`; `SwapRace.test_target_swapped_to_a_link_into_root_after_checks_is_not_copied`; `SwapRace.test_folder_replaced_by_another_folder_after_discovery_is_refused` | cli + report_agent | FAIL (private and hard-linked files copied as 0644; a file from inside `--root` copied; a replaced folder copied) | pass |
+| V7: WebSocket frames not scanned; `test_07` no longer showed precedence over an unstripped skill | `tokenCapture` records frames sent and received through CDP `Network.webSocketFrameSent/Received` and reports unreadable API bodies; the popover test checks frames are captured both ways; `test_07` builds one tree with `cli.strip_frontmatter` patched to identity (test only, no production flag) and the `allowed-tools: [Bash]` skill still gets the managed ask prompt, no marker | `report-agent-scan-coverage`; `test_07` "unstripped allowed-tools skill loaded, Bash asks" | `static/tests/report-agent.synthetic.test.cjs` | FAIL (no frame capture) | pass (`test_07` case is coverage: it passes on both, as it should) |
+
+### Skills tree against the real-shaped directory, again (read-only)
+
+Ghost's `~/.claude/skills`, read-only, scratch state under `TMPDIR` deleted afterwards; a snapshot of every source file's mtime, size and mode matched before and after; counts only.
+
+- Discovery: 210 entries, 208 skills, 2 skipped ("no top-level SKILL.md").
+- Dot and VCS directories skipped: `.git` (409 entries, 1 skill), `.pytest_cache` (4 files, 1 skill); no `.git` file. None remain in the tree.
+- Files skipped: 2 "not readable by others" (a `.pyc` and a `.md`), 0 with more than one link; 4 nested symlinks skipped.
+- Tree: 553 files, 5.44 MiB (was 973 files and 6.3 MiB with `.git`).
+- Build 0.21 s; change check with nothing changed 0.023 s.
+- The four required skills are present; 0 `SKILL.md` files with frontmatter keys other than `name` and `description`.
+
+### Review round 2 runs (serially, `TMPDIR=/tmp/bbra`; Docker after the gate run ended)
+
+| Run | Result |
+| --- | --- |
+| `tests.test_review_rv2` (new) | 9 OK without Docker (1 skipped); 9 OK with `BBTERM_DOCKER_TESTS=1` |
+| `tests.test_terminal_skills_tree` | 5 OK |
+| `tests.test_terminal_report_agent` | 28 OK (one error under load in the first run, then 28 OK twice) |
+| `tests.test_review_r1_permission_settings` / `test_review_r2_minors` / `test_terminal_agent_login` / `test_terminal_sandbox` | 7 / 8 / 13 / 47 OK |
+| `test_terminal_docker` (`BBTERM_TEST_IMAGE=bbterm-test-image-agent:latest BBTERM_DOCKER_TESTS=1`) | 13 OK |
+| `test_terminal_agent_docker` (`BBTERM_CLAUDE_BIN=$HOME/.local/bin/claude BBTERM_DOCKER_TESTS=1`) | 8 OK; policy evidence for 5 cases (the three earlier ones, "Read and Grep of /tmp/bb-auth denied, Bash asks", "unstripped allowed-tools skill loaded, Bash asks") |
+| `static/tests/report-agent.synthetic.test.cjs` | 6 pass |
+| `static/tests/report-agent-scan-coverage.test.cjs` | 1 pass |
+
+No `bbterm-test-*` container remained.
 
 ## Seams added to `sandbox-terminal.js`
 
