@@ -199,6 +199,14 @@
     el.addEventListener('keydown',event=>{
       if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closePopover(true);}
       else if(event.key==='Tab' && !options.trapTab){event.preventDefault();closePopover(true);}
+      else if(event.key==='Tab'){
+        // trapTab: Tab and Shift+Tab wrap inside the open popover instead of leaving it open behind the focus.
+        const items=[...el.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')].filter(n=>!n.disabled && n.tabIndex>=0 && n.getClientRects().length);
+        const first=items[0], last=items[items.length-1];
+        if(!items.length || !el.contains(document.activeElement)){event.preventDefault();(first||el).focus?.();}
+        else if(event.shiftKey && document.activeElement===first){event.preventDefault();last.focus();}
+        else if(!event.shiftKey && document.activeElement===last){event.preventDefault();first.focus();}
+      }
     });
     return el;
   }

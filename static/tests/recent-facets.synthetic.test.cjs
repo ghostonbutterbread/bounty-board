@@ -237,3 +237,21 @@ test('R1: cold-start rows are not falsely "No longer matches" under a class filt
   assert.deepEqual(stale,[],'the server returned these rows for class=xss');
   assert.doesNotMatch(await page.locator('[data-recent-status]').innerText(),/no longer match/);
 }));
+
+// Review round 2, N1: trapTab popovers (facet dropdowns, Recon popovers) keep Tab and Shift+Tab inside
+// while open, so focus never lands behind an open popover (a toast's Dismiss, or outside the page).
+test('N1: Tab and Shift+Tab stay inside an open facet popover',{timeout:90000},()=>withBoard('readonly',async({page,url})=>{
+  await page.goto(`${url}#/recent?within=all&order=newest`);
+  await page.locator(`.recent-table tr[data-path="${REPORT}"]`).waitFor();
+  await page.evaluate(()=>document.querySelectorAll('.toast').forEach(t=>t.remove()));
+  await page.locator('[data-facet-open="sev"]').click();await page.locator('.facet-popover').waitFor();
+  const inside=()=>page.evaluate(()=>!!document.activeElement?.closest('.facet-popover'));
+  for(const key of ['Tab','Shift+Tab']){
+    const seen=[];
+    for(let i=0;i<12;i++){await page.keyboard.press(key);seen.push(await inside());}
+    assert.deepEqual(seen,Array(12).fill(true),`${key}: focus left the popover while it stayed open`);
+  }
+  assert.equal(await page.locator('[data-facet-open="sev"]').getAttribute('aria-expanded'),'true');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(()=>document.activeElement?.dataset.facetOpen),'sev');
+}));

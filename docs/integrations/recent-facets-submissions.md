@@ -114,6 +114,14 @@ Evidence for round 1 (load average 15 to 17; each file alone, serial, `TMPDIR=/t
 - Red runs were done in a scratch copy of the tree with only the named source file taken from `d546895`: `search_index.py` → R2 test fails; `filter-bar.js` → `filter-bar.test.cjs` 4/6 and the R1 browser test 0/1; `finding_facets.py` → `test_finding_facets` 1 failure (the server-shape case).
 - Screenshots regenerated in `/tmp/bbfacets/screens/` (all 14, including `submissions-*.png` and `recent-filtered-light.png`); checked by eye: the subclass sits under the category.
 
+## Review round 2 (narrow re-review of `db3a6c6`: ACCEPT)
+
+R1 and R2 confirmed fixed (reviewer repros pass). Live keyboard check: one popover at a time, Esc and outside click return focus, `aria-expanded`, arrows/Home/End, Space applies and keeps the popover open; no sideways scroll at 375, 1024, 1280, 1440 on Recent and Submissions; popovers stay inside the viewport.
+
+| Finding | Fix | Red on `db3a6c6` | Test |
+| --- | --- | --- | --- |
+| N1 (minor, pre-existing since the old Recent program picker): `trapTab` in `openPopover` only stopped Tab from closing the popover, so Tab past the last control moved focus behind the still-open popover (a toast's Dismiss, or out of the page). Also affected the Recon popovers that pass `trapTab`. | `openPopover`: with `trapTab`, Tab on the last focusable control wraps to the first and Shift+Tab on the first wraps to the last; focus outside the popover is pulled back in. The "Tab is trapped inside" line above is now true. | `static/app.js` swapped back: the N1 test fails ("Tab: focus left the popover"). | `recent-facets.synthetic` "N1: Tab and Shift+Tab stay inside an open facet popover" (12 presses each way, then Esc returns focus to the button). File **6/6**. |
+
 ## Screenshots
 
 `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome node static/tests/tools/recent-facets-screenshots.cjs $TMPDIR/screens` (fixture `tests/recent_actions_fixture.py`, read-only) wrote to `/tmp/bbfacets/screens/`:
