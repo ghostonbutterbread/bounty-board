@@ -14,7 +14,7 @@ Inside the Terminal card (`BoardSettings.register({id: 'agent', group: 'terminal
 
 - **CLI and model.** Every CLI is listed. Codex, OMP and OpenCode are disabled options reading "Codex (Needs a sandbox login on Hoster)". A sandbox-ready CLI whose binary is missing says "(not found on Hoster)". The model select has the CLI's models ("Default model", opus, sonnet, haiku) and "Custom..." when the CLI accepts custom ids; Custom shows a "Model id" field validated with the backend's rule (`[a-z0-9]([a-z0-9.-]{0,62}[a-z0-9])?`), with `aria-invalid` and a short reason, and Save stays disabled until it is valid. Save sends `POST /terminal/api/agent/config {cli, model}` and says "Saved for every device." The hint says the choice is saved on the terminal service and applies on every device (the card's own note, "Saved in this browser.", is about the terminal switches above).
 - **Sandbox login (Claude)** (follow-up), when the service has `--report-agent-token-file` (`login.editable`):
-  - No login: the "No sandbox login on Hoster yet" pill, the help line "Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board's user.", a password field (`autocomplete="off"`, `spellcheck=false`, not inside a form, placeholder `sk-ant-oat...`) and Save (Enter works too).
+  - No login: the "No sandbox login on Hoster yet" pill, the help line "Run claude setup-token on Hoster and paste the token here. It is stored on Hoster only, readable by the Board's user.", a masked text field and Save (Enter works too). Since the review round (U1) the field is `type="text"` masked with `-webkit-text-security: disc` (inline and in CSS), `autocomplete="off"`, `spellcheck=false`, `data-1p-ignore`, `data-lpignore="true"`, `data-bwignore`, `data-form-type="other"`, not inside a form, placeholder `sk-ant-oat...`; the pill sits right-aligned with the field and Save, and the help line is one full-width line under the row.
   - Save reads the field, clears it at once (success or failure), checks the setup-token shape in the page (a wrong value is refused there and never sent), then sends `POST /terminal/api/agent/login {cli: "claude", token}`. The value is never kept in module state, storage, the URL or a log; the only copy that leaves the field is that request body.
   - Saved: "Saved <relative time>", the "Sandbox login ready" pill, Remove and Replace. Replace shows the field again with Cancel. Remove asks first ("Remove the sandbox login?", Remove login / Cancel, the same `BoardLedgerActions.dialog` pattern as Stop) and sends `POST /api/agent/logout`.
   - A login file the service refuses (wrong mode, symlink and so on) shows the service's message under the row.
@@ -56,6 +56,45 @@ Ryu: the PoC should be validated end to end with web access, and the agent shoul
 - `--report-agent-skills-dir ~/.claude/skills` gives the agent every skill Claude Code uses on Hoster (about 200), copied with permission-widening frontmatter removed into one read-only tree mounted at `/opt/report-agent/skills`; `~/.claude/skills` in the sandbox links to it. New skills appear in the next sandbox started after the change; nothing to maintain. Details, mounts and the threat model: [`report-agent.md`](report-agent.md) (Skills tree).
 - The prompt now has the agent load the vulnerability-class skill and `live-testing-policy`, run offline checks, then ask to run the PoC end to end (the Agent tab shows the approval prompt for each command), show the result, save `poc-run-<UTC timestamp>.txt` in the packet, and give GREEN only after a live run showed impact (else "YELLOW / not ready"). For a test-account credential it gives Ryu a `read -rs` one-liner for the Terminal tab that writes `/tmp/bb-auth`, runs the PoC with `--auth-file /tmp/bb-auth`, and asks afterwards whether to delete the file.
 - Commit `4d79074`. Runs: see `report-agent.md`, "Follow-up 2". The browser file `static/tests/report-agent.synthetic.test.cjs` still passes (6 pass, 0 fail) with the new template.
+
+## Review round (608a962..7696646, ACCEPT with one should-fix and four minors)
+
+Red/green: each regression test was run with only the named source file swapped back to its `7696646` content (`git show 7696646:<file> > <file>`), then the file was restored. Commits: `cd65be2` (fixes and tests), `6ede137` (screenshots).
+
+| Finding | Fix | Regression test | Swapped file | Red on 7696646 | Green now |
+| --- | --- | --- | --- | --- | --- |
+| U1 should-fix: the token field was a formless `type=password` removed after a fetch, which Chrome offers to save in its password manager | Text input masked with `-webkit-text-security: disc` (inline style too, so it is masked before the stylesheet applies), `autocomplete="off"`, the 1Password, LastPass, Bitwarden and `data-form-type` ignore attributes; where the property is unsupported, `type=password` with `autocomplete="one-time-code"` (feature-detected with `CSS.supports`) | `report-agent.synthetic` "settings: sandbox login saved from Settings…" (field state: text, masked `disc`, ignore attributes, no password input on the page) | `static/modules/report-agent.js` | FAIL (field state differs: `type: 'password'`, no mask) | pass |
+| U2: Home or ArrowLeft selected the disabled Terminal tab outside a packet | `selectTab` refuses `terminal` while `blocked()`; the arrow-key order skips it | `report-agent-review.synthetic` "U2: outside a packet, arrow keys and Home never select the disabled Terminal tab" (Home, ArrowLeft, ArrowRight, End; shell stays idle) | `static/modules/sandbox-terminal.js` | FAIL ("Home selected the disabled shell tab") | pass |
+| U3: guard listeners piled up on each reopen and kept old terminals alive | `makeTerm` registers every listener (screen guards, mousedown, document mouseup) with one `AbortController`, aborted in `dispose`; the tab handle and the module's terminal map drop their references | `report-agent-review.synthetic` "U3: a tab terminal re-created on every reopen keeps one guard set…" (CDP listener counts on the tab screen and `document` after 3 close and reopen cycles; scrub still works; one `.xterm`) | `static/modules/sandbox-terminal.js` | FAIL (paste 1 → 4, beforeinput 1 → 4, input 2 → 8 after 3 cycles) | pass |
+| U4: the sentinel scan missed responses, console and the later steps | One `tokenCapture` helper: request URL, headers and body; response URL, headers and body; console; page errors; DOM and field values; local and session storage; URL. Scans after Save, after Replace (second token) and after Remove; only the login POST bodies may carry a token | `report-agent-scan-coverage` (static check of the test source) plus the scans themselves in `report-agent.synthetic` | `static/tests/report-agent.synthetic.test.cjs` | FAIL (no shared helper, no response or console capture, one scan) | pass |
+| U5: toast over the Settings shot, login pill on the left, hints wrapping | Toasts dismissed (after network idle, until quiet) before Settings shots; pill in `.ra-login-controls`; hints shortened ("Saved on Hoster, for every device.", "Set by the --agent-connect service flag.", "The token stays on Hoster and never enters the sandbox.", the manual hint) and the help line full width; the CLI row keeps a 220 px text column so the selects never leave the card | `report-agent.synthetic` "settings: Agent section loads and saves…" (no toast, pill in the controls, every Agent hint one line) and the login test (pill in the controls) | `static/modules/report-agent.js` | FAIL ("hints wrap") | pass |
+| Unverified 1: the mount race | Real in part: on a switch to a report outside a packet with the drawer open, the shell tried a WebSocket attach before `/api/mount` answered (the service refused it with `not_in_packet`, so no sandbox started and no other sandbox was reached), and the pill kept saying "Connected" for the previous report's closed socket. Now no shell attaches until the mount answer for the current report is in (`mountKnown`, reset on every report change; status reset to idle, "Connecting" while waiting); a late answer for an earlier report was already ignored and is now tested | `report-agent-review.synthetic` "mount race: no shell attaches before the mount answer…; a late answer for an earlier report is ignored" (mount answers delayed with `page.route`; WebSocket URLs recorded) | `static/modules/sandbox-terminal.js` | FAIL ("a shell attach was tried before the mount answer") | pass |
+| Unverified 2: a queued Play runs after the drawer reopens | Predates this branch: the same `pending` logic is on `18089f4` (enqueue line 339, flushed on `hello` line 175, cleared only on a report change) and on `49c76c9`. Recorded in `BUGFIXES.md` with location, evidence and impact; not fixed here | none (out of scope) | n/a | n/a | n/a |
+
+Firefox check for U1: the local Firefox 158.0.1 (headless, a scratch page outside the repo) reports `CSS.supports('-webkit-text-security', 'disc')` true and renders a text input with the property as dots. The `type=password` fallback is for older browsers only.
+
+### Skills tree against a real-shaped directory (read-only)
+
+Ghost's `~/.claude/skills` (same shape as Hoster's), read-only, into a scratch state dir under `TMPDIR`, deleted afterwards. Nothing under `~/.claude` changed: a snapshot of every file's mtime and size, taken before and after, matched. No skill contents were printed.
+
+- 210 top-level entries: 208 skills discovered, 2 skipped, both "no top-level SKILL.md" (the real folders).
+- Tree: 208 skills, 973 files, 6.3 MiB of file content (the source holds the same 973 regular files and 6.3 MiB; `du -L` shows 16M in disk blocks including the two folders). 4 nested symlinks skipped.
+- Build: 0.33 s. Change check with nothing changed: 0.03 s (same tree reused), so no speedup was needed.
+- `bunny-report-and-triage`, `triager-first-poc-authoring`, `poc-tooling-policy` and `live-testing-policy` are in the tree; 0 `SKILL.md` files in the tree have frontmatter keys other than `name` and `description`.
+
+### Review round runs (serially, `TMPDIR=/tmp/bbra`, load 7 to 13)
+
+| File | Result |
+| --- | --- |
+| `static/tests/report-agent.synthetic.test.cjs` | 6 pass, 0 fail |
+| `static/tests/report-agent-review.synthetic.test.cjs` (new, in `npm test`) | 3 pass, 0 fail |
+| `static/tests/report-agent-scan-coverage.test.cjs` (new, in `npm test`) | 1 pass, 0 fail |
+| `static/tests/sandbox-terminal.synthetic.test.cjs` | 18 pass, 0 fail |
+| `static/tests/sandbox-terminal-filter.test.cjs` | 5 pass, 0 fail |
+| `static/tests/live-editor.synthetic.test.cjs` | 7 pass, 1 fail in the serial run ("unknown Syncthing conflict copy…", the flaky test already in `BUGFIXES.md`); alone right after: 8 pass, 0 fail, twice |
+| `static/tests/ui-redesign.synthetic.test.cjs` | 7 pass, 0 fail |
+
+No Python module changed in this round.
 
 ## Seams added to `sandbox-terminal.js`
 
@@ -171,3 +210,5 @@ Regenerate: `REPORT_AGENT_SCREENSHOT_DIR=$PWD/docs/integrations node --test --te
 10. (Follow-up 2) The agent gets every Hoster skill through `--report-agent-skills-dir`; skills are readable by code in the sandbox, so they must hold no secrets (deploy check in `report-agent.md`).
 11. (Follow-up 2) The agent can read the test-account credential file it is given (`/tmp/bb-auth`), and so can any process in that sandbox, until it is deleted; it asks after the run whether to delete it, and the file vanishes with the container's tmpfs anyway.
 12. (Follow-up 2) Live runs are gated by Ryu's per-command approval and the egress filter; staying on the report's endpoints is a prompt rule, not a technical limit.
+13. (Review round) The token field is a CSS-masked text input rather than a password input, so browsers do not offer to save the token; a browser without `-webkit-text-security` gets a password input with `autocomplete="one-time-code"` instead, so the value is never shown in clear.
+14. (Review round) The queued-Play bug predates this branch and is left in `BUGFIXES.md` for its own fix.
