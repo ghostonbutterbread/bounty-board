@@ -40,7 +40,10 @@ On the Tailscale address the host first tries the sandbox's own number
 3128, 3129 or the --ports-range numbers); if that bind fails it uses the
 range number, like the loopback listener. Loopback always uses the range
 number: local agents and browsers open short-lived loopback ports a sandbox
-must never squat.
+must never squat. A number any other host process has been seen listening on
+(``/proc/net/tcp{,6}``, any address, since the service started) is never used
+for a same-number listener, so a sandbox cannot take a host service's number
+on the Tailscale address while that service restarts.
 """
 import collections
 import fcntl
@@ -232,6 +235,35 @@ def _listen_unix(path):
         sock.close()
         raise
     return sock
+
+
+# -- host listeners ---------------------------------------------------------------
+
+def host_listening_ports(exclude_inodes=frozenset()):
+    """TCP port numbers in LISTEN state (any address) in this network namespace, from
+    /proc/net/tcp and /proc/net/tcp6, skipping sockets whose inode is in exclude_inodes.
+    Raises OSError when /proc/net/tcp cannot be read (callers fail closed); a missing
+    tcp6 file (IPv6 disabled) counts as empty."""
+    ports = set()
+    for path in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            with open(path, 'rb') as stream:
+                lines = stream.read().splitlines()[1:]
+        except FileNotFoundError:
+            if path.endswith('6'):
+                continue
+            raise
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 10 or parts[3] != b'0A':
+                continue
+            try:
+                port, inode = int(parts[1].rsplit(b':', 1)[1], 16), int(parts[9])
+            except ValueError:
+                raise OSError(f'unexpected line in {path}') from None
+            if inode not in exclude_inodes:
+                ports.add(port)
+    return ports
 
 
 # -- Tailscale address ----------------------------------------------------------
@@ -704,8 +736,11 @@ class SessionPorts:
         return True
 
     def _bind_tailscale(self, fwd, ip):
-        # The sandbox's own number first (retried every time), else the range number.
-        numbers = ([fwd.sandbox_port] if self.hub.same_number_allowed(fwd.sandbox_port) else []) + [fwd.host_port]
+        # The sandbox's own number first (retried every time), else the range number. Never a
+        # number another host process has listened on (scanned right now; a failed scan skips it).
+        same = self.hub.same_number_allowed(fwd.sandbox_port) and self.hub._scan_host() \
+            and fwd.sandbox_port not in self.hub.seen_host
+        numbers = ([fwd.sandbox_port] if same else []) + [fwd.host_port]
         for number in numbers:
             try:
                 sock = _bind_tcp(ip, number)
@@ -870,13 +905,19 @@ class PortsHub:
     """Preview ports for every sandbox of the service (one per service)."""
 
     def __init__(self, *, state_dir, ports_range=DEFAULT_RANGE, exclude=(), tailscale=None, log=None,
-                 refresh_interval=TAILSCALE_REFRESH, same_ranges=parse_same_ranges(DEFAULT_SAME)):
+                 refresh_interval=TAILSCALE_REFRESH, same_ranges=parse_same_ranges(DEFAULT_SAME),
+                 host_ports=host_listening_ports):
         self.log = log or _warn
         self.range = tuple(ports_range)
         self.exclude = set(exclude)
         # Tailscale listeners may use the sandbox's own number when it is in these ranges.
         # Never the service port (in exclude), the proxy/relay ports, or a --ports-range number.
         self.same_ranges = tuple(tuple(r) for r in same_ranges)
+        # Port numbers other host processes have been seen listening on (any address) since
+        # start: never used for a same-number listener. ``host_ports(exclude_inodes)`` is
+        # host_listening_ports; tests and the local test backend wrap it.
+        self.host_ports = host_ports
+        self.seen_host = set()
         self.settings = SettingsStore(Path(state_dir) / 'settings.json', self.log)
         self.tailscale = tailscale or TailscaleAddress()
         self.lock = threading.RLock()
@@ -891,6 +932,7 @@ class PortsHub:
         self.acceptor = _Acceptor()
         # What is in effect. Normally equal to the saved setting; after a failed save
         # of "off" it stays off (fail closed) although the file still says on.
+        self._scan_host()
         self.ts_on = bool(self.settings.get('ports_tailscale'))
         if self.ts_on:
             self.ts_ip = self.tailscale.detect()
@@ -902,6 +944,25 @@ class PortsHub:
                              daemon=True).start()
             threading.Thread(target=self._idle_checker, args=(IDLE_CHECK,), name='bbterm-ports-idle',
                              daemon=True).start()
+
+    def _scan_host(self):
+        """Add the numbers other host processes listen on to seen_host. False when the scan failed."""
+        with self.lock:
+            own = [sock for sp in self.sessions for fwd in sp.forwards.values() for sock in fwd.listeners.values()]
+            own += list(self._bound.values())
+            inodes = set()
+            for sock in own:
+                try:
+                    inodes.add(os.fstat(sock.fileno()).st_ino)
+                except (OSError, ValueError):
+                    pass
+            try:
+                found = self.host_ports(frozenset(inodes))
+            except OSError as error:
+                self.log(f'cannot read the host listeners ({error}); no same-number Tailscale port this time')
+                return False
+            self.seen_host |= {n for n in found if 1 <= n <= 65535}
+            return True
 
     def same_number_allowed(self, number):
         lo, hi = self.range
@@ -1042,7 +1103,9 @@ class PortsHub:
         return self.settings_payload()
 
     def refresh(self):
-        """Re-detect the Tailscale address while the setting is on; rebind when it changed."""
+        """Scan the host listeners; re-detect the Tailscale address while the setting is on and
+        rebind when it changed. Runs every TAILSCALE_REFRESH seconds."""
+        self._scan_host()
         with self.toggle_lock:
             if self.ts_on:
                 ip = self.tailscale.detect()

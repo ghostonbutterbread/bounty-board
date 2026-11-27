@@ -309,7 +309,9 @@ class PortsServiceTests(unittest.TestCase):
 
         def capture(*args, **kw):
             seen.append(kw.get('ports_same'))
+            hooks.append(kw.get('host_ports'))
             raise ValueError('captured')
+        hooks = []
         base = ['--allowed-origin', 'https://node.tail1.ts.net:9001', '--root', '/nonexistent', '--preview-ports']
         with mock.patch.object(ts, 'make_service', capture):
             for value, expected in (('', ()), ('8000-8100,20000-20010', ((8000, 8100), (20000, 20010)))):
@@ -319,6 +321,12 @@ class PortsServiceTests(unittest.TestCase):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 ts.main(base)
             self.assertEqual(seen[-1], ((1024, 8999), (10000, 65535)))
+            # The TEST-ONLY sandbox-port ignore list is never honoured outside the local test backend.
+            with mock.patch.dict(os.environ, {'BBTERM_TEST_SANDBOX_PORTS': '8000'}):
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                    ts.main(base)
+            self.assertEqual(hooks, [None] * 4)
+        self.assertIs(self.server.ports.host_ports, tp.host_listening_ports, 'the real scan by default')
 
     def test_ports_route_and_websocket_push(self):
         from tests.test_terminal_ports import AutoAgent, EchoServer, close_all, wait

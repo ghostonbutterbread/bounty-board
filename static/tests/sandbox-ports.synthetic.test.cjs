@@ -26,6 +26,8 @@ async function withFixture(mode,fn){
     const newPage=async(options={})=>{
       const context=await browser.newContext({viewport:{width:1280,height:900},...options});
       await context.route('**/*',route=>/^127\.0\.0\.\d+$/.test(new URL(route.request().url()).hostname)?route.continue():route.abort());
+      // TEST ONLY: the fixture's "Tailscale address" is the loopback alias 127.0.0.2 (see safeOrigin).
+      await context.addInitScript(()=>{window.__BOARD_PORTS_TEST_TAILNET__='127.0.0.2';});
       const page=await context.newPage();
       page.errors=[];page.on('pageerror',e=>page.errors.push(String(e)));
       return page;
@@ -371,6 +373,79 @@ test('address chips follow the sandbox; Tailscale switch round-trips through the
   });
 });
 
+test('stale terminal link opens and copies nothing after the forward disappeared (review round 1, L1)',{timeout:240000},async()=>{
+  await withFixture('tailnet,ports',async info=>{
+    const {base,newPage,sandbox_port:P}=info;
+    const page=await newPage({permissions:CLIP});
+    await openReport(page,base);
+    await openDrawer(page);
+    setPorts(info,[P]);
+    await chips(page).first().waitFor({timeout:15000});
+    await page.locator('#term-drawer .xterm').click();
+    await page.keyboard.type(`printf 'serving http://localhost:%s/x\\n' ${P}\n`);
+    const printed=`serving http://localhost:${P}/x`;
+    await page.waitForFunction(p=>{const b=window.BoardTerminal.term.buffer.active;for(let i=0;i<b.length;i++)if(b.getLine(i).translateToString(true).startsWith(p))return true;return false;},printed,{timeout:10000});
+    const at=await cellOf(page,printed,12);
+    await page.mouse.move(at.x,at.y);
+    const tip=page.locator('[data-ports-tip]');
+    await tip.waitFor({timeout:5000});                                 // the link is live and hovered
+    setPorts(info,[]);                                                 // the sandbox server stops
+    await page.waitForFunction(()=>window.BoardPorts.ports.length===0,null,{timeout:15000});
+    await tip.waitFor({state:'detached',timeout:5000});                // the hover goes away without moving the pointer
+    const opened=[];page.context().on('page',p=>opened.push(p.url()));
+    await page.keyboard.down('Control');await page.mouse.click(at.x,at.y);await page.keyboard.up('Control');
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    await page.mouse.click(at.x,at.y);
+    await page.waitForTimeout(1500);
+    assert.deepEqual(opened,[],'Ctrl+click on a link whose forward is gone opens nothing');
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'-','a plain click copies nothing');
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
+test('a URL wrapped across terminal rows links as a whole, never by its first row (review round 1, minor 1)',{timeout:240000},async()=>{
+  await withFixture('tailnet,ports',async info=>{
+    const {base,newPage,sandbox_port:P}=info;
+    const page=await newPage({permissions:CLIP});
+    await openReport(page,base);
+    await openDrawer(page);
+    setPorts(info,[P,800]);                                            // 800 is forwarded too
+    await page.waitForFunction(()=>window.BoardPorts.ports.length===2,null,{timeout:15000});
+    const cols=await page.evaluate(()=>window.BoardTerminal.term.cols);
+    await page.locator('#term-drawer .xterm').click();
+    // Row 1 ends with "http://localhost:800", row 2 starts with "0/" (the printed URL is :8000, not forwarded).
+    const pad=cols-'http://localhost:800'.length;
+    await page.keyboard.type(`clear; printf '%${pad}s%s\\n' '' 'http://localhost:8000/'\n`);
+    await page.waitForFunction(()=>{const b=window.BoardTerminal.term.buffer.active;for(let i=1;i<b.length;i++)if(b.getLine(i).isWrapped&&b.getLine(i).translateToString(true).startsWith('0/')&&b.getLine(i-1).translateToString(true).endsWith('http://localhost:800'))return true;return false;},null,{timeout:10000});
+    const tip=page.locator('[data-ports-tip]');
+    for(const offset of [8,18]){
+      const c=await page.evaluate(([needle,offset])=>{const t=window.BoardTerminal.term,b=t.buffer.active;for(let i=b.length-1;i>0;i--){const text=b.getLine(i-1).translateToString(true);if(b.getLine(i).isWrapped&&text.endsWith(needle)){const r=document.querySelector('#term-drawer .xterm-screen').getBoundingClientRect();const w=r.width/t.cols,h=r.height/t.rows;return {x:r.left+(text.length-needle.length+offset+0.5)*w,y:r.top+(i-1-b.viewportY+0.5)*h};}}return null;},['http://localhost:800',offset]);
+      await page.mouse.move(c.x,c.y);await page.waitForTimeout(400);
+      assert.equal(await tip.count(),0,`no link from the first row's prefix (offset ${offset})`);
+    }
+    // A forwarded URL wrapped across rows is one link: hovering its second row shows the whole target.
+    await page.mouse.move(0,0);
+    const pad2=cols-`http://localhost:${P}/wr`.length;
+    await page.keyboard.type(`clear; printf '%${pad2}s%s\\n' '' 'http://localhost:${P}/wrapped'\n`);
+    await page.waitForFunction(()=>{const b=window.BoardTerminal.term.buffer.active;for(let i=1;i<b.length;i++)if(b.getLine(i).isWrapped&&b.getLine(i).translateToString(true).startsWith('apped'))return true;return false;},null,{timeout:10000});
+    const wrappedUrl=(await page.evaluate(P=>window.BoardPorts.ports.find(p=>p.port===P).local_url,P))+'wrapped';   // Tailscale is off here
+    const second=await cellOf(page,'apped',2);
+    await page.mouse.move(second.x,second.y);
+    await tip.waitFor({timeout:5000});
+    assert.equal(await tip.locator('.term-ports-tip-url').textContent(),wrappedUrl);
+    const first=await page.evaluate(([needle])=>{const t=window.BoardTerminal.term,b=t.buffer.active;for(let i=b.length-1;i>0;i--){const text=b.getLine(i-1).translateToString(true);if(b.getLine(i).isWrapped&&text.endsWith(needle)){const r=document.querySelector('#term-drawer .xterm-screen').getBoundingClientRect();const w=r.width/t.cols,h=r.height/t.rows;return {x:r.left+(text.length-4+0.5)*w,y:r.top+(i-1-b.viewportY+0.5)*h};}}return null;},[`/wr`]);
+    await page.mouse.move(0,0);await tip.waitFor({state:'detached',timeout:5000});
+    await page.mouse.move(first.x,first.y);
+    await tip.waitFor({timeout:5000});
+    assert.equal(await tip.locator('.term-ports-tip-url').textContent(),wrappedUrl,'the first row gives the same whole link');
+    await page.evaluate(()=>navigator.clipboard.writeText('-'));
+    await page.mouse.click(first.x,first.y);
+    await tip.locator('.term-ports-tip-hint').filter({hasText:'Copied'}).waitFor({timeout:5000});
+    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),wrappedUrl);
+    assert.deepEqual(page.errors,[]);
+  });
+});
+
 test('phone sheet: the chip fits and a tap opens it',{timeout:120000},async()=>{
   await withFixture('tailnet,ports',async info=>{
     const page=await info.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true,deviceScaleFactor:2});
@@ -406,23 +481,27 @@ test('chips and popover link only http URLs to loopback or a Tailscale address o
       {port:8000,host_port:9100,state:'open',local_url:'javascript:document.title="pwned"//',tailscale_url:'http://evil.example/'},
       {port:8001,host_port:9101,state:'open',local_url:'http://127.0.0.1:9999/',tailscale_url:'http://100.64.1.2:9101/x?y'},
       {port:8002,host_port:9102,state:'open',local_url:'http://127.0.0.1:9102/',tailscale_port:8002,tailscale_url:'http://100.101.102.103:8002/'},
-      {port:8003,host_port:9103,state:'open',local_url:'http://127.0.0.1:9103/',tailscale_port:8003,tailscale_url:'http://100.101.102.103:9103/'}]};
+      {port:8003,host_port:9103,state:'open',local_url:'http://127.0.0.1:9103/',tailscale_port:8003,tailscale_url:'http://100.101.102.103:9103/'},
+      // Each URL is held to its own address type (review round 1, minor 2): a Tailscale address as local_url,
+      // a loopback address as tailscale_url, both on the right port, are text.
+      {port:8004,host_port:9104,state:'open',local_url:'http://100.101.102.103:9104/',tailscale_port:8004,tailscale_url:'http://127.0.0.1:8004/'}]};
     await page.route('**/api/ports?**',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(reply)}));
     await openReport(page,info.base);
     await openDrawer(page);
-    await more(page).filter({hasText:'+2'}).waitFor({timeout:15000});
+    await more(page).filter({hasText:'+3'}).waitFor({timeout:15000});
     // The first two addresses do not validate: muted text, not links.
     assert.equal(await chips(page).count(),2);
     assert.equal(await page.locator('#term-drawer [data-term-slot="ports"] a').count(),0,'no link for a bad address');
     assert.deepEqual(await chips(page).evaluateAll(cs=>cs.map(c=>[c.tagName,c.classList.contains('muted'),c.hasAttribute('data-ports-invalid')])),[['SPAN',true,true],['SPAN',true,true]]);
-    assert.equal((await more(page).textContent()).trim(),'+2');
+    assert.equal((await more(page).textContent()).trim(),'+3');
     await more(page).click();
     await popover(page).waitFor();
     const hrefs=await popover(page).locator('a[href]').evaluateAll(as=>as.map(a=>a.getAttribute('href')).filter(h=>h!=='#/settings'));
     const valid=['http://100.101.102.103:8002/','http://127.0.0.1:9102/','http://127.0.0.1:9103/'];
     assert.deepEqual([...new Set(hrefs)].sort(),valid.sort(),'only the valid URLs are links (tailscale_port honoured)');
     assert.equal(await popover(page).locator('button,[data-ports-copy],[data-ports-open]').count(),0);
-    assert.equal(await popover(page).locator('[data-ports-invalid]').count(),5,'the five bad URLs are shown as text');
+    assert.equal(await popover(page).locator('[data-ports-invalid]').count(),7,'the seven bad URLs are shown as text');
+    assert.equal(await popover(page).locator('[data-ports-item="8004"] a').count(),0,'wrong address type: no link either way');
     assert.match(await popover(page).locator('[data-ports-invalid]').first().textContent(),/not linked/);
     assert.notEqual(await page.title(),'pwned');
     assert.deepEqual(page.errors,[]);

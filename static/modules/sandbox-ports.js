@@ -137,6 +137,7 @@
   function paint() {
     const slot = slotEl();
     if (!slot) return;
+    linksChanged();
     bindSlot(slot);
     observeDrawer(slot);
     const show = flags.preview_ports && selector && ports.length;
@@ -172,19 +173,26 @@
   // The service builds these URLs, but only http links to loopback or a
   // Tailscale (100.64.0.0/10) IPv4 on the expected host port become links or
   // Copy values; anything else is shown as text.
-  function safeUrl(url, hostPort) {
-    const origin = safeOrigin(url, hostPort);
+  // kind: 'local' (127.0.0.0/8, the loopback listener) or 'tailscale' (100.64.0.0/10).
+  function safeUrl(url, hostPort, kind) {
+    const origin = safeOrigin(url, hostPort, kind);
     if (!origin) return null;
     const u = new URL(String(url));
     return u.pathname === '/' && !u.search && !u.hash ? `${origin}/` : null;
   }
-  // The validated origin (http://<127.x or 100.64.0.0/10 IPv4>:<port>) of a URL, or null.
-  function safeOrigin(url, hostPort) {
+  // The validated origin of a URL, or null: http, an IPv4 of its own kind (local_url: 127.0.0.0/8,
+  // tailscale_url: 100.64.0.0/10) and exactly the item's port for that listener.
+  // TEST ONLY: the browser fixture's "Tailscale address" is a loopback alias; its tests set
+  // window.__BOARD_PORTS_TEST_TAILNET__ to that one address (page scripts are trusted anyway;
+  // this check guards against what the service sends).
+  function safeOrigin(url, hostPort, kind) {
     let u; try { u = new URL(String(url ?? '')); } catch { return null; }
     const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(u.hostname);
     if (u.protocol !== 'http:' || !m || u.username || u.password) return null;
     const [a, b] = [Number(m[1]), Number(m[2])];
-    if (m.slice(1).some(o => Number(o) > 255) || !(a === 127 || (a === 100 && b >= 64 && b <= 127))) return null;
+    if (m.slice(1).some(o => Number(o) > 255)) return null;
+    const local = a === 127, tailnet = (a === 100 && b >= 64 && b <= 127) || (u.hostname === window.__BOARD_PORTS_TEST_TAILNET__ && local);
+    if (kind === 'local' ? !local : kind === 'tailscale' ? !tailnet : true) return null;
     if (!Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535 || u.port !== String(hostPort)) return null;
     return `http://${u.hostname}:${hostPort}`;
   }
@@ -192,17 +200,17 @@
   const tsPort = p => (Number.isInteger(p.tailscale_port) ? p.tailscale_port : p.host_port);
   // The URL a port is opened with: Tailscale first (it works from another machine), else the local one.
   function mainUrl(p) {
-    const ts = p.tailscale_url ? safeUrl(p.tailscale_url, tsPort(p)) : null;
+    const ts = p.tailscale_url ? safeUrl(p.tailscale_url, tsPort(p), 'tailscale') : null;
     if (p.tailscale_url) return {url: ts, tailnet: !!ts};
-    return {url: safeUrl(p.local_url, p.host_port), tailnet: false};
+    return {url: safeUrl(p.local_url, p.host_port, 'local'), tailnet: false};
   }
 
   // Every URL is a real link (middle click and Ctrl/Cmd+click open natively);
   // a plain click copies it instead (onUrlClick).
   const linkHtml = (url, cls) => `<a class="${cls}" href="${esc(url)}" target="_blank" rel="noopener noreferrer" data-ports-url title="${esc(hint())}">${esc(url)}</a>`;
 
-  function urlRow(raw, secondary, hostPort) {
-    const url = safeUrl(raw, hostPort);
+  function urlRow(raw, secondary, hostPort, kind) {
+    const url = safeUrl(raw, hostPort, kind);
     if (!url) return `<div class="term-ports-url${secondary ? ' secondary' : ''}" data-ports-invalid>
       <span class="term-ports-where">unexpected address, not linked</span><span class="term-ports-link">${esc(raw)}</span></div>`;
     return `<div class="term-ports-url${secondary ? ' secondary' : ''}">
@@ -250,8 +258,8 @@
     if (!pop) return;
     const items = ports.map(p => {
       const note = p.state === 'paused' ? '<span class="term-ports-paused">paused, opens on first visit</span>' : '';
-      let rows = p.tailscale_url ? urlRow(p.tailscale_url, false, tsPort(p)) : urlRow(p.local_url, false, p.host_port);
-      if (p.tailscale_url) rows += urlRow(p.local_url, true, p.host_port);
+      let rows = p.tailscale_url ? urlRow(p.tailscale_url, false, tsPort(p), 'tailscale') : urlRow(p.local_url, false, p.host_port, 'local');
+      if (p.tailscale_url) rows += urlRow(p.local_url, true, p.host_port, 'local');
       return `<li class="term-ports-item" data-ports-item="${esc(p.port)}"><div class="term-ports-port"><code>:${esc(p.port)}</code>${note}</div>${rows}</li>`;
     }).join('');
     const anyTailnet = ports.some(p => p.tailscale_url);
@@ -383,42 +391,71 @@
     tipTimer = setTimeout(() => tip?.remove(), delay);
   }
 
+  // The terminal with our link provider, and what its links pointed at: when the ports
+  // change, every row is re-rendered, which drops xterm's cached (hovered) link.
+  let linkTerm = null, linkKey = '';
+  function linksChanged() {
+    const key = JSON.stringify(flags.preview_ports && selector ? ports.map(p => [p.port, mainUrl(p).url]) : []);
+    if (key === linkKey) return;
+    linkKey = key;
+    hideTip();
+    if (linkTerm) try { linkTerm.refresh(0, linkTerm.rows - 1); } catch {}
+  }
+
+  // A link acts only while its text still leads to the same URL (the forward may be gone, and
+  // its number may belong to another session's sandbox by now).
+  const stillSame = (text, url) => linkTarget(text)?.url === url;
+
+  const MAX_JOINED_ROWS = 16;   // a wrapped line is read as one (bounded)
   function attachLinks(term) {
     if (!term || typeof term.registerLinkProvider !== 'function' || term.__portsLinks) return;
     term.__portsLinks = true;
+    linkTerm = term;
     term.registerLinkProvider({
       provideLinks(y, callback) {
         if (!(flags.preview_ports && selector && ports.length)) { callback(undefined); return; }
-        const line = term.buffer.active.getLine(y - 1);
-        if (!line) { callback(undefined); return; }
-        // Text with the cell column of every character (wide characters take two cells).
+        const buf = term.buffer.active;
+        if (!buf.getLine(y - 1)) { callback(undefined); return; }
+        // The whole logical line around row y (rows joined while the next one is a wrapped
+        // continuation), with the cell position of every character (wide characters take two cells).
+        let top = y - 1, bottom = y - 1;
+        while (top > 0 && y - 1 - top < MAX_JOINED_ROWS && buf.getLine(top)?.isWrapped) top--;
+        while (bottom - (y - 1) < MAX_JOINED_ROWS && buf.getLine(bottom + 1)?.isWrapped) bottom++;
         let text = '';
-        const cols = [];
+        const pos = [];
         let cell;
-        for (let x = 0; x < line.length; x++) {
-          cell = line.getCell(x, cell);
-          if (!cell || cell.getWidth() === 0) continue;
-          const chars = cell.getChars() || ' ';
-          for (let k = 0; k < chars.length; k++) cols.push(x);
-          text += chars;
+        for (let row = top; row <= bottom; row++) {
+          const line = buf.getLine(row);
+          for (let x = 0; x < line.length; x++) {
+            cell = line.getCell(x, cell);
+            if (!cell || cell.getWidth() === 0) continue;
+            const chars = cell.getChars() || ' ';
+            for (let k = 0; k < chars.length; k++) pos.push({x: x + 1, y: row + 1});
+            text += chars;
+          }
         }
         const links = [];
         for (const match of text.matchAll(URL_RE)) {
           const found = linkTarget(match[0]);
           if (!found) continue;
-          const start = cols[match.index], end = cols[match.index + found.length - 1];
+          const start = pos[match.index], end = pos[match.index + found.length - 1];
+          if (end.y < y || start.y > y) continue;   // another row of this line provides it
           const title = found.tailnet ? 'Opens over Tailscale' : 'Opens on the server';
+          const linkText = match[0].slice(0, found.length);
+          const closed = () => { showTip(null, title, {url: found.url, hint: 'Port closed', tone: 'warn'}); hideTip(1600); };
           links.push({
-            range: {start: {x: start + 1, y}, end: {x: end + 1, y}},
-            text: match[0].slice(0, found.length),
+            range: {start, end},
+            text: linkText,
             decorations: {underline: true, pointerCursor: true},
-            hover: event => showTip(event, title, {url: found.url, hint: hint()}),
+            hover: event => { if (stillSame(linkText, found.url)) showTip(event, title, {url: found.url, hint: hint()}); },
             leave: () => hideTip(),
             activate: event => {
+              if (!stillSame(linkText, found.url)) { closed(); return; }
               if (event?.ctrlKey || event?.metaKey || touchOnly()) { window.open(found.url, '_blank', 'noopener,noreferrer'); return; }
               // A drag that ends on the link selected text: leave it to copy-on-select.
               setTimeout(() => {
                 if (term.hasSelection()) return;
+                if (!stillSame(linkText, found.url)) { closed(); return; }
                 copyText(found.url).then(ok => {
                   showTip(null, title, {url: found.url, hint: ok ? 'Copied' : 'Copy blocked by the browser', tone: ok ? 'ok' : 'warn'});
                   hideTip(1600);

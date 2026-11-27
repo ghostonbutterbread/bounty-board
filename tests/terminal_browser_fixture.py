@@ -228,8 +228,11 @@ def main():
         ports_file.write_text('[]')
         tailscale_file.write_text('127.0.0.2')
         ports_args = ['--preview-ports', '--ports-range', f'{ports_range[0]}-{ports_range[1]}']
-        extra_env = {'BBTERM_TEST_TAILSCALE_FILE': str(tailscale_file)}
-        extra_info = {'sandbox_port': sandbox_server(), 'ports_file': str(ports_file),
+        sandbox_port = sandbox_server()
+        # TEST ONLY: the fake sandbox server is a host process here; tell the local backend to
+        # leave it out of the host-listener scan (in Docker it lives in the container).
+        extra_env = {'BBTERM_TEST_TAILSCALE_FILE': str(tailscale_file), 'BBTERM_TEST_SANDBOX_PORTS': str(sandbox_port)}
+        extra_info = {'sandbox_port': sandbox_port, 'ports_file': str(ports_file),
                       'tailscale_file': str(tailscale_file), 'ports_range': list(ports_range)}
         threading.Thread(target=fake_agent, args=(target / 'term-state/local/ports', ports_file), daemon=True).start()
     if not ({'noterm', 'down'} & modes):
