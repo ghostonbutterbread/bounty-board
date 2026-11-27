@@ -255,6 +255,31 @@ Run on Ghost, `TMPDIR=/tmp/bbt-ports`, synthetic data only, each file alone and 
 
 Screenshots (synthetic, looked at): `/tmp/bbt-ports/screens-ports/ports-popover-bottom-off-{light,dark}.png`, `ports-popover-bottom-on-{light,dark}.png`, `ports-popover-right-{light,dark}.png`, `ports-settings-off-{light,dark}.png`, `ports-settings-on-{light,dark}.png`, `ports-phone-{light,dark}.png`.
 
+### Phase 3 evidence (feature commit `f0958a5`)
+
+Run on Ghost, `TMPDIR=/tmp/bbl`, synthetic data only, each file alone and serially (`-W error::ResourceWarning`; browser with `NODE_PATH=$PWD/node_modules CHROME_BIN=/opt/google/chrome/chrome node --test --test-concurrency=1`). Docker suite not run (no `sandbox/` change; the same-number logic is host side and covered with loopback aliases).
+
+| Run | Result |
+| --- | --- |
+| `tests.test_terminal_ports` | 59 OK (10 new in `SameNumberTests`) |
+| `tests.test_terminal_service` | 30 OK (new `test_ports_same_flag_reaches_the_hub`; bad `--ports-same` values in `test_lifecycle_flags_are_validated`; `tailscale_port` in the item keys) |
+| `tests.test_terminal_sandbox` / `test_terminal_proxy` / `test_terminal_ws` | 47 / 36 / 38 OK |
+| `static/tests/sandbox-ports.synthetic.test.cjs` | 5 pass |
+| `static/tests/sandbox-terminal.synthetic.test.cjs` | 18 pass |
+| `static/tests/sandbox-terminal-filter.test.cjs` | 5 pass |
+
+Red on `69ee73d` (only the named source file swapped back, then restored):
+- `terminal_ports.py`: `SameNumberTests` 9 of 10 ERROR (`KeyError: 'tailscale_port'`, no `same_number_allowed`/`same_ranges`/`parse_same_ranges`, connection refused on `127.0.0.2:<sandbox port>`); `test_stopped_server_closes_the_same_number_listener` passes on both (guard). The new service module does not import against the old hub (`parse_same_ranges` missing).
+- `terminal_service.py`: `test_ports_same_flag_reaches_the_hub` ERROR (the flag never reaches `make_service`); the bad-flag cases pass on both (the old parser refuses the unknown flag; guard).
+- `static/modules/sandbox-ports.js`: 3 of 5 browser tests fail (Open/Copy buttons present, no live line, no terminal links, no copy on click).
+- `static/modules/sandbox-terminal.js`: 2 of 5 fail (no `strip`, no `'terminal'` event: no live line, no links).
+
+What the new tests prove:
+- Hub: Tailscale on `127.0.0.2:<sandbox port>` while loopback stays on the range number and nothing listens on `127.0.0.2:<range number>`; two sessions on the same port (first keeps it, second falls back, then gets it when its forward reopens after the first stopped); a squatter on the Tailscale address forces the fallback and the number comes back once free; a restarted hub gets it back; exclusions (service port, 3128, 3129, range ends and middle, 9000, 9001, 9502, 9999, 80, 1023, empty flag) and a live out-of-range port; the parser accepts the default, spaces, single-number ranges and empty, refuses 8 bad forms; off closes the same-number listener and its connection even when the save fails, and on again rebinds the same number; an address change rebinds the number on the new address and loss closes it; reset/removal closes listener and connection; a stopped server closes it.
+- Browser (fixture `tailnet,ports`, the TEST-ONLY alias 127.0.0.2 as the Tailscale address): `tailscale_port` equals the sandbox port and the Tailscale URL serves the synthetic page, the range number on 127.0.0.2 refuses; popover and live line have only real links (`target="_blank" rel="noopener noreferrer"`, title "Ctrl+click to open, click to copy"), no buttons; a plain click copies (clipboard checked, no new tab, no navigation) and shows "Copied"; Ctrl+click and middle click open a new tab on the exact URL with `window.opener === null`; a blocked clipboard shows "Copy blocked by the browser"; the live line off and on, with the Settings link; a printed `http://localhost:<port>/poc/x.html?a=1#f` in the terminal shows the tip "Opens over Tailscale" with `http://127.0.0.2:<port>/poc/x.html?a=1#f` and the hint, a click copies it, Ctrl+click and Meta+click open it (noopener); the tip holds text only; 22 `linkTarget` cases (0.0.0.0, [::1], [::], 127.x, uppercase, trailing punctuation, https kept, encoded markup, `..` normalised; unforwarded port, no port, foreign host, private IP, `127.0.0.1.evil.example`, userinfo, `localhost:<port>@evil.example`, 127.0.0.999, [::2], ftp, javascript, port followed by letters all null); an unforwarded printed port is not a link; a drag into the link selects text and copy-on-select copies the selection, not the link; the live line is inside the drawer and never starts a drag in the right, left, top and bottom docks; no live line without ports; phone sheet (touch only, `(any-pointer: fine)` false): the line fits and a tap opens the URL; three ports: "3 ports live", two shown, invalid URLs as text, "+1 more" opens the popover with all three.
+
+Screenshots (synthetic, looked at): `/tmp/bbl/shots/ports-live-link-{light,dark}.png` (live line over Tailscale and a hovered terminal link), `ports-popover-bottom-off-{light,dark}.png` and `ports-popover-bottom-on-{light,dark}.png` (popover without buttons, "Copied"), `ports-popover-right-*`, `ports-settings-{off,on}-*`, `ports-phone-*`.
+
 ## Gaps
 
 - Not built: the production `sandbox/Dockerfile` (no network here). The real-container tests use `sandbox/Dockerfile.test` built as `bbterm-test-image-ports:latest`. Rebuild the production image on Hoster to get the agent; an old image simply never connects (no ports listed).
@@ -269,6 +294,11 @@ Screenshots (synthetic, looked at): `/tmp/bbt-ports/screens-ports/ports-popover-
 - `test_terminal_docker` `test_065` (existing pause timing) failed once under load and passed in the two later runs.
 - My test images `bbterm-test-image-ports:latest` (round 1) and `bbterm-test-image-ports:before` (0632c25, the memory baseline) are left built (remove with `docker rmi bbterm-test-image-ports:latest bbterm-test-image-ports:before`).
 
+- (Phase 3) A URL that the terminal wrapped onto two rows is not a link (the provider reads one buffer row). Wide drawers rarely wrap a PoC URL.
+- (Phase 3) Touch-only means `(any-pointer: fine)` is false; a tablet with a trackpad counts as fine (click copies, Ctrl+click opens).
+- (Phase 3) No Docker run for this phase (no `sandbox/` change). On Hoster, check with `ss -ltn` that `100.x.y.z:8000` appears and the service holds no `127.0.0.1:8000`.
+- (Phase 3) A sandbox can hold a Tailscale-address number that a later host service (outside 9000-9999) wants, until its server stops, the switch goes off or the session ends.
+
 ## Decisions for Ryu
 
 1. Ports bound on Tailscale have no Board login in front of them; anyone your ACLs allow on 9100-9199 can use the PoC. OK, or do you want a per-port token in the URL later?
@@ -278,6 +308,10 @@ Screenshots (synthetic, looked at): `/tmp/bbt-ports/screens-ports/ports-popover-
 5. Default range 9100-9199, at most 8 ports per sandbox, 48 connections per client IP: keep these?
 6. The pill says "1 port" / "3 ports" and sits next to the status pill; the popover lists ports by sandbox number (`:8000`). Wording or place OK?
 7. The Settings card header still says "Saved in this browser." (it belongs to the terminal's own controls); the ports section adds "Saved on the server." under its title. Fine, or should the card note move into each section?
+8. (Phase 3) Same number on Tailscale is on by default. Tailnet ACLs can no longer limit preview ports to 9100-9199; `--ports-same ''` brings that boundary back. OK as the default?
+9. (Phase 3) The default same-number ranges `1024-8999,10000-65535` skip 9000-9999 (Tailscale Serve). A PoC on 9000-9999 gets a 91xx URL. Fine?
+10. (Phase 3) A printed `https://localhost:8443/` links to `https://<tailscale ip>:8443/` (scheme kept). OK?
+11. (Phase 3) The live line shows two ports, then "+N more" (opens the popover). Enough?
 
 ## Deployment on Hoster (orchestrator)
 
@@ -291,9 +325,10 @@ Do these as the Board's user; do not change Serve.
 2. Add `--preview-ports` to `ExecStart` of `~/.config/systemd/user/bounty-board-terminal.service` (optionally `--ports-range 9100-9199` and `--tailscale-address auto`), then `systemctl --user daemon-reload && systemctl --user restart bounty-board-terminal`. A restart drops paused sessions (files stay).
 3. On-host checks:
    - Open a report's terminal and run `python3 -m http.server 8000`. The drawer shows "1 port"; `curl -s http://127.0.0.1:9100/` lists the report folder.
-   - `ss -ltnp | grep -E ':91[0-9][0-9] '` shows only `127.0.0.1:9100` (and, once Tailscale is on, `100.x.y.z:9100`), never `0.0.0.0:9100`, `*:9100` or `[::]:9100`.
+   - `ss -ltnp | grep -E ':91[0-9][0-9] '` shows only `127.0.0.1:9100`, never `0.0.0.0:9100`, `*:9100` or `[::]:9100`. Once Tailscale is on (phase 3), `ss -ltn | grep ':8000 '` shows `100.x.y.z:8000` and no `127.0.0.1:8000` or `0.0.0.0:8000` from the service.
    - `stat -c '%a %U' ~/.local/state/bounty-board/terminal/proxy/*/ports.sock` prints `600 <board user>`; `docker inspect bbterm-<id> --format '{{.HostConfig.NetworkMode}} {{len .Mounts}}'` prints `none 2`.
    - Settings, Terminal card, "Sandbox ports": turn on "Open sandbox ports over Tailscale". It shows "Tailscale address 100.x.y.z". From another tailnet device (your PC), open the drawer's pill, click Open on the main URL `http://100.x.y.z:9100/`: the listing appears.
    - Turn the switch off: the page on the PC stops loading (`curl -m 5 http://100.x.y.z:9100/` from the PC fails), `ss` shows only `127.0.0.1:9100` again, and the drawer's popover says "Only reachable on the server."
    - Inside the sandbox: `curl -s http://127.0.0.1:9100/` (through the proxy, `NO_PROXY=` cleared) prints "Blocked by sandbox egress policy".
-4. Check the tailnet ACLs allow exactly the peers that should reach 9100-9199.
+4. Check the tailnet ACLs allow exactly the peers that should reach this machine's preview ports. Since phase 3 these are not confined to 9100-9199 (see the threat model); add `--ports-same ''` to `ExecStart` if the ACLs must scope them by that range.
+5. Phase 3 needs only a terminal service restart (no image rebuild: `sandbox/` is unchanged) and a Board reload. In the drawer, `python3 -m http.server 8000` prints `http://0.0.0.0:8000/`: hover it (tip "Opens over Tailscale", `http://100.x.y.z:8000/`), a click copies, Ctrl+click opens on the PC.
