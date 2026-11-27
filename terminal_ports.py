@@ -80,6 +80,7 @@ CONTROL_RATE = (10, 60)   # at most 10 control connections per 60 s per session
 REPORT_RATE = (10, 5)     # at most 10 ports reports per 5 s per control connection (the agent sends <= 1/s)
 ACTIVITY_EVERY = 5        # seconds between activity reports while bytes flow
 TAILSCALE_REFRESH = 60
+SCAN_MAX_AGE = 1.0        # a bind reuses a host-listener scan at most this old (agent churn cannot force a scan per bind)
 DEFAULT_RANGE = (9100, 9199)
 DEFAULT_SAME = '1024-8999,10000-65535'  # Tailscale Serve uses 9000, 9001, 9502-9511 on that address
 PROXY_PORT = 3128
@@ -738,7 +739,7 @@ class SessionPorts:
     def _bind_tailscale(self, fwd, ip):
         # The sandbox's own number first (retried every time), else the range number. Never a
         # number another host process has listened on (scanned right now; a failed scan skips it).
-        same = self.hub.same_number_allowed(fwd.sandbox_port) and self.hub._scan_host() \
+        same = self.hub.same_number_allowed(fwd.sandbox_port) and self.hub._scan_host(max_age=SCAN_MAX_AGE) \
             and fwd.sandbox_port not in self.hub.seen_host
         numbers = ([fwd.sandbox_port] if same else []) + [fwd.host_port]
         for number in numbers:
@@ -918,6 +919,8 @@ class PortsHub:
         # host_listening_ports; tests and the local test backend wrap it.
         self.host_ports = host_ports
         self.seen_host = set()
+        self._scan_at = 0.0    # monotonic time of the last successful bind-path scan (cache)
+        self._scan_ok = False
         self.settings = SettingsStore(Path(state_dir) / 'settings.json', self.log)
         self.tailscale = tailscale or TailscaleAddress()
         self.lock = threading.RLock()
@@ -945,9 +948,20 @@ class PortsHub:
             threading.Thread(target=self._idle_checker, args=(IDLE_CHECK,), name='bbterm-ports-idle',
                              daemon=True).start()
 
-    def _scan_host(self):
-        """Add the numbers other host processes listen on to seen_host. False when the scan failed."""
+    def _scan_host(self, max_age=None):
+        """Add the numbers other host processes listen on to seen_host. False when the scan failed.
+
+        With ``max_age`` (the bind path) a successful scan at most that many seconds old is
+        reused, so a sandbox churning its ports cannot force a full /proc read under the hub lock
+        on every bind. A failed scan is not reused (the next bind retries; a failing open is cheap). Start-up and the refresher always scan
+        and do not touch that cache."""
         with self.lock:
+            cached = max_age is not None
+            if cached:
+                now = time.monotonic()
+                if self._scan_ok and now - self._scan_at < max_age:
+                    return True
+                self._scan_ok = False
             own = [sock for sp in self.sessions for fwd in sp.forwards.values() for sock in fwd.listeners.values()]
             own += list(self._bound.values())
             inodes = set()
@@ -962,6 +976,8 @@ class PortsHub:
                 self.log(f'cannot read the host listeners ({error}); no same-number Tailscale port this time')
                 return False
             self.seen_host |= {n for n in found if 1 <= n <= 65535}
+            if cached:
+                self._scan_at, self._scan_ok = now, True
             return True
 
     def same_number_allowed(self, number):

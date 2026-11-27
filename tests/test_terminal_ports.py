@@ -1372,6 +1372,48 @@ class SameNumberTests(HubCase):
         self.assertFalse(connectable('127.0.0.2', server.port))
 
 
+class ScanRateTests(HubCase):
+    """Phase 3 re-review F1: agent churn cannot force a full /proc/net/tcp scan per bind under the hub lock."""
+    SAME = None
+
+    def make_hub(self):
+        self.scans = 0
+
+        def counting(exclude):
+            self.scans += 1
+            return tp.host_listening_ports(exclude)
+        return tp.PortsHub(state_dir=self.base, ports_range=self.range, tailscale=self.tailscale,
+                           log=self.logs.append, refresh_interval=0, host_ports=counting)
+
+    def churn(self, rounds):
+        agent = Agent(self.sock_path)
+        a, b = list(range(41001, 41005)), list(range(42001, 42005))
+        for i in range(rounds):                 # under the 10-per-5-s report limit
+            agent.ports(a if i % 2 == 0 else b)
+            want = set(a if i % 2 == 0 else b)
+            wait(lambda: set(self.sp.forwards) == want, timeout=5)
+
+    def test_agent_churn_does_not_force_a_scan_per_bind(self):
+        self.hub.set_tailscale(True)
+        start, before = time.monotonic(), self.scans
+        self.churn(9)
+        elapsed = time.monotonic() - start
+        scans = self.scans - before
+        self.assertLessEqual(scans, int(elapsed / getattr(tp, 'SCAN_MAX_AGE', 1.0)) + 2,
+                             f'{scans} full /proc/net/tcp scans in {elapsed:.1f} s under the hub lock')
+
+    def test_an_expired_scan_is_redone_before_a_same_number_bind(self):
+        old = tp.SCAN_MAX_AGE
+        tp.SCAN_MAX_AGE = 0.0
+        try:
+            self.hub.set_tailscale(True)
+            before = self.scans
+            self.churn(2)
+            self.assertGreaterEqual(self.scans - before, 8, 'every bind scans when the cache age is 0')
+        finally:
+            tp.SCAN_MAX_AGE = old
+
+
 class PortsDocker(FakeDocker):
     """FakeDocker with a ports.sock per session, like DockerBackend."""
 

@@ -301,6 +301,19 @@ On `5ab578c` the whole browser file: 4 pass, 3 fail (L1, minor 1, P1/minor 2).
 
 Round 1 runs (`TMPDIR=/tmp/bbl`, serially, each file alone, no Docker): `tests.test_terminal_ports` 64 OK, `tests.test_terminal_service` 30 OK, `tests.test_terminal_sandbox` 47 OK, `tests.test_terminal_proxy` 36 OK, `tests.test_terminal_ws` 38 OK; `static/tests/sandbox-ports.synthetic.test.cjs` 7 pass, `sandbox-terminal.synthetic.test.cjs` 18 pass, `sandbox-terminal-filter.test.cjs` 5 pass. One earlier `test_terminal_ports` run during development failed `test_n3_per_ip_cap_is_48_and_refusals_are_logged_rate_limited` on its refusal-count wording (timing on the loaded box); every run since passed it.
 
+### Phase 3 re-review (`94357a2`) and the orchestrator's minor fix
+
+The reviewer returned ACCEPT: L1, S1 and both minors confirmed (its repros pass on `94357a2`), the two TEST-ONLY hooks judged unreachable in production (`BBTERM_TEST_SANDBOX_PORTS` is read only in the `local-test-only` branch; `window.__BOARD_PORTS_TEST_TAILNET__` is compared with `===`, so DOM clobbering cannot match it, and it can only let one 127/8 address pass as `tailscale_url` on the exact port), the own-socket exclusion matched by inode, and the row redraw limited to visible rows. One new minor, fixed by the orchestrator; the nit was left as is.
+
+| # | Finding | Fix | Test | Red on `94357a2` → now |
+| --- | --- | --- | --- | --- |
+| F1 (minor) | Every same-number bind re-read `/proc/net/tcp{,6}` under the hub lock with no rate limit; an agent alternating two sets of ports within the report limit forced up to 80 full scans per 5 s per session. | The bind path reuses a successful scan at most `SCAN_MAX_AGE` (1 s) old; a failed scan is not reused (the next bind retries, still falling back meanwhile). The start-up scan and the 60 s refresh always scan and do not touch that cache. | `ScanRateTests.test_agent_churn_does_not_force_a_scan_per_bind` (the reviewer's repro), `..._an_expired_scan_is_redone_before_a_same_number_bind` | FAIL (36 scans in 0.2 s) → OK; the second errors on the old module (no `SCAN_MAX_AGE`) → OK |
+| F2 (nit) | `window.__BOARD_PORTS_TEST_TAILNET__` is a test global in production code. | Left as is (does not widen anything, see above). | | |
+
+Remaining effect of F1's cache: a host service that starts listening less than 1 s after the last bind-path scan and stops again before the next scan is not seen; the start-up and 60 s scans are unchanged.
+
+Runs (`TMPDIR=/tmp/bbl`): `tests.test_terminal_ports` 66 OK, `tests.test_terminal_service` OK; the reviewer's `test_scan_rate.py` (path rewritten) OK.
+
 ## Gaps
 
 - Not built: the production `sandbox/Dockerfile` (no network here). The real-container tests use `sandbox/Dockerfile.test` built as `bbterm-test-image-ports:latest`. Rebuild the production image on Hoster to get the agent; an old image simply never connects (no ports listed).
