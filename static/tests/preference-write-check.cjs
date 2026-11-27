@@ -6,6 +6,16 @@ const allowed = new Set(['bounty-board-theme','bounty-board-show-archived','boun
   'bounty-board-last-program','bounty-board-recent-panel-show-na',
   ...['copyOnSelect','ctrlCCopy','ctrlVPaste','shortcut','dock'].map(k=>`terminal.${k}`),
   ...['recent','submissions'].flatMap(n=>['window','order','nav','hideNa','programs','lanes','subs','sevs','classes'].map(k=>`list.${n}.${k}`))]);
+function assertNoDraft(value, drafts) {
+  const todo=[value], seen=new Set();
+  while(todo.length) {
+    const current=todo.pop();
+    if(typeof current==='string') {
+      for(const draft of drafts) if(draft.length>=4) assert.ok(!current.includes(draft),'draft text was sent in a preference');
+      if(!seen.has(current)) {seen.add(current); try {todo.push(JSON.parse(current));} catch {}}
+    } else if(current && typeof current==='object') for(const item of Object.values(current))todo.push(item);
+  }
+}
 function assertPreferencesOnly(requests, base, drafts) {
   for (const request of requests) {
     assert.equal(request.method, 'POST', 'no report/source write');
@@ -20,7 +30,7 @@ function assertPreferencesOnly(requests, base, drafts) {
     for (const [key,value] of Object.entries(values)) {
       assert.ok(allowed.has(key), `unexpected preference ${key}`);
       assert.equal(typeof value,'string');
-      for (const draft of drafts) if (draft.length>=4) assert.ok(!value.includes(draft), 'draft text was sent in a preference');
+      assertNoDraft(value,drafts);
     }
   }
 }

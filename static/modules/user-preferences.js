@@ -50,6 +50,7 @@
     sessionStorage.setItem(ownerKey,owner);
   } catch { owner=crypto.randomUUID(); cacheFailed=true; }
   const created = new Set();
+  const submitted = new Set(), rejected = new Set(), uncertain = new Set(), superseded = new Map();
   let ownerClaimed=false, ownershipFailed=false;
   const pending = {}, pendingBases = {}, pendingIds = {}, pendingStamps = {}, conflicts = new Set();
   let nextStamp=Date.now()*1000;
@@ -88,7 +89,18 @@
         node.style.cssText = 'position:fixed;z-index:9999;bottom:1rem;left:1rem;max-width:28rem;padding:.75rem 1rem;background:#8b2525;color:white;border-radius:.5rem;pointer-events:none';
         document.body.appendChild(node);
       }
-      if (node) node.textContent = conflicts.size || ownershipFailed ? 'A preference needs recovery. Your unsent choices remain in this browser; review them before retrying.' : cacheFailed ? 'Browser storage is unavailable; unsaved preferences may be lost after reload.' : 'Preferences could not be saved to the server. Changes remain in this browser; retrying.';
+      if (node) {
+        node.textContent = conflicts.size ? (readFailed ? 'A preference needs recovery. Waiting to read the saved values before retrying.' : 'A preference needs recovery. Use your choice below to replace the current saved value.') : ownershipFailed || uncertain.size ? 'An earlier preference needs recovery and remains in this browser.' : cacheFailed ? 'Browser storage is unavailable; unsaved preferences may be lost after reload.' : 'Preferences could not be saved to the server. Changes remain in this browser; retrying.';
+        if(cacheFailed && (conflicts.size || ownershipFailed || uncertain.size))node.append(' Browser storage is unavailable; unsaved choices may be lost after reload.');
+        if (!readFailed && ownerClaimed && !ownershipFailed) for (const key of conflicts) {
+          if (!Object.hasOwn(pending,key)) continue;
+          const label=key==='bounty-board-theme'?'Theme':key.replace(/^bounty-board-/, '').replaceAll('.', ' ').replaceAll('-', ' ');
+          const button=document.createElement('button'); button.type='button'; button.textContent=`Use my choice for ${label}`;
+          button.style.cssText='display:block;margin-top:.5rem;pointer-events:auto';
+          button.disabled=inflight || migrating;
+          button.addEventListener('click',()=>resolveChoice(key)); node.appendChild(button);
+        }
+      }
     };
     if (document.body) paint(); else document.addEventListener('DOMContentLoaded', paint, {once: true});
   };
@@ -162,6 +174,28 @@
   try { initial=JSON.parse(document.getElementById('preferences-snapshot')?.textContent || 'null'); if(initial?.error)throw new Error('unavailable'); hydrate(initial); }
   catch { readFailed=true; setFailed(true); }
 
+  function removeOwnedRecord(id,key) {
+    if(!id)return;
+    try {
+      const record=parse(localStorage.getItem(id),null);
+      if(record?.owner===owner && record.key===key)localStorage.removeItem(id);
+    } catch {cacheFailed=true;}
+  }
+  function retireSuperseded(key) {
+    for(const id of superseded.get(key) || []) removeOwnedRecord(id,key);
+    superseded.delete(key);
+  }
+  function noteRetained(key) {
+    try {
+      const retained=Object.keys(localStorage).some(id=>{
+        if(!id.startsWith(recordPrefix))return false;
+        const record=parse(localStorage.getItem(id),null);
+        return record?.owner===owner && record.key===key;
+      }) || localStorage.getItem(pendingPrefix+key)!==null;
+      if(retained)uncertain.add('retained:'+key); else uncertain.delete('retained:'+key);
+    } catch {cacheFailed=true;}
+  }
+
   async function flush() {
     const key = Object.keys(pending).find(k => !conflicts.has(k));
     if (inflight || migrating || !key || !ownerClaimed) return;
@@ -171,31 +205,49 @@
     const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),3000);
     let retryImmediately = true;
     try {
+      if(id){submitted.add(id);rejected.delete(id);}
       const response = await fetch('/api/user-preferences', {method: 'POST', signal:controller.signal, headers: {'Content-Type': 'application/json', 'X-Requested-With': 'Bounty-Board'}, body: JSON.stringify({set: {[key]:value}, expected: {[key]:base}})});
-      if (response.status === 409) { conflicts.add(key); setFailed(true); return; }
+      if (response.status === 409) {
+        if(id && !uncertain.has(id)) {
+          rejected.add(id);
+          if(pendingIds[key]!==id && created.has(id)) {
+            if(!superseded.has(key))superseded.set(key,new Set());
+            superseded.get(key).add(id);
+          }
+        }
+        conflicts.add(key); setFailed(true); return;
+      }
       if (!response.ok) throw new Error('save failed');
       const result = await response.json();
+      if(id)uncertain.delete(id);
       observed = {...observed, [key]:result.revisions[key]};
       serverCache[key]=value;
       put(revisionsKey, JSON.stringify(observed));
-      if (id) { try { localStorage.removeItem(id); } catch { cacheFailed=true; } }
+      removeOwnedRecord(id,key);
       if (pendingIds[key] === id && pending[key] === value) {
         delete pending[key]; delete pendingBases[key]; delete pendingIds[key]; delete pendingStamps[key];
+        retireSuperseded(key);
         try { if (!id && read(pendingPrefix + key) === value) { localStorage.removeItem(pendingPrefix + key); localStorage.removeItem(pendingBasePrefix + key); } } catch {}
+        noteRetained(key);
       } else {
         pendingBases[key] = observed[key];
         if (pendingIds[key]) put(pendingIds[key], JSON.stringify({owner,key,value:pending[key],base:observed[key],stamp:pendingStamps[key]}));
       }
-      setFailed(readFailed || cacheFailed || ownershipFailed || conflicts.size > 0 || (failed && Object.keys(pending).length>0));
-    } catch { retryImmediately = false; setFailed(true); }
-    finally { clearTimeout(timeout); inflight = false; }
+      setFailed(readFailed || cacheFailed || ownershipFailed || uncertain.size>0 || conflicts.size > 0 || (failed && Object.keys(pending).length>0));
+    } catch { if(id)uncertain.add(id); retryImmediately = false; setFailed(true); }
+    finally { clearTimeout(timeout); inflight = false; if(failed)notice(); }
     if (retryImmediately && !readFailed && Object.keys(pending).some(k => !conflicts.has(k))) flush();
   }
   function set(key, value) {
     if (!allowed.has(key) || typeof value !== 'string') return;
     memory.set(key,value);
+    const prior=pendingIds[key];
+    if(prior && created.has(prior) && (!submitted.has(prior) || rejected.has(prior))) {
+      if(!superseded.has(key))superseded.set(key,new Set());
+      superseded.get(key).add(prior);
+    }
     if (!Object.hasOwn(pending, key)) {
-      if (observed && typeof observed === 'object') {
+      if (!readFailed && observed && typeof observed === 'object') {
         pendingBases[key] = observed[key] || 0;
       } else conflicts.add(key);
     }
@@ -205,6 +257,49 @@
     if (!put(id,JSON.stringify({owner,key,value,base:pendingBases[key] ?? null,stamp:pendingStamps[key]}))) setFailed(true);
     if (conflicts.has(key)) setFailed(true);
     flush();
+  }
+  async function resolveChoice(key) {
+    if(!conflicts.has(key) || !Object.hasOwn(pending,key) || inflight || migrating || readFailed || !ownerClaimed || ownershipFailed)return;
+    const id=pendingIds[key], value=pending[key];
+    const unchanged=()=>pendingIds[key]===id && pending[key]===value && conflicts.has(key);
+    inflight=true; notice();
+    const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),3000);
+    let attempted=false;
+    try {
+      const readResponse=await fetch('/api/user-preferences',{signal:controller.signal});
+      if(!readResponse.ok)throw new Error('preferences unavailable');
+      const snapshot=await readResponse.json();
+      if(!snapshot.revisions || typeof snapshot.revisions!=='object')throw new Error('missing revisions');
+      const base=snapshot.revisions[key] || 0;
+      if(!Number.isSafeInteger(base) || base<0)throw new Error('invalid revision');
+      if(!unchanged())return;
+      if(id){submitted.add(id);rejected.delete(id);}
+      attempted=true;
+      const response=await fetch('/api/user-preferences',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json','X-Requested-With':'Bounty-Board'},body:JSON.stringify({set:{[key]:value},expected:{[key]:base}})});
+      if(response.status===409){
+        if(id && !uncertain.has(id)){
+          rejected.add(id);
+          if(pendingIds[key]!==id && created.has(id)) {
+            if(!superseded.has(key))superseded.set(key,new Set());
+            superseded.get(key).add(id);
+          }
+        }
+        setFailed(true);return;
+      }
+      if(!response.ok)throw new Error('save failed');
+      const result=await response.json();
+      if(id)uncertain.delete(id);
+      observed={...observed,[key]:result.revisions[key]}; serverCache[key]=value;
+      put(revisionsKey,JSON.stringify(observed)); removeOwnedRecord(id,key);
+      if(unchanged()) {
+        delete pending[key]; delete pendingBases[key]; delete pendingIds[key]; delete pendingStamps[key];
+        conflicts.delete(key); retireSuperseded(key);
+        noteRetained(key);
+      }
+      setFailed(readFailed || cacheFailed || ownershipFailed || uncertain.size>0 || conflicts.size>0 || (failed && Object.keys(pending).length>0));
+    } catch {if(id && attempted)uncertain.add(id);setFailed(true);}
+    finally {clearTimeout(timeout);inflight=false;if(failed)notice();}
+    if(!readFailed && Object.keys(pending).some(k=>!conflicts.has(k)))flush();
   }
   async function refresh() {
     if (refresh.busy) return;
@@ -235,7 +330,7 @@
         put(marker,'1');
       }
       hydrate(snapshot); readFailed=false;
-      setFailed(cacheFailed || ownershipFailed || conflicts.size>0 || (failed && Object.keys(pending).length>0));
+      setFailed(cacheFailed || ownershipFailed || uncertain.size>0 || conflicts.size>0 || (failed && Object.keys(pending).length>0));
       window.dispatchEvent(new Event('board-preferences-ready'));
       flush();
     } catch { readFailed=true; setFailed(true); }
@@ -266,6 +361,7 @@
       if(cacheFailed)setFailed(true);
     }
     ownerClaimed=true;
+    if(failed)notice();
     flush();
   }
   window.addEventListener('online', () => { if(readFailed)refresh(); else flush(); });
