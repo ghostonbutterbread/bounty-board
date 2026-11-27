@@ -125,14 +125,14 @@
     // the undo history restarts whenever foreign text enters the editor.
     cm.clearHistory();
     if (s.conflict) refreshConflict(s);
-    refreshPreview(s);
   }
 
   // EasyMDE renders the full Preview only when it is switched on (side by side
-  // follows edits by itself), so text arriving while someone reads the
-  // Preview must be rendered into it here, keeping the reading position.
+  // follows edits by itself), so every text change while someone reads the
+  // Preview (agent text, merges, Keep mine/saved, restores) is rendered here.
   function refreshPreview(s) {
-    if (!s.mde?.isPreviewActive()) return;
+    // The toolbar button turns active at once; the pane class lands 1 ms later.
+    if (!s.mde || !(s.mde.isPreviewActive() || s.mde.toolbarElements?.preview?.classList.contains('active'))) return;
     const preview = s.cm.getWrapperElement().lastChild;
     const top = preview.scrollTop;
     const html = s.mde.options.previewRender(s.cm.getValue(), preview);
@@ -443,6 +443,7 @@
     const saveNow = () => { flush(s); };
     cm.setOption('extraKeys', {...(cm.getOption('extraKeys') || {}), 'Ctrl-S': saveNow, 'Cmd-S': saveNow});
     cm.on('change', () => { if (!s.applying) onLocalEdit(s); });
+    cm.on('changes', () => refreshPreview(s));
     cm.on('focus', () => { s.hadFocus = true; });
     // An app re-render removes the focused editor and fires blur first; it
     // reattaches us synchronously, so only a blur that outlives the current

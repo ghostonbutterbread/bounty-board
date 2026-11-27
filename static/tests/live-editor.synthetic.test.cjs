@@ -256,3 +256,23 @@ test('outside write updates the rendered Preview while reading',{timeout:60000},
   await a.getByText('Updated outside the Board').waitFor();
   assert.equal(await pill(a),'Saved');
 });
+
+test('resolving a conflict while reading the Preview shows the resolved text',{timeout:60000},async t=>{
+  const env=await setup(t);
+  const a=await (await env.context()).newPage();
+  await open(a,env.base);
+  const hold=await holdNextSave(env);
+  await typeAtLineEnd(a,'Middle line.',' Mine.');
+  await hold.entered();
+  await a.locator('#live-report-host .editor-toolbar button.preview').click();
+  const shown=a.locator('#live-report-host .editor-preview-full.editor-preview-active');
+  await shown.waitFor();
+  outsideWrite(env.report,ORIGINAL.replace('Middle line.','Middle line from agent.'));
+  hold.release();
+  await waitPill(a,'Conflict');
+  await shown.filter({hasText:'(Bounty Board)'}).waitFor({timeout:5000});
+  await a.getByRole('button',{name:'Keep saved'}).first().click();
+  await waitFile(env,text=>text.includes('Middle line from agent.') && !text.includes('<<<<<<<') && !text.includes('Mine.'),'saved side kept');
+  await waitPill(a,'Saved');
+  await waitFor(async()=>{const text=await shown.textContent();return text.includes('Middle line from agent.') && !text.includes('(Bounty Board)') && !text.includes('Mine.');},'Preview shows the resolved text',5000);
+});
