@@ -30,7 +30,17 @@
   // Result of /api/mount for this report: null while unknown (then the button stays usable),
   // {ok: false, message} for navigation pages and files outside a finding folder.
   let mount = null;
+  // True once /api/mount answered (or failed) for the current report. The shell never attaches
+  // before that, so a report outside a finding folder never gets an attach attempt and a late
+  // answer for an earlier report is ignored (loadMount checks the report key).
+  let mountKnown = false;
   const blocked = () => mount?.ok === false;
+  // Drawer tabs (registerTab): id -> {id, label, title, closable, connect, onClose, handle, el, status, meta}.
+  // The built-in shell tab is 'terminal' and is not in the map.
+  const tabs = new Map();
+  let activeTab = 'terminal', shellWanted = false;
+  // Code-block actions (registerBlockAction): id -> {id, order, decorate(bar, block)}.
+  const blockActions = new Map();
   // -- preferences (localStorage, per browser) ---------------------------------
   // {open, height, width, dock, copyOnSelect, ctrlCCopy, ctrlVPaste, shortcut}; dock is the
   // default position (Settings). The current position of this tab is in sessionStorage.
@@ -128,7 +138,7 @@
   // 'terminal' event: the xterm instance, once, when the first session attaches
   // (replayed to late subscribers).
   let termSent = null;
-  const listeners = {session: new Set(), message: new Set(), terminal: new Set()};
+  const listeners = {session: new Set(), message: new Set(), mount: new Set(), terminal: new Set()};
   function on(type, callback) { if (listeners[type] && typeof callback === 'function') { listeners[type].add(callback); if (type === 'terminal' && termSent) try { callback(termSent); } catch (error) { console.error('Terminal terminal listener failed:', error); } } return () => off(type, callback); }
   function off(type, callback) { listeners[type]?.delete(callback); }
   function emit(type, payload) {
@@ -235,25 +245,43 @@
 
   function ensureTerm() {
     if (term) return;
-    term = new window.Terminal({convertEol: false, cursorBlink: true, fontSize: 13, scrollback: 5000, theme: themeColors(),
+    const made = makeTerm(drawer.querySelector('[data-term-screen]'), {
+      onData: data => send({t: 'in', d: data}),
+      onResize: (cols, rows) => send({t: 'resize', cols, rows}),
+      note: text => note(text),
+    });
+    term = made.term; fit = made.fit;
+    refit();
+  }
+
+  // One xterm with every drawer rule: the key handler (toggle keys, Ctrl+C copy,
+  // paste keys), copy on select, the paste guard on every insertion route, refit
+  // on resize and theme changes. The shell tab and every registered tab use it,
+  // so the typing filter has exactly one implementation (unsafeText).
+  function makeTerm(screenEl, {onData, onResize, note: noteFn} = {}) {
+    const t = new window.Terminal({convertEol: false, cursorBlink: true, fontSize: 13, scrollback: 5000, theme: themeColors(),
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace'});
-    fit = new window.FitAddon.FitAddon();
-    term.loadAddon(fit);
-    const screenEl = drawer.querySelector('[data-term-screen]');
-    term.open(screenEl);
-    term.attachCustomKeyEventHandler(onTermKey);
-    term.onData(data => send({t: 'in', d: data}));
-    term.onResize(({cols, rows}) => send({t: 'resize', cols, rows}));
+    const f = new window.FitAddon.FitAddon();
+    t.loadAddon(f);
+    t.open(screenEl);
+    const say = text => { try { noteFn?.(text); } catch {} };
+    // Every listener below goes away with this terminal (review U3): one AbortController per
+    // terminal, aborted in dispose, so a tab re-created on reopen never stacks a second guard set.
+    const ac = new AbortController(), signal = ac.signal, capture = {capture: true, signal};
+    t.attachCustomKeyEventHandler(termKeyHandler(t));
+    if (onData) t.onData(onData);
+    if (onResize) t.onResize(({cols, rows}) => onResize(cols, rows));
     // Copy on select: when a mouse selection (drag, double or triple click) ends.
     let selecting = false;
-    screenEl.addEventListener('mousedown', event => { if (event.button === 0) selecting = true; });
-    document.addEventListener('mouseup', event => {
+    screenEl.addEventListener('mousedown', event => { if (event.button === 0) selecting = true; }, {signal});
+    const onUp = event => {
       if (!selecting || event.button !== 0) return;
       selecting = false;
       // xterm settles the selection in its own mouseup handler; the click's
       // user activation still allows the clipboard write a moment later.
-      setTimeout(() => { if (prefs.copyOnSelect && term.hasSelection()) copySelection(false); }, 0);
-    });
+      setTimeout(() => { if (prefs.copyOnSelect && t.hasSelection()) copySelection(t, false); }, 0);
+    };
+    document.addEventListener('mouseup', onUp, {signal});
     // Paste guard: every paste (keys, context menu, middle click) reaches
     // xterm's own listeners below this element, so a capture listener here sees
     // it first and stops unsafe text before xterm can send it.
@@ -261,8 +289,8 @@
       if (!unsafePaste(event.clipboardData?.getData('text/plain') ?? '')) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      note(PASTE_REFUSED);
-    }, true);
+      say(PASTE_REFUSED);
+    }, capture);
     // Text can also arrive as input events (phone keyboards' clipboard chips,
     // IME commits, drops), which xterm sends as they are, without bracketed
     // paste. Multi-character insertions that fail the filter or contain a
@@ -275,42 +303,51 @@
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.type === 'input' && event.target?.value != null) event.target.value = '';
-      note(unsafePaste(text) ? PASTE_REFUSED : MULTILINE_REFUSED);
+      say(unsafePaste(text) ? PASTE_REFUSED : MULTILINE_REFUSED);
     };
-    screenEl.addEventListener('beforeinput', guardInput, true);
-    screenEl.addEventListener('input', guardInput, true);
+    screenEl.addEventListener('beforeinput', guardInput, capture);
+    screenEl.addEventListener('input', guardInput, capture);
     // xterm also reads its textarea directly: on compositionend (IME and phone
     // keyboards commit text this way) and a moment after keyCode 229 keydowns.
     // Empty the textarea before that read whenever it would deliver unsafe or
     // multi-line text; xterm still gets the event, so its composition state resets.
     const scrubArea = event => {
-      const area = term.textarea;
-      const bad = [event.data ?? '', area?.value ?? ''].find(t => unsafePaste(t) || /[\r\n]/.test(t));
+      const area = t.textarea;
+      const bad = [event.data ?? '', area?.value ?? ''].find(x => unsafePaste(x) || /[\r\n]/.test(x));
       if (bad === undefined) return;
       if (area) area.value = '';
-      note(unsafePaste(bad) ? PASTE_REFUSED : MULTILINE_REFUSED);
+      say(unsafePaste(bad) ? PASTE_REFUSED : MULTILINE_REFUSED);
     };
-    screenEl.addEventListener('compositionend', scrubArea, true);
-    screenEl.addEventListener('input', scrubArea, true);
-    new ResizeObserver(() => refit()).observe(screenEl);
-    new MutationObserver(() => { if (term) term.options.theme = themeColors(); }).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
-    refit();
+    screenEl.addEventListener('compositionend', scrubArea, capture);
+    screenEl.addEventListener('input', scrubArea, capture);
+    // Fit only while visible: a hidden tab keeps its size until it shows again.
+    const refitThis = () => { if (screenEl.isConnected && screenEl.offsetParent !== null && drawer && !drawer.hidden) { try { f.fit(); } catch {} } };
+    const resizeObserver = new ResizeObserver(() => refitThis());
+    resizeObserver.observe(screenEl);
+    const themeObserver = new MutationObserver(() => { t.options.theme = themeColors(); });
+    themeObserver.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
+    const dispose = () => {
+      ac.abort();
+      resizeObserver.disconnect(); themeObserver.disconnect();
+      try { t.dispose(); } catch {}
+    };
+    return {term: t, fit: f, refit: refitThis, dispose};
   }
 
   // xterm key handler: false means xterm ignores the key (nothing is sent).
-  function onTermKey(event) {
+  const termKeyHandler = t => event => {
     if (isToggleKey(event)) return false;
     if (event.type !== 'keydown') return true;
     const ctrl = event.ctrlKey && !event.altKey && !event.metaKey;
     const code = eventCode(event);
-    if (ctrl && code === 'KeyC' && (event.shiftKey || prefs.ctrlCCopy) && term.hasSelection()) {
+    if (ctrl && code === 'KeyC' && (event.shiftKey || prefs.ctrlCCopy) && t.hasSelection()) {
       event.preventDefault();
-      copySelection(true);
+      copySelection(t, true);
       return false;
     }
     if (ctrl && event.shiftKey && code === 'KeyC') return false;   // Ctrl+Shift+C never sends ^C
     if (ctrl && !event.shiftKey && event.key === 'Insert') {
-      if (term.hasSelection()) { event.preventDefault(); copySelection(false); }
+      if (t.hasSelection()) { event.preventDefault(); copySelection(t, false); }
       return false;
     }
     // Paste keys: let the browser fire its native paste event, which the paste
@@ -318,7 +355,7 @@
     if (ctrl && code === 'KeyV' && (event.shiftKey || prefs.ctrlVPaste)) return false;
     if (event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && event.key === 'Insert') return false;
     return true;
-  }
+  };
 
   // -- clipboard ---------------------------------------------------------------
   let flashTimer = null;
@@ -329,10 +366,10 @@
     clearTimeout(flashTimer);
     flashTimer = setTimeout(() => { el.hidden = true; }, 1600);
   }
-  function copySelection(clear) {
-    const text = term?.getSelection() || '';
+  function copySelection(t, clear) {
+    const text = t?.getSelection() || '';
     if (!text) return;
-    if (clear) term.clearSelection();
+    if (clear) t.clearSelection();
     copyText(text).then(ok => flash(ok ? 'Copied' : 'Copy blocked by the browser', ok ? 'ok' : 'warn'));
   }
   async function copyText(text) {
@@ -354,7 +391,11 @@
     previous?.focus?.({preventScroll: true});
     return ok;
   }
-  function refit() { if (fit && drawer && !drawer.hidden) { try { fit.fit(); } catch {} } }
+  function refit() {
+    if (!drawer || drawer.hidden) return;
+    if (activeTab === 'terminal') { if (fit) { try { fit.fit(); } catch {} } }
+    else tabs.get(activeTab)?.handle?.refit?.();
+  }
   function send(message) { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(message)); return true; } return false; }
 
   function disconnect() {
@@ -364,7 +405,12 @@
 
   async function connect() {
     clearTimeout(connectTimer); connectTimer = null;
-    if (!sel || !prefs.open || !drawer || drawer.hidden) return;
+    if (!sel || !prefs.open || !drawer || drawer.hidden || blocked()) return;
+    if (!mountKnown) { if (activeTab === 'terminal') setStatus('connecting'); return; }   // loadMount calls connect() again
+    // The shell attaches once its tab is shown (a drawer opened on an Agent or
+    // connect tab does not start a shell viewer until Terminal is picked).
+    if (activeTab === 'terminal') shellWanted = true;
+    if (!shellWanted) return;
     const key = selKey;
     if (ws && wsKey === key && ws.readyState <= 1) return;
     disconnect();
@@ -423,7 +469,15 @@
   const LABELS = {idle: 'Not connected', connecting: 'Connecting', connected: 'Connected', reconnecting: 'Reconnecting',
     signin: 'Sign-in needed', unavailable: 'Service unavailable', error: 'Error'};
   function setStatus(next) { status = next; paint(); }
-  function note(text) { const el = drawer?.querySelector('[data-term-note]'); if (el) { el.textContent = text || ''; el.hidden = !text; } }
+  // The note line shows the active tab's note; each tab keeps its own.
+  const notes = {terminal: ''};
+  function note(text) { setNote('terminal', text); }
+  function setNote(id, text) {
+    notes[id] = text || '';
+    if (id !== activeTab) return;
+    const el = drawer?.querySelector('[data-term-note]');
+    if (el) { el.textContent = notes[id]; el.hidden = !notes[id]; }
+  }
   const span = s => (s % 3600 === 0 ? `${s / 3600} ${s === 3600 ? 'hour' : 'hours'}` : s % 60 === 0 ? `${s / 60} min` : `${s} s`);
   const minutes = s => (s < 60 ? 'under a minute' : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`);
 
@@ -465,8 +519,9 @@
           </span>
         </div>
       </div>
+      <div class="term-tabs" data-term-tabs role="tablist" aria-label="Terminal sessions" hidden></div>
       <div class="term-note hint" data-term-note role="status" hidden></div>
-      <div class="term-body">
+      <div class="term-body" data-term-body>
         <div class="term-screen" data-term-screen></div>
         <div class="term-signin" data-term-signin hidden><p>Sign in to use the terminal. Your tailnet account is not on the terminal allowlist.</p><a class="button primary" data-term-login href="#">Sign in</a></div>
         <div class="term-signin" data-term-down hidden><p>The terminal service is not running or not reachable. The Board keeps working; try again later.</p><button type="button" class="button" data-term-retry>Try again</button></div>
@@ -475,6 +530,8 @@
     const slotHost = drawer.querySelector('[data-term-slots]');
     slots.forEach(el => slotHost.appendChild(el));
     drawer.addEventListener('click', onDrawerClick);
+    drawer.querySelector('[data-term-tabs]').addEventListener('keydown', onTabKey);
+    paintTabs();
     bindDrag(drawer.querySelector('[data-term-head]'));
     const handle = drawer.querySelector('[data-term-resize]');
     handle.addEventListener('pointerdown', event => {
@@ -695,16 +752,19 @@
     if (!drawer) buildDrawer();
     drawer.hidden = !visible;
     layout();
-    if (visible) { paint(); refreshSummary(); connect(); refit(); }
-    else { disconnect(); emitClosed(); }
+    if (visible) { paint(); refreshSummary(); connect(); attachActiveTab(); refit(); }
+    else { disconnect(); detachTabs(); shellWanted = false; emitClosed(); }
     document.querySelectorAll('[data-term-toggle]').forEach(b => b.setAttribute('aria-expanded', String(visible)));
   }
   // Opening focuses the terminal; closing returns focus to where it was before
   // opening (if that element still exists), else to the report editor.
   let returnFocus = null, wantFocus = false;
-  function toggle(force) {
-    if (!sel || (blocked() && force !== false)) return;
+  // allowBlocked: a registered tab (agent connect) may open the drawer for a report
+  // outside a finding folder; the shell itself never attaches there.
+  function toggle(force, allowBlocked) {
+    if (!sel) return;
     const next = force === undefined ? !prefs.open : force;
+    if (next && blocked() && !allowBlocked) return;
     if (next && !prefs.open) {
       const active = document.activeElement;
       returnFocus = active && active !== document.body && !drawer?.contains(active) ? active : null;
@@ -713,7 +773,7 @@
     prefs.open = next;
     savePrefs();
     showDrawer(prefs.open);
-    if (prefs.open) { if (term) term.focus(); else wantFocus = true; }
+    if (prefs.open) focusActive();
     if (closing) restoreFocus();
   }
   function restoreFocus() {
@@ -744,26 +804,41 @@
 
   function paint() {
     if (!drawer) return;
+    const shell = activeTab === 'terminal', tab = shell ? null : tabs.get(activeTab);
     const pill = drawer.querySelector('[data-term-status]');
-    pill.textContent = LABELS[status] || status; pill.dataset.state = status;
-    // Lifecycle timing only matters once nobody is watching, so it stays in a tooltip.
-    pill.title = info?.pause_after ? `Pauses ${span(info.pause_after)} after the last viewer leaves and is removed after ${span(info.remove_after)}. Files in the report folder are kept.` : '';
+    drawer.querySelector('.term-title-text').textContent = tab?.heading || 'Sandbox';
+    if (shell) {
+      pill.textContent = LABELS[status] || status; pill.dataset.state = status;
+      // Lifecycle timing only matters once nobody is watching, so it stays in a tooltip.
+      pill.title = info?.pause_after ? `Pauses ${span(info.pause_after)} after the last viewer leaves and is removed after ${span(info.remove_after)}. Files in the report folder are kept.` : '';
+    } else {
+      pill.textContent = tab.status.label; pill.dataset.state = tab.status.state; pill.title = tab.status.title || '';
+    }
     const meta = [];
-    if (info && status === 'connected') {
+    if (!shell) { if (tab.meta) meta.push(tab.meta); }
+    else if (info && status === 'connected') {
       meta.push(`Session ${minutes(Math.max(0, Date.now() / 1000 - info.created))}`);
       if (info.viewers > 1) meta.push(`${info.viewers} viewers`);
       if (info.folder) meta.push(`Folder ${info.folder}`);
     }
     drawer.querySelector('[data-term-meta]').textContent = meta.join(' · ');
+    const stepsEl = drawer.querySelector('[data-term-steps]');
+    stepsEl.hidden = !shell;
     const sub = drawer.querySelector('[data-term-sub]');
-    sub.title = [meta.join(' · '), drawer.querySelector('[data-term-steps]').textContent].filter(Boolean).join(' · ');
-    drawer.querySelector('[data-term-signin]').hidden = status !== 'signin';
-    drawer.querySelector('[data-term-down]').hidden = status !== 'unavailable';
-    drawer.querySelector('[data-term-screen]').hidden = status === 'signin' || status === 'unavailable';
+    sub.title = [meta.join(' · '), shell ? stepsEl.textContent : ''].filter(Boolean).join(' · ');
+    drawer.querySelector('[data-term-signin]').hidden = !shell || status !== 'signin';
+    drawer.querySelector('[data-term-down]').hidden = !shell || status !== 'unavailable';
+    drawer.querySelector('[data-term-screen]').hidden = !shell || status === 'signin' || status === 'unavailable';
     const login = drawer.querySelector('[data-term-login]');
     login.href = `${base || '/terminal/'}login?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
-    drawer.querySelector('[data-term-reset]').disabled = status !== 'connected';
-    drawer.querySelector('[data-term-evidence]').disabled = status !== 'connected';
+    // Reset and Save act on the shell, so they show only on its tab.
+    for (const name of ['reset', 'evidence']) {
+      const button = drawer.querySelector(`[data-term-${name}]`);
+      button.hidden = !shell;
+      button.disabled = status !== 'connected';
+    }
+    const noteEl = drawer.querySelector('[data-term-note]');
+    noteEl.textContent = notes[activeTab] || ''; noteEl.hidden = !notes[activeTab];
   }
 
   // The armed reset shows its label even where the buttons are icon-only.
@@ -775,7 +850,13 @@
   async function onDrawerClick(event) {
     const target = event.target.closest('button,a');
     if (!target) return;
-    if (target.matches('[data-term-close]')) toggle(false);
+    if (target.matches('[data-term-tab-select]')) { selectTab(target.dataset.termTabSelect); focusActive(); }
+    else if (target.matches('[data-term-tab-close]')) {
+      const tab = tabs.get(target.dataset.termTabClose);
+      removeTab(target.dataset.termTabClose);
+      try { tab?.onClose?.(); } catch (error) { console.error('Terminal tab onClose failed:', error); }
+    }
+    else if (target.matches('[data-term-close]')) toggle(false);
     else if (target.matches('[data-dock]')) setDock(target.dataset.dock);
     else if (target.matches('[data-dock-max]')) setMaximized(!maxPref());
     else if (target.matches('[data-term-retry]')) { retry = 0; connect(); }
@@ -802,11 +883,195 @@
     }
   }
 
+  // -- drawer tabs (window.BoardTerminal.registerTab) -------------------------------
+  // The drawer owns the tab strip; other modules register tabs for this report:
+  //   registerTab({id, label, title?, heading?, closable?, onClose?, connect(container, api)})
+  // heading replaces the drawer title ("Sandbox") while the tab shows.
+  // connect runs when the tab is first shown while the drawer is open and returns
+  // {dispose(), focus?(), refit?()}. api: {createTerm({onData, onResize}) -> {term, fit,
+  // refit, dispose} (the same key handler, copy, paste guard and theme as the shell),
+  // setStatus(state, label, title?), note(text), setMeta(text), flash(text, tone)}.
+  // Switching tabs keeps the others attached (hidden). Closing the drawer detaches
+  // every tab (dispose); opening it again reconnects the active one. A report change
+  // removes all registered tabs. The strip shows only while a tab is registered.
+  const TAB_ID = /^[a-z][a-z0-9-]{0,47}$/;
+  function registerTab(spec) {
+    if (!spec || !TAB_ID.test(String(spec.id)) || spec.id === 'terminal' || typeof spec.connect !== 'function') throw new Error('BoardTerminal.registerTab needs {id, label, connect}');
+    if (tabs.has(spec.id)) removeTab(spec.id);
+    const tab = {id: spec.id, label: String(spec.label || spec.id), title: spec.title ? String(spec.title) : '', heading: spec.heading ? String(spec.heading) : '', closable: !!spec.closable,
+      connect: spec.connect, onClose: typeof spec.onClose === 'function' ? spec.onClose : null, handle: null, el: null,
+      status: {state: 'idle', label: 'Not connected', title: ''}, meta: ''};
+    tabs.set(tab.id, tab);
+    notes[tab.id] = '';
+    paintTabs();
+    return () => removeTab(tab.id);
+  }
+  function updateTab(id, changes = {}) {
+    const tab = tabs.get(id);
+    if (!tab) return;
+    if (changes.label != null) tab.label = String(changes.label);
+    if (changes.title != null) tab.title = String(changes.title);
+    paintTabs();
+  }
+  function removeTab(id) {
+    const tab = tabs.get(id);
+    if (!tab) return;
+    detachTab(tab);
+    tab.el?.remove();
+    tabs.delete(id);
+    delete notes[id];
+    if (activeTab !== id) { paintTabs(); return; }
+    // Outside a finding folder there is no shell: show another tab, or close the drawer.
+    const next = blocked() ? [...tabs.keys()][0] : 'terminal';
+    if (next) selectTab(next);
+    else { activeTab = 'terminal'; paintTabs(); toggle(false); }
+  }
+  function clearTabs() {
+    for (const id of [...tabs.keys()]) { const tab = tabs.get(id); detachTab(tab); tab.el?.remove(); tabs.delete(id); delete notes[id]; }
+    activeTab = 'terminal';
+    paintTabs();
+  }
+  function detachTab(tab) {
+    const handle = tab.handle;
+    tab.handle = null;
+    if (handle) { try { handle.dispose?.(); } catch (error) { console.error('Terminal tab dispose failed:', error); } }
+    if (tab.el) tab.el.replaceChildren();
+    tab.status = {state: 'idle', label: 'Not connected', title: ''};
+  }
+  function detachTabs() { tabs.forEach(detachTab); }
+  function tabApi(tab) {
+    const live = () => tabs.get(tab.id) === tab;
+    return {
+      createTerm: (options = {}) => makeTerm(tab.el, {...options, note: text => setNote(tab.id, text)}),
+      setStatus(state, label, title) { if (!live()) return; tab.status = {state: String(state), label: String(label ?? state), title: title ? String(title) : ''}; paintTabs(); if (activeTab === tab.id) paint(); },
+      note(text) { if (live()) setNote(tab.id, text); },
+      setMeta(text) { if (!live()) return; tab.meta = text ? String(text) : ''; if (activeTab === tab.id) paint(); },
+      flash,
+    };
+  }
+  function attachActiveTab() {
+    const tab = tabs.get(activeTab);
+    if (!tab || !drawer || drawer.hidden || tab.handle) return;
+    if (!tab.el) {
+      tab.el = document.createElement('div');
+      tab.el.className = 'term-screen term-tab-screen';
+      tab.el.dataset.termTabScreen = tab.id;
+      drawer.querySelector('[data-term-body]').appendChild(tab.el);
+    }
+    tab.el.hidden = false;
+    // xterm loads on first use; until then the tab holds a placeholder handle.
+    const pending = {pending: true};
+    tab.handle = pending;
+    tabApi(tab).setStatus('connecting', 'Connecting');
+    loadXterm().then(() => {
+      if (tabs.get(tab.id) !== tab || tab.handle !== pending || !drawer || drawer.hidden) return;
+      try { tab.handle = tab.connect(tab.el, tabApi(tab)) || {}; }
+      catch (error) { console.error('Terminal tab failed:', error); setNote(tab.id, 'This tab could not start.'); tab.handle = {}; }
+      if (activeTab === tab.id) focusActive();
+    }, () => {
+      if (tab.handle === pending) { tab.handle = null; tabApi(tab).setStatus('error', 'Error'); setNote(tab.id, 'The terminal library could not be loaded.'); }
+    });
+  }
+  function selectTab(id) {
+    if (id !== 'terminal' && !tabs.has(id)) return false;
+    if (id === 'terminal' && blocked()) return false;   // no shell outside a finding folder (review U2)
+    activeTab = id;
+    for (const tab of tabs.values()) if (tab.el) tab.el.hidden = tab.id !== id;
+    if (id === 'terminal') connect(); else attachActiveTab();
+    paintTabs(); paint();
+    requestAnimationFrame(refit);
+    return true;
+  }
+  // Opens the drawer (if the report has a terminal) on that tab and focuses it.
+  function openTab(id) {
+    if (!sel || (id === 'terminal' ? blocked() : !tabs.has(id))) return false;
+    if (!drawer || drawer.hidden || !prefs.open) {
+      activeTab = id;   // showDrawer attaches the active tab
+      toggle(true, id !== 'terminal');
+    }
+    selectTab(id);
+    focusActive();
+    return true;
+  }
+  function focusActive() {
+    if (activeTab === 'terminal') { if (term) term.focus(); else wantFocus = true; return; }
+    const handle = tabs.get(activeTab)?.handle;
+    if (handle?.focus) requestAnimationFrame(() => handle.focus());
+  }
+  function paintTabs() {
+    const strip = drawer?.querySelector('[data-term-tabs]');
+    if (!strip) return;
+    strip.hidden = !tabs.size;
+    drawer.classList.toggle('has-tabs', !!tabs.size);
+    const entries = [{id: 'terminal', label: 'Terminal', title: 'Sandbox shell', closable: false, status: null}, ...tabs.values()];
+    strip.replaceChildren(...entries.map(tab => {
+      const wrap = document.createElement('span');
+      wrap.className = 'term-tab';
+      wrap.dataset.termTab = tab.id;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'term-tab-btn';
+      button.setAttribute('role', 'tab');
+      button.setAttribute('aria-selected', String(tab.id === activeTab));
+      button.tabIndex = tab.id === activeTab ? 0 : -1;
+      button.dataset.termTabSelect = tab.id;
+      if (tab.title) button.title = tab.title;
+      if (tab.id === 'terminal' && blocked()) { button.disabled = true; button.title = mount.message; }
+      if (tab.status && tab.status.state !== 'idle') {
+        const dot = document.createElement('span');
+        dot.className = 'term-tab-dot';
+        dot.dataset.state = tab.status.state;
+        dot.setAttribute('aria-hidden', 'true');
+        button.appendChild(dot);
+      }
+      const label = document.createElement('span');
+      label.className = 'term-tab-label';
+      label.textContent = tab.label;
+      button.appendChild(label);
+      wrap.appendChild(button);
+      if (tab.closable) {
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'term-tab-close';
+        close.dataset.termTabClose = tab.id;
+        close.setAttribute('aria-label', `Close ${tab.label}`);
+        close.title = `Close ${tab.label}`;
+        close.innerHTML = '<i class="fa fa-times" aria-hidden="true"></i>';
+        wrap.appendChild(close);
+      }
+      return wrap;
+    }));
+  }
+  function onTabKey(event) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !event.target.matches('[data-term-tab-select]')) return;
+    const ids = [...(blocked() ? [] : ['terminal']), ...tabs.keys()], i = Math.max(0, ids.indexOf(activeTab));
+    if (!ids.length) return;
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? ids.length - 1 : (i + (event.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length;
+    event.preventDefault();
+    selectTab(ids[next]);
+    drawer.querySelector(`[data-term-tab-select="${ids[next]}"]`)?.focus();
+  }
+
+  // -- code-block actions (window.BoardTerminal.registerBlockAction) ------------------
+  // registerBlockAction({id, order?, decorate(bar, block)}): decorate runs on every
+  // pass over the preview, for every block bar ([data-term-controls]), and must be
+  // idempotent (find its own element in bar before adding one). block = {text, lang,
+  // index (0-based position in the preview), unsafe (fails unsafeText), unsafeMessage,
+  // blocked (no finding folder), blockedMessage}. Anything put inside the bar stays
+  // Board-only: user-select none, and the preview copy handler strips the whole bar.
+  function registerBlockAction(spec) {
+    if (!spec || !TAB_ID.test(String(spec.id)) || typeof spec.decorate !== 'function') throw new Error('BoardTerminal.registerBlockAction needs {id, decorate}');
+    blockActions.set(spec.id, {order: 100, ...spec});
+    schedule();
+    return () => { blockActions.delete(spec.id); document.querySelectorAll(`[data-term-action="${spec.id}"]`).forEach(el => el.remove()); };
+  }
+
   // -- play buttons and check marks ------------------------------------------
   function typeText(text, run) {
     if (blocked() || unsafeText(text)) return;  // never send control characters, whatever the caller
     text = text.replace(/\n+$/, '');            // typing alone never presses Enter
     if (!prefs.open) toggle(true);
+    if (activeTab !== 'terminal') selectTab('terminal');
     const action = () => {
       // Without bracketed paste a multi-line block would run line by line; only Run may do that.
       if (!run && text.includes('\n') && !term.modes?.bracketedPasteMode) { note('This shell does not accept multi-line typing safely. Use Run, or type the lines one by one.'); return; }
@@ -860,6 +1125,10 @@
         box.checked = !!checks[keys[i]];
         box.disabled = !checksOk;
         box.title = checksOk ? '' : 'Check marks are unavailable while the terminal service is unreachable.';
+        const block = {text: texts[i], lang, index: i, unsafe, unsafeMessage: UNSAFE_MESSAGE, blocked: blocked(), blockedMessage: blocked() ? mount.message : ''};
+        for (const action of [...blockActions.values()].sort((a, b) => a.order - b.order)) {
+          try { action.decorate(bar, block); } catch (error) { console.error(`Block action ${action.id} failed:`, error); }
+        }
       });
     }
     refreshSummary();
@@ -936,7 +1205,7 @@
     if (!base || !isToggleKey(event) || event.target?.closest?.('[data-shortcut-recorder]')) return;
     event.preventDefault();
     event.stopPropagation();
-    if (!event.repeat && sel && !blocked()) toggle();
+    if (!event.repeat && sel && (!blocked() || (drawer && !drawer.hidden))) toggle();
   }, true);
   window.addEventListener('focus', () => { if (sel) loadChecks(); });
 
@@ -974,7 +1243,7 @@
       button.title = message || `Sandbox terminal (${shortcutText()})`;
     });
     document.querySelectorAll('[data-term-reason]').forEach(el => { el.textContent = message; el.hidden = !message; });
-    if (message && drawer && !drawer.hidden) showDrawer(false);
+    if (message && drawer && !drawer.hidden && activeTab === 'terminal') showDrawer(false);
     else if (!message && prefs.open && drawer?.hidden && sel) showDrawer(true);
   }
   async function loadMount() {
@@ -983,8 +1252,11 @@
     try { result = await api(`api/mount?${query(sel)}`); } catch { result = null; }
     if (key !== selKey) return;
     mount = result;
+    mountKnown = true;
     applyMount();
+    if (!blocked() && drawer && !drawer.hidden) connect();
     schedule();
+    emit('mount', mount ? {...mount} : null);
   }
 
   window.registerBoardModule?.({
@@ -996,15 +1268,15 @@
       const next = base && host?.dataset.path ? {family: host.dataset.family, program: host.dataset.program, lane: host.dataset.lane, path: host.dataset.path} : null;
       if (!next) {
         document.querySelectorAll('[data-term-toggle],[data-term-reason],[data-term-controls]').forEach(el => el.remove());
-        if (sel) { sel = null; selKey = ''; clearInterval(pollTimer); pollTimer = null; if (drawer) { drawer.hidden = true; disconnect(); layout(); } emitClosed(); }
+        if (sel) { sel = null; selKey = ''; clearInterval(pollTimer); pollTimer = null; clearTabs(); shellWanted = false; if (drawer) { drawer.hidden = true; disconnect(); layout(); } emitClosed(); }
         return;
       }
       placeToggle(host);
       if (!observer) { observer = new MutationObserver(schedule); observer.observe(context.app, {childList: true, subtree: true, attributes: true, attributeFilter: ['class']}); }
       const key = keyOf(next);
       if (key !== selKey) {
-        sel = next; selKey = key; checks = {}; checksOk = false; info = null; pending = []; mount = null;
-        disconnect(); emitClosed(); retry = 0;
+        sel = next; selKey = key; checks = {}; checksOk = false; info = null; pending = []; mount = null; mountKnown = false; status = 'idle';
+        disconnect(); clearTabs(); shellWanted = false; emitClosed(); retry = 0;
         if (term) term.reset();
         loadChecks();
         loadMount();
@@ -1080,5 +1352,10 @@
   // browser tests and diagnostics only.
   window.BoardTerminal = {blockKeys, sha256hex, commandText, unsafeText, unsafePaste, shortcutProblem, shortcutLabel,
     get status() { return status; }, get checks() { return checks; }, get term() { return term; }, get prefs() { return {...prefs, shortcut: {...prefs.shortcut}}; }, get dock() { return {current: currentDock(), maximized: isMaximized(), moved: !!current}; },
-    slot, on, off, selector: () => (sel ? {...sel} : null), session: () => (sel && info && drawer && !drawer.hidden ? info : null)};
+    slot, on, off, selector: () => (sel ? {...sel} : null), session: () => (sel && info && drawer && !drawer.hidden ? info : null),
+    // Report agent seams (docs/integrations/report-agent-ui.md): drawer tabs, code-block
+    // actions and the /api/mount answer ('mount' event too).
+    registerTab, updateTab, removeTab, openTab, registerBlockAction, refreshBlocks: () => schedule(),
+    activeTab: () => activeTab, tabs: () => [...tabs.keys()], mount: () => (mount ? {...mount} : null),
+    get open() { return !!drawer && !drawer.hidden; }};
 })();

@@ -84,6 +84,7 @@ SCAN_MAX_AGE = 1.0        # a bind reuses a host-listener scan at most this old 
 DEFAULT_RANGE = (9100, 9199)
 DEFAULT_SAME = '1024-8999,10000-65535'  # Tailscale Serve uses 9000, 9001, 9502-9511 on that address
 PROXY_PORT = 3128
+MODEL_RELAY_PORT = 3129  # report agent's model relay listener in the sandbox: never a preview
 NEVER_SAME = frozenset({3128, 3129})    # the sandbox proxy and the model relay
 LOCAL_HOST = '127.0.0.1'
 CGNAT = ipaddress.ip_network('100.64.0.0/10')
@@ -673,7 +674,7 @@ class SessionPorts:
             raise _Bad('bad ports')
         if any(type(p) is not int or not 1 <= p <= 65535 for p in ports) or len(set(ports)) != len(ports):
             raise _Bad('bad ports')
-        return [p for p in ports if p != PROXY_PORT]
+        return [p for p in ports if p not in (PROXY_PORT, MODEL_RELAY_PORT)]
 
     def _update(self, ctl, reported):
         with self.hub.lock:

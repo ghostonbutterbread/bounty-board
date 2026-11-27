@@ -409,6 +409,16 @@ class ForwardTests(HubCase):
         self.assertNotIn(3128, [i['port'] for i in items])
         self.assertEqual([i['port'] for i in items], sorted(ports[1:])[:tp.MAX_PORTS])
 
+    def test_model_relay_port_never_forwarded(self):
+        # 3129 is the report agent's model relay inside the sandbox; the host refuses it like 3128,
+        # whatever the (untrusted) in-container agent reports.
+        agent = Agent(self.sock_path)
+        server = self.server()
+        agent.ports([3129, server.port])
+        items = self.wait_items(1)
+        self.assertEqual([i['port'] for i in items], [server.port])
+        self.assertEqual(tp.SessionPorts._valid_ports([3129, 3128, 8000]), [8000])
+
 
 def connectable_unix(path):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

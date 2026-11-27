@@ -85,6 +85,7 @@ window.BoardTerminal.on('terminal', term => {});  // the xterm instance (replaye
 - `terminal` fires once with the xterm instance when the first session attaches, and immediately for a listener added later. Modules may add xterm link providers or decorations; nothing may type into the terminal except through this file's paste/type filter.
 - `on` returns an unsubscribe function; a throwing listener is logged and does not affect others.
 - The other `BoardTerminal` members (`term`, `status`, `checks`, `prefs`, `unsafeText`, `unsafePaste`, `shortcutProblem`, ...) are for tests and diagnostics only.
+- Drawer tabs (`registerTab`, `openTab`, `updateTab`, `removeTab`), code-block actions (`registerBlockAction`, `refreshBlocks`) and `mount()` / the `mount` event were added for the report agent UI; see [`report-agent-ui.md`](report-agent-ui.md#seams-added-to-sandbox-terminaljs).
 
 ### Drag to dock
 

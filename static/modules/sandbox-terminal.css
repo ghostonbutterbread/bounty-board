@@ -126,3 +126,24 @@
 @supports (animation-timeline:scroll()){
   .workspace-nav{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - var(--term-tabs-fade)),transparent);mask-image:linear-gradient(to right,#000 calc(100% - var(--term-tabs-fade)),transparent);animation:term-tabs-fade linear both;animation-timeline:scroll(self inline)}
 }
+/* Drawer tabs (BoardTerminal.registerTab): shown only while a module registered a tab.
+   One line; labels ellipsize instead of wrapping, the strip scrolls when full. */
+.term-tabs{flex:none;display:flex;align-items:stretch;gap:2px;margin:0 var(--space-4) 6px;padding:2px;border-radius:var(--radius);background:var(--surface-3);overflow-x:auto;scrollbar-width:thin;-webkit-user-select:none;user-select:none}
+.term-tabs[hidden]{display:none}
+.term-tab{display:inline-flex;align-items:center;flex:0 1 auto;min-width:0;max-width:240px;border-radius:calc(var(--radius) - 2px)}
+.term-tab:has([aria-selected="true"]){background:var(--surface);box-shadow:var(--shadow-sm)}
+.term-tab-btn{display:inline-flex;align-items:center;gap:6px;min-width:0;padding:3px 10px;border:0;background:transparent;color:var(--text-2);font-size:var(--text-sm);font-weight:550;line-height:20px;white-space:nowrap;cursor:pointer}
+.term-tab-btn[aria-selected="true"]{color:var(--text)}
+.term-tab-btn:hover{color:var(--text)}
+.term-tab-label{overflow:hidden;text-overflow:ellipsis}
+.term-tab-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--text-3)}
+.term-tab-dot[data-state="working"],.term-tab-dot[data-state="starting"]{background:var(--info)}
+.term-tab-dot[data-state="waiting"]{background:var(--warning)}
+.term-tab-dot[data-state="connected"]{background:var(--success)}
+.term-tab-dot[data-state="error"]{background:var(--danger)}
+.term-tab-close{flex:none;display:inline-grid;place-items:center;width:20px;height:20px;margin-right:4px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--text-3);font-size:11px}
+.term-tab-close:hover{background:var(--surface-3);color:var(--text)}
+.term-pill[data-state="working"],.term-pill[data-state="starting"]{color:var(--info);background:var(--info-soft)}
+.term-pill[data-state="waiting"]{color:var(--warning);background:var(--warning-soft)}
+.term-pill[data-state="exited"]{color:var(--text-2);background:var(--surface-3)}
+@media (max-width:700px){.term-tabs{margin:0 var(--space-2) 6px}}
