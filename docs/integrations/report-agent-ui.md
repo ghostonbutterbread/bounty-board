@@ -136,7 +136,17 @@ Ghost's `~/.claude/skills`, read-only, scratch state under `TMPDIR` deleted afte
 
 No `bbterm-test-*` container remained.
 
-## Seams added to `sandbox-terminal.js`
+## Review round 3 (7e6c930..d160b07, ACCEPT; minors closed by Hermes)
+
+The narrow re-review confirmed V1 to V7 and found three minors.
+
+| Finding | Fix | Test | Red on d160b07 | Now |
+| --- | --- | --- | --- | --- |
+| W1: the token scan missed binary WebSocket frames (terminal output arrives base64 in CDP `payloadData`) | `tokenCapture` decodes opcode 2 frames before scanning; the popover test asserts the decoded `ECHO hello-agent` output frame is seen | reviewer repro `scan-binary-frames.test.cjs`; `report-agent.synthetic` popover test | repro fails | repro and test pass |
+| W2: `/tmp/bb-auth` deny proven for the exact path only | `test_07` adds a `/tmp/./bb-auth` Read (refused) and a Grep over all of `/tmp` (no credential reaches the model) | `test_terminal_agent_docker.test_07` (real Claude Code 2.1.331) | not covered | 8 OK; evidence "Read, ./ spelling and Grep of /tmp/bb-auth denied, /tmp-wide Grep returns no credential, Bash asks" |
+| W3: a 0600 file in a required skill is skipped with only a log line | Deploy check: skipped-file log lines must not name files in the four required skills; `chmod o+r` the file in its source repo if one shows | `report-agent.md` deploy checklist | n/a | documented |
+
+
 
 All on `window.BoardTerminal` (the drawer still owns everything; agent logic stays in `report-agent.js`):
 

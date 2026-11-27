@@ -419,8 +419,11 @@ class ReportAgentDockerTests(unittest.TestCase):
             self.exec('sh', '-c', f"umask 077; printf '%s' '{secret}' > /tmp/bb-auth", sel=sel)
             marker = packet / 'rv2-auth-marker'
             first = len(self.upstream.requests)
+            # Also a dot-segment spelling and a Grep over all of /tmp (review rv3 W2).
             self.upstream.script = [('Read', {'file_path': '/tmp/bb-auth'}),
                                     ('Grep', {'pattern': 'FAKE', 'path': '/tmp/bb-auth', 'output_mode': 'content'}),
+                                    ('Read', {'file_path': '/tmp/./bb-auth'}),
+                                    ('Grep', {'pattern': 'FAKE-BBAUTH', 'path': '/tmp', 'output_mode': 'content'}),
                                     ('Bash', {'command': 'touch /report/rv2-auth-marker', 'description': 'marker'})]
             self.start(sel=sel, task={'kind': 'ask', 'text': 'Do the scripted steps.'})
             session, viewer = self.viewer(sel)
@@ -433,10 +436,12 @@ class ReportAgentDockerTests(unittest.TestCase):
             self.assertNotIn(secret.encode(), sent, 'the credential reached the model')
             results = [block for r in self.upstream.requests[first:] for m in json.loads(r['body'] or b'{}').get('messages', [])
                        if isinstance(m.get('content'), list) for block in m['content'] if block.get('type') == 'tool_result']
-            self.assertGreaterEqual(len(results), 2, 'Read and Grep came back as tool results')
-            self.assertTrue(all(block.get('is_error') for block in results[:2]), f'Read/Grep of /tmp/bb-auth not refused: {results[:2]}')
+            self.assertGreaterEqual(len(results), 4, 'the two Reads and two Greps came back as tool results')
+            # Exact path and dot-segment Read, exact-path Grep: refused. The /tmp-wide Grep may succeed (other
+            # files) but must not return the credential; the upstream check above already proves that.
+            self.assertTrue(all(block.get('is_error') for block in results[:3]), f'Read/Grep of /tmp/bb-auth not refused: {results[:3]}')
             self.assertFalse(marker.exists())
-            evidence.append('Read and Grep of /tmp/bb-auth denied, Bash asks')
+            evidence.append('Read, ./ spelling and Grep of /tmp/bb-auth denied, /tmp-wide Grep returns no credential, Bash asks')
             session.agent.pty.detach(viewer)
             self.hub.stop(self.manager, {'selector': sel})
             # Review rv2 V7: one unstripped skill reaches the binary (test only: strip_frontmatter is the

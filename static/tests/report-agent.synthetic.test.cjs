@@ -80,7 +80,8 @@ async function oneLineHints(page){
 // request URLs, headers and bodies; response headers and bodies; console messages; page errors;
 // the DOM and every field value; local and session storage; the URL. `allowed` lists the request
 // bodies that may carry a token (the login POSTs), each exactly once.
-// WebSocket frames, sent and received, come from CDP (Network.webSocketFrameSent/Received, review rv2 V7).
+// WebSocket frames, sent and received, come from CDP (Network.webSocketFrameSent/Received, review rv2 V7);
+// binary frames are base64-decoded before the scan (review rv3 W1).
 async function tokenCapture(page){
   const cap={requests:[],responses:[],console:[],errors:[],pending:[],frames:[],unreadable:[]};
   page.on('request',r=>cap.requests.push({url:r.url(),body:r.postData()||'',headers:JSON.stringify(r.headers())}));
@@ -88,8 +89,11 @@ async function tokenCapture(page){
   const cdp=await page.context().newCDPSession(page);
   await cdp.send('Network.enable');
   cdp.on('Network.webSocketCreated',e=>cap.frames.push({dir:'created',data:e.url}));
-  cdp.on('Network.webSocketFrameSent',e=>cap.frames.push({dir:'sent',data:e.response.payloadData}));
-  cdp.on('Network.webSocketFrameReceived',e=>cap.frames.push({dir:'received',data:e.response.payloadData}));
+  // Binary frames (opcode 2: the terminal's output) arrive base64-encoded in payloadData; decode them so a
+  // token echoed in terminal output is seen (review rv3 W1). Text frames (opcode 1) are scanned as they are.
+  const frame=(dir,r)=>cap.frames.push({dir,opcode:r.opcode,data:r.opcode===2?Buffer.from(r.payloadData,'base64').toString('latin1'):r.payloadData});
+  cdp.on('Network.webSocketFrameSent',e=>frame('sent',e.response));
+  cdp.on('Network.webSocketFrameReceived',e=>frame('received',e.response));
   page.on('console',m=>cap.console.push(m.text()));
   page.on('pageerror',e=>cap.errors.push(String(e)));
   cap.scan=async(label,mark,allowed=[])=>{
@@ -427,6 +431,8 @@ test('popover start, Agent tab output and typing through the filter, status dot,
     // The token scan's WebSocket capture sees the terminal frames both ways (review rv2 V7).
     assert.ok(wsCap.frames.some(f=>f.dir==='sent'&&/"t":"in"/.test(f.data)),'sent frames captured');
     assert.ok(wsCap.frames.some(f=>f.dir==='received'),'received frames captured');
+    // Terminal output arrives as binary frames; the capture decodes them, so the echo is readable (review rv3 W1).
+    assert.ok(wsCap.frames.some(f=>f.dir==='received'&&f.opcode===2&&/ECHO hello-agent/.test(f.data)),'binary output frames decoded for the scan');
     // The paste guard applies: unsafe clipboard text is refused, nothing reaches the CLI.
     const refused=await page.evaluate(marker=>{
       const area=document.querySelector('[data-term-tab-screen="agent"] textarea');
