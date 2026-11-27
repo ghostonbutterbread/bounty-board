@@ -118,6 +118,28 @@ test('new acknowledgements never delete other-owner or uncertain records', {time
   assert.equal(await page.locator('#preferences-save-error').isVisible(),true);
 }));
 
+test('persistent preference conflict and Board toast are both actionable', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
+  for(const width of [1440,375]){
+    const context=await browser.newContext({viewport:{width,height:812}}), a=await context.newPage(), b=await context.newPage();
+    try {
+      await a.goto(base); await b.goto(base);
+      await chooseTheme(a,'Dark'); await waitSaved(a);
+      await chooseTheme(b,'Dusk');
+      const recover=b.getByRole('button',{name:/use my choice.*theme/i}); await recover.waitFor();
+      await b.evaluate(()=>{document.querySelector('#toasts').replaceChildren();window.BoardUI.toast('Important save warning','danger',{timeout:0});});
+      const toast=b.locator('.toast').filter({hasText:'Important save warning'});
+      const dismiss=toast.getByRole('button',{name:'Dismiss notification'}); await dismiss.waitFor();
+      const textVisible=await toast.locator('.toast-text').evaluate(el=>{const r=el.getBoundingClientRect(); const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return hit===el || el.contains(hit);});
+      assert.equal(textVisible,true,`toast text is not covered at ${width}px`);
+      const dismissVisible=await dismiss.evaluate(el=>{const r=el.getBoundingClientRect(); const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return hit===el || el.contains(hit);});
+      assert.equal(dismissVisible,true,`toast dismiss is not covered at ${width}px`);
+      await dismiss.click({timeout:3000});
+      assert.equal(await toast.count(),0);
+      assert.equal(await recover.isVisible(),true);
+    } finally {await context.close();}
+  }
+}));
+
 test('conflict action does not cover sidebar navigation', {timeout:60000}, () => withEmptyBoard(null,async({browser,base})=>{
   const context=await browser.newContext({viewport:{width:1440,height:900}}), a=await context.newPage(), b=await context.newPage();
   await a.goto(base); await b.goto(base);
