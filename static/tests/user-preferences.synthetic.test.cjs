@@ -67,6 +67,23 @@ test('failed older same-key edit does not overwrite a newer device', {timeout:60
   assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark','reload retains the unsent conflict');
 }));
 
+test('same-origin tabs retain their own failed same-key edit across reload', {timeout:60000}, () => withEmptyBoard(null,async({browser,base,config})=>{
+  const context=await browser.newContext(), a=await context.newPage(), b=await context.newPage();
+  await a.goto(base); await b.goto(base);
+  await a.route('**/api/user-preferences',r=>r.request().method()==='POST'?r.abort('failed'):r.continue());
+  await a.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dusk'));
+  await a.locator('#preferences-save-error').waitFor();
+  await b.evaluate(()=>window.BoardPreferences.set('bounty-board-theme','dark'));
+  await waitSaved(b);
+  assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark');
+  await a.unroute('**/api/user-preferences');
+  await a.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await a.waitForTimeout(1000);
+  await a.reload();
+  await a.locator('#preferences-save-error').waitFor({timeout:4000});
+  assert.equal(JSON.parse(fs.readFileSync(config))['bounty-board-theme'],'dark');
+}));
+
 test('failed bootstrap retries the read and hydrates before clearing alert', {timeout:60000}, () => withEmptyBoard({'bounty-board-theme':'dark'},async({browser,base})=>{
   const page=await browser.newPage();
   await page.route('**/api/user-preferences',r=>r.request().method()==='GET'?r.abort('failed'):r.continue());
